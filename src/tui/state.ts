@@ -11,6 +11,7 @@ import type { AgentEvent } from '../agent/events.js';
 import type { ApprovalRequest } from '../approval/policy.js';
 import type { SessionMessage } from '../session/types.js';
 import type { TodoItem } from '../runtime/todos.js';
+import { readVersion } from '../version.js';
 import type { EditorState } from './editor.js';
 import { emptyEditor } from './editor.js';
 import { summarizeToolCall } from './tool-view.js';
@@ -110,6 +111,8 @@ export interface ActiveTool {
 
 export interface TuiState {
   phase: Phase;
+  /** 标题栏右侧显示的版本号（来自 package.json，见 version.ts）。 */
+  version: string;
   editor: EditorState;
   history: string[];
   /** 历史回溯下标；-1 表示正在编辑新内容。 */
@@ -146,13 +149,40 @@ export interface TuiState {
    * 全屏模式放弃了终端原生滚动历史，回看改由主循环自己实现（滚轮 / PgUp / PgDn）。
    */
   scroll: number;
+  /**
+   * 应用内的鼠标选区。**存屏幕坐标**（0 基行 + 0 基显示列），不存内容坐标。
+   *
+   * 为什么是屏幕坐标：终端报上来的就是屏幕坐标，且本项目没有常驻单元格网格，
+   * 「屏幕行 → 逻辑行」的反查要额外维护。代价是内容一滚动选区就会错位，
+   * 因此选区只在「按住不放」期间存在，一滚动或一敲键就清掉——生命周期短到不会错位。
+   */
+  selection?: Selection;
   /** 鼠标滚轮是否启用。提示行据此决定要不要写「滚轮」——提示必须与真实按键一致。 */
   mouse: boolean;
   /** 运行中正在流式写入的 thinking 条目下标，供 thinking_end 回填正文。 */
   thinkingIndex?: number;
 }
 
+/** 屏幕上的一个位置：0 基行号与 0 基显示列。 */
+export interface Cell {
+  row: number;
+  col: number;
+}
+
+/**
+ * 应用内的鼠标选区。`anchor` 是按下的位置，`head` 是当前拖到的位置，两者可能反向。
+ *
+ * 之所以用「起点 + 终点」而不是「起点 + 尺寸」：拖拽方向可以是任意的，
+ * 用尺寸就要额外记方向；两个点则天然覆盖向上/向下/同行反向四种情形。
+ */
+export interface Selection {
+  anchor: Cell;
+  head: Cell;
+}
+
 export interface TuiInit {
+  /** 版本号；省略时由 state 自己从 package.json 读（测试与预览不必传）。 */
+  version?: string;
   model: string;
   api: string;
   effort?: string;
@@ -171,6 +201,7 @@ export interface TuiInit {
 export function createState(init: TuiInit): TuiState {
   return {
     phase: 'idle',
+    version: init.version ?? readVersion(),
     editor: emptyEditor(),
     history: [],
     historyIndex: -1,

@@ -24,11 +24,11 @@
  */
 
 import type { Styler } from './ansi.js';
-import { displayWidth, pad, truncate, wrap } from './ansi.js';
-import { scrollEditor } from './editor.js';
+import { displayWidth, INVERSE_BUBBLE_RESET, inverseRange, pad, truncate, visibleSlice, wrap } from './ansi.js';
+import { type EditorLine, layoutLines, lineIndexOf, offsetIn } from './editor.js';
 import { createHighlighter } from './highlight.js';
 import { renderMarkdown } from './markdown.js';
-import type { NoticeLevel, TranscriptEntry, TuiState } from './state.js';
+import type { NoticeLevel, Selection, TranscriptEntry, TuiState } from './state.js';
 import { cacheHitRate } from './state.js';
 import { formatDuration, renderToolDetail, summarizeToolCall, toolTone, type ToolCallView } from './tool-view.js';
 
@@ -232,103 +232,427 @@ function statusSegments(state: TuiState, styler: Styler, now: number): Segment[]
   if (state.jobs > 0) {
     segments.push({ text: `jobs ${state.jobs}`, paint: (v) => styler.yellow(v), priority: 2 });
   }
+
+  // 操作消息（命令反馈、错误）放在状态行**最右**，优先级压过一切普通格：它是刚刚发生的
+  // 事，用户此刻正等着看它，被挤掉就等于命令没反馈。它不替代状态行，只是搭一段车。
+  // 目前它由 app 在几秒后自动清掉；没清的时候也一直可见。
+  if (state.notice) {
+    segments.push({
+      text: `${noticeMark(state.notice.level)} ${state.notice.text}`,
+      paint: noticePaint(state.notice.level, styler),
+      priority: PINNED + 1,
+    });
+  }
   return segments;
+}
+
+// ---------------------------------------------------------------- 垂直布局规格
+
+/**
+ * 垂直布局：屏幕按「行」切成四个固定区域，自上而下依次是
+ *
+ *   ┌── 行 0 .. H-1 ─────────────────────────────────────────────┐
+ *   │ 区域 1  标题栏    固定 1 行   永不压缩                      │
+ *   │ 区域 2  对话流    弹性，吃掉全部剩余（视口）                │
+ *   │ 区域 3  输入区    固定 INPUT_ROWS 行                        │
+ *   │ 区域 4  状态栏    固定 1 行   永不压缩                      │
+ *   └────────────────────────────────────────────────────────────┘
+ *
+ * 对应到 HTML 盒模型：都是一个 `width:100%` 的块级 div；标题栏与状态栏是固定高度，
+ * 对话流是 `flex:1`（`overflow:hidden`，靠内部 scroll 偏移取一窗）。差别只在于终端
+ * 没有「行高」概念，高度必须取整数行、且不能靠内容撑开——所以这里全部是**行数分配**，
+ * 而不是 CSS 那样的内容驱动。
+ *
+ * 弹性区的行数就是 `H - 2 - INPUT_ROWS`。它靠「剩余」定义，所以窗口变高时全部涨在
+ * 对话流上，变矮时也只从对话流里扣——**四个区域的位置顺序与两个固定区的高度都与 H 无关**。
+ */
+export const HEADER_ROWS = 1;
+export const FOOTER_ROWS = 1;
+/** 输入区正文行数。固定 3 行不随窗口高度变化，「> 」落在第 2 行即垂直居中。 */
+export const INPUT_ROWS = 3;
+
+/**
+ * 输入区背景 `#2e2e2e`。
+ *
+ * 用真彩 SGR 下发，`Styler.bgRgb` 会按终端能力降级（真彩 → 256 色灰阶 → 16 色亮黑）。
+ * 这个色只做「区域衬底」、不承载语义，所以降级不会丢信息，最差只是灰度差几级。
+ */
+export const INPUT_BG_R = 0x2e;
+export const INPUT_BG_G = 0x2e;
+export const INPUT_BG_B = 0x2e;
+
+/**
+ * 最矮可用高度：3 个固定行（标题 + 输入区 1 行 + 状态栏）刚好铺满一屏，对话流退化为 0 行。
+ *
+ * 高度不足时**按优先级丢整块**（规则由丢得最早的排在最前）：
+ *
+ *   1. 对话流   —— 最先牺牲，它只是「看不到历史」，界面仍然可读；
+ *   2. 标题栏   —— 其次是标识信息；
+ *   3. 输入区   —— 再其次是编辑能力（此时对话流已回来，改为只读回看）；
+ *   4. 状态栏   —— 最后才丢；只要还剩 1 行，那 1 行一定是状态栏。
+ *
+ * 取舍逻辑是「保住输入与当前状态」：状态栏承载权限模式等安全相关字段（见状态行的
+ * PINNED 段），输入区是用户唯一的入口。两者同时放不下时保状态栏——只读界面比一个
+ * 不知道自己处于什么权限模式的可写界面更安全。
+ */
+const LAYOUT_MIN_HEIGHT = HEADER_ROWS + INPUT_ROWS + FOOTER_ROWS;
+
+/** 四个区域的垂直分配结果；每项都是行数，`0` 表示该区域在极高/极矮时被让出或被丢弃。 */
+export interface LayoutRegions {
+  header: number;
+  /** 输入区**正文**行数；另有 1 行「已上翻」提示可能插在它上面（见 renderLive）。 */
+  composer: number;
+  footer: number;
+  /** 对话流视口行数 = 一屏 - 三个固定区（至少 1，保证不会整屏只剩输入框）。 */
+  body: number;
+}
+
+/**
+ * 把一屏高度分配给四个区域。
+ *
+ * 返回值保证 `header + body + composer(正文) + footer >= height` 中的**固定区之和**永远
+ * 不超过 height —— 这是「绝不画到屏幕外」的不变量，由 composeFrame 的最终夹紧兜底。
+ */
+export function layoutRegions(height: number): LayoutRegions {
+  const h = Math.max(1, Math.floor(height));
+  if (h >= LAYOUT_MIN_HEIGHT) {
+    return {
+      header: HEADER_ROWS,
+      composer: INPUT_ROWS,
+      footer: FOOTER_ROWS,
+      // 至少 1 行：即使 H 刚好等于 LAYOUT_MIN_HEIGHT，也给历史留一条缝，
+      // 否则用户会以为界面卡死了（与 renderLive 的 maxRows 下限同一考虑）。
+      body: Math.max(1, h - HEADER_ROWS - INPUT_ROWS - FOOTER_ROWS),
+    };
+  }
+  if (h >= 3) {
+    // 输入区被压到 1 行（只够一行输入，垂直居中退化为「没有居中可言」）。
+    return { header: HEADER_ROWS, composer: 1, footer: FOOTER_ROWS, body: Math.max(1, h - 3) };
+  }
+  if (h === 2) return { header: 0, composer: 1, footer: FOOTER_ROWS, body: 1 };
+  return { header: 0, composer: 0, footer: FOOTER_ROWS, body: 0 };
+}
+
+/** 单行「已上翻 N 行」提示所占行数：只在回看中出现，属于输入区上方的附加行。 */
+function recallRows(state: TuiState): number {
+  return state.scroll > 0 ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- 活动区
 
-/** 活动区渲染：浮层（若有）+ 输入行 + 提示行 + notice + 状态行。 */
+/**
+ * 对话框该显示几行。
+ *
+ * 长度取「期望高度」与「本帧实际放得下的高度」的较小值——对话框是**固定高度**的方框，
+ * 内容少时下方补空行、内容多时滚动跟随光标，「高度更宽敞」指的正是这个固定高度，
+ * 而不是跟着内容一会儿三行一会儿一行地跳。
+ *
+ * 可用空间必须参与计算：浮层是按「固定 + 对话框行数」自算高的，它并不知道活动区还有
+ * maxRows 这道硬上限；窄屏 + 大段落时对话框会把浮层整块顶出屏幕。这里是唯一知道全部
+ * 已用行数的地方，所以这道闸放在这里。
+ *
+ * 返回 0 表示这一帧连一行都放不下（极窄屏 + 大浮层），调用方应整块略过对话框。
+ */
+function rowsForComposer(wanted: number, height: number, usedRows: number): number {
+  return Math.min(wanted, Math.max(0, height - 1 - usedRows - 2));
+}
+
+/**
+ * 对话框正文行：内容行 + 补足到 rows 的空行，每行「标记 + 空格 + 内容」，背景铺满整宽
+ * 形成一条浅灰色带。
+ *
+ * 补空行是必须的：`all` 只有实际存在的视觉行，直接把 `all.slice(...)` 铺出来的框会
+ * 比当前内容还矮，「固定高度」就退化成「高度跟着内容跳」——空输入时只有一行，
+ * 用户看到的还是那个窄条。
+ */
+function composerRows(lines: readonly EditorLine[], rows: number, width: number, styler: Styler): string[] {
+  // 内容不足整框时**垂直居中**：`> ` 落在色带正中间，像一条居中的输入框，而不是
+  // 「一个空框、光标浮在顶部」。内容占满（或多行换行）时退化为靠上依次排。
+  const offset = lines.length >= rows ? 0 : Math.floor((rows - lines.length) / 2);
+  return Array.from({ length: rows }, (_, i) => {
+    const line = lines[i - offset];
+    return styler.bgRgb(pad(line === undefined ? '' : `> ${line.text}`, width), INPUT_BG_R, INPUT_BG_G, INPUT_BG_B);
+  });
+}
+
+/**
+ * 活动区渲染：浮层（若有）+ 对话框 + notice + 状态行。
+ *
+ * 提示行（Enter 发送 / PgUp 回看 ……）已经去掉，键位说明留给 `/help`，底部只保留状态行
+ * ——状态行是不该被挤掉的常驻信息，键位不是。
+ */
 export function renderLive(state: TuiState, options: ViewOptions): LiveView {
   const { width, styler } = options;
   const now = options.now ?? Date.now();
-  const budget = Math.max(4, Math.min(12, options.height - 7));
+  /** 浮层候选列表的高度：与对话框无关的固定上限，菜单不会因为输入框变高而被压成一条。 */
+  const budget = Math.max(4, Math.min(12, options.height - 10));
   const lines: string[] = [];
-  let cursor: { row: number; col: number } | null = null;
+  let cursor: { row: number; col: number } | undefined;
+
+  /**
+   * 把对话框钉在当前活动区末尾。rows 由调用方按剩余空间算好（含补足的空行）。
+   *
+   * 内容比 rows 多时取「以光标为中心」的一段窗口，让正在敲的那一行始终可见；
+   * 光标行号随之在框内移动，终端光标才不会跳到框外。
+   */
+  const pushComposer = (editor: TuiState['editor'], rows: number): void => {
+    if (rows <= 0) return;
+    const all = layoutLines(editor, Math.max(1, width - 2));
+    const cursorLine = lineIndexOf(all, editor.cursor);
+    const start = Math.max(0, Math.min(cursorLine - rows + 1, all.length - rows));
+    const shown = start <= 0 ? all.slice(0, rows) : all.slice(start, start + rows);
+    lines.push(...composerRows(shown, rows, width, styler));
+    const column = offsetIn(shown[Math.min(cursorLine - start, shown.length - 1)], editor.cursor);
+    // 行号要跟着 composerRows 的居中偏移走，否则光标会落在「内容实际所在行」之外的
+    // 那一行（居中时内容不在框顶）。
+    const centering = shown.length >= rows ? 0 : Math.floor((rows - shown.length) / 2);
+    cursor = {
+      row: lines.length - rows + centering + (cursorLine - start),
+      col: 2 + Math.min(column, Math.max(0, width - 3)),
+    };
+  };
 
   const prompt = state.prompt;
+  // 输入区高度固定 3 行（不随窗口高度增长），菜单 / 计划浮层与空闲态共用同一份——
+  // 只在空闲态调高、一进菜单又缩回去会很跳。
+  const composerRowsWanted = INPUT_ROWS;
+  const rowsAllowed = (used: number): number => rowsForComposer(composerRowsWanted, options.height, used);
+
+  /**
+   * 浮层和对话框一起钉在底部，所以对话框最多只能长到「窗口高度 - 浮层行数 - 状态行」。
+   * 不夹这一刀的话，浮层 + 对话框会超出屏幕，Activity 的 maxRows 再裁掉浮层顶部——
+   * 看起来就是「菜单标题莫名其妙消失了」。
+   */
+  const pushBelowPanel = (editor: TuiState['editor'], panelRows: number): void => {
+    const room = options.height - 1 - panelRows - 1;
+    pushComposer(editor, Math.max(1, Math.min(rowsAllowed(panelRows), room)));
+  };
+
   if (prompt?.kind === 'approval') {
     lines.push(...approvalPanel(prompt.request, prompt.note, width, styler));
   } else if (prompt?.kind === 'ask') {
-    lines.push(...askPanel(prompt.question, width, styler));
-    const input = inputLine(prompt.editor, width, styler);
-    cursor = { row: lines.length, col: input.column };
-    lines.push(input.line);
+    const panel = askPanel(prompt.question, width, styler);
+    lines.push(...panel);
+    pushBelowPanel(prompt.editor, panel.length);
   } else if (prompt?.kind === 'plan') {
-    lines.push(...planPanel(prompt.plan, width, budget, styler));
-    const input = inputLine(prompt.editor, width, styler);
-    cursor = { row: lines.length, col: input.column };
-    lines.push(input.line);
+    const panel = planPanel(prompt.plan, width, budget, styler);
+    lines.push(...panel);
+    pushBelowPanel(prompt.editor, panel.length);
   } else if (state.phase === 'menu' && state.menu) {
-    lines.push(...menuPanel(state.menu, width, budget, styler));
-    const input = inputLine(state.editor, width, styler);
-    cursor = { row: lines.length, col: input.column };
-    lines.push(input.line);
+    const panel = menuPanel(state.menu, width, budget, styler);
+    lines.push(...panel);
+    pushBelowPanel(state.editor, panel.length);
   } else if (state.phase === 'status') {
     lines.push(...statusPanel(state, width, styler));
   } else {
-    const input = inputLine(state.editor, width, styler);
-    cursor = { row: lines.length, col: input.column };
-    lines.push(input.line);
+    pushComposer(state.editor, rowsAllowed(0));
   }
 
-  const hint = hintLine(state);
-  if (hint) lines.push(hint.tone === 'warn'
-    ? styler.yellow(truncate(hint.text, width, ''))
-    : styler.dim(truncate(hint.text, width, '')));
-  if (state.notice) lines.push(noticeLine(state.notice, width, styler));
+  // 回看提示紧贴输入区**上方**——它是「输入区这个盒子」的附加行，而不是对话流的一部分
+  // （放对话流里会被一起滚走）。状态行必须排在最后，它永远是整屏的最后一行。
+  //
+  // 操作消息（notice）**不在这里渲染**：它已经在输入区**下方**（状态栏那一行）显示，
+  // 再在输入区上方重复一行会让同一句话出现两次。
+  if (state.scroll > 0) {
+    const recall = state.mouse ? '滚轮下滚 / PgDn / Esc 回到最新' : 'PgDn / Esc 回到最新';
+    lines.push(styler.yellow(truncate(`已上翻 ${state.scroll} 行 | ${recall}`, width, '')));
+  }
   lines.push(composeSegments(statusSegments(state, styler, now), width, styler));
 
-  // 活动区硬上限：必须给历史视口留出至少一行，否则整屏只有输入框，看起来像卡死了。
-  const maxRows = Math.max(3, options.height - 1);
+  // 活动区硬上限：标题栏 + 输入区 + 状态栏各占至少 1 行，剩下的才是对话流；而对话流
+  // 至少留 1 行，否则整屏只剩输入框，看起来像卡死了。
+  //
+  // 裁掉的都是活动区**顶部**（浮层标题 / 候选列表）——输入区与状态栏钉在底部不会被裁到，
+  // 因此光标行号只需要跟着整体上移。
+  const maxRows = Math.max(LAYOUT_MIN_HEIGHT, options.height - 1);
   if (lines.length > maxRows) {
     const drop = lines.length - maxRows;
     lines.splice(0, drop);
-    cursor = cursor && cursor.row - drop >= 0 ? { row: cursor.row - drop, col: cursor.col } : null;
+    cursor = cursor === undefined ? undefined : { row: Math.max(0, cursor.row - drop), col: cursor.col };
   }
-  return { lines, cursor };
+  return { lines, cursor: cursor ?? null };
 }
 
 // ---------------------------------------------------------------- 整帧
 
 /**
- * 把「历史视口 + 底部活动区」组合成**正好一屏**的整帧。
+ * 四个区域的行数分配（composeFrame 与 app 的滚动夹紧共用同一份算术）。
  *
- * 布局约定：活动区钉在屏幕底部（输入行位置固定，视线不用每次去找），历史从下往上填满
- * 剩余空间。scroll=0 时贴着最新内容；scroll 越大越往早前看。历史不足一屏时**在顶部补
- * 空行**而不是让活动区上浮——否则输入行会随内容多少上下跳。
+ * 固定区是「标题栏 1 + 输入区正文 + 回看提示(0或1) + 状态栏 1」，其余全给对话流。
+ * 输入区的正文行数已由 renderLive 按剩余空间夹过一次，这里直接采信它给出的实际行数
+ * ——所以 G 是**已经算好的一屏内实数**，不再是名义上的 INPUT_ROWS。
+ *
+ * 高度不足时按 layoutRegions 的优先级丢弃整块（对话流最先，状态栏最后）。
+ */
+export interface FramePlan {
+  /** 标题栏行数（0 = 该区域被丢弃）。 */
+  header: number;
+  /** 对话流视口行数。 */
+  body: number;
+  /** 输入区正文行数。 */
+  composer: number;
+  /** 回看提示行数（0 或 1；跟随输入区，输入区被丢弃时也为 0）。 */
+  recall: number;
+  /** 状态栏行数（0 = 该区域被丢弃）。 */
+  footer: number;
+}
+
+/**
+ * 对话流在**最终帧**里占的行区间（0 基，闭开区间 `[top, top + rows)`）。
+ *
+ * 与 `FramePlan.body` 不是一回事：后者是名义分配，不含浮层挤压；这里量的是屏幕上
+ * 真正的那片区域，供滚轮命中判断使用。活动区（浮层 + 输入区 + 状态栏）钉在最底部，
+ * 对话流就是「标题栏之后、活动区之前」那一段——浮层盖住的行不该再响应滚轮。
+ */
+export interface BodyRegion {
+  top: number;
+  rows: number;
+}
+
+export function planFrame(height: number, live: LiveView, state: TuiState): FramePlan {
+  const h = Math.max(1, Math.floor(height));
+  const layout = layoutRegions(h);
+  const total = live.lines.length;
+  const recall = layout.composer > 0 ? recallRows(state) : 0;
+  // 状态栏是 live 的最后一行（renderLive 保证它最后 push）。
+  const footer = layout.footer === 0 ? 0 : Math.min(1, total);
+
+  /**
+   * 输入区正文**从 live 末尾往上量**，不能按 live 总行数反推。
+   *
+   * renderLive 的 lines 里除了「输入区 + 回看提示 + 状态栏」，前面还可能压着一整块浮层
+   * （菜单 / 审批 / 提问 / 计划）。按总行数减出来会把浮层行也算进输入区，于是 composer
+   * 被撑大、body 被挤到 1 行，整块浮层失去可用空间被裁掉——现象是「菜单标题莫名其妙
+   * 消失」。renderLive 的 pushComposer 已经按 rowsForComposer 把实际行数夹好了，
+   * 这里只负责按同样的 3 行定位，名义值与实际值在极端高度下的差异由 MAX 兜住。
+   */
+  const requested = Math.min(layout.composer, Math.max(0, total - recall - footer));
+  const composer = requested === 0 ? 0 : Math.min(requested, Math.max(0, h - recall - footer - layout.header - 1));
+
+  const header = layout.header === 0 || composer + recall + footer + 1 > h ? 0 : layout.header;
+  // 对话流吃掉剩下的一切，且至少 1 行——否则整屏只有框、看不到历史。
+  const body = Math.max(1, h - header - composer - recall - footer);
+  return { header, body, composer, recall, footer };
+}
+
+/**
+ * 把四个区域组装成**正好一屏**的整帧。
+ *
+ * 垂直顺序自上而下固定：标题栏 → 对话流视口 → 输入区（含紧贴上方的回看提示）→ 状态栏。
+ * 中间那个区靠 `flex` 吃掉剩余行数，所以窗口变高只长对话流，变矮也只从对话流里扣。
+ *
+ * 对话流**底部对齐**（`justify-content: flex-end` 的等价物）：scroll=0 时最新内容
+ * 紧贴输入区上方；scroll 越大越往早前看。历史不足一屏时**在视口顶部补空行**，而不是
+ * 让下方区域上浮——输入区的位置必须与内容多少无关，否则视线每轮都要重新找输入行。
  *
  * 调用方负责把 scroll 夹到有效范围内（见 app 的 maxScroll 计算），这里只做防御性收敛。
  */
 export function composeFrame(
+  header: string,
   body: readonly string[],
   live: LiveView,
   options: ViewOptions,
   scroll: number,
-): LiveView {
-  const height = Math.max(3, options.height);
-  const liveLines = live.lines.slice(Math.max(0, live.lines.length - (height - 1)));
-  const dropped = live.lines.length - liveLines.length;
-  const bodyRows = height - liveLines.length;
+  state: TuiState,
+): LiveView & { plan: FramePlan; body: BodyRegion } {
+  const height = Math.max(1, options.height);
+  const plan = planFrame(height, live, state);
+
+  // 活动区（浮层 + 输入区 + 回看提示 + 状态栏）整体钉在屏幕底部，所以从 live 末尾往上取
+  // 一整段，而不是只取「输入区 + 状态栏」那几行——浮层压在它们上面，同样要画出屏幕。
+  //
+  // 浮层可以高到超出对话流剩余的空间，此时从**顶部**裁掉浮层的靠上部分（菜单标题最倒霉，
+  // 与旧行为一致），输入区与状态栏永远保住。
+  const activityBudget = Math.max(0, height - plan.header);
+  const activity = live.lines.slice(Math.max(0, live.lines.length - activityBudget));
+  // 夹紧后活动区可能仍高于可用空间（极矮屏 + 大浮层）：继续从顶部裁。
+  if (activity.length > activityBudget) activity.splice(0, activity.length - activityBudget);
+  const dropped = Math.max(0, live.lines.length - activity.length - Math.max(0, plan.body - 0));
 
   const offset = Math.max(0, Math.floor(scroll));
   const end = Math.max(0, Math.min(body.length, body.length - offset));
-  const start = Math.max(0, end - bodyRows);
-  const blank = bodyRows - (end - start);
+  const start = Math.max(0, end - plan.body);
+  const blank = Math.max(0, plan.body - (end - start));
 
-  const lines = [...new Array<string>(blank).fill(''), ...body.slice(start, end), ...liveLines];
-  const cursorRow = bodyRows + (live.cursor ? live.cursor.row - dropped : 0);
+  const lines = [
+    ...(plan.header > 0 ? [header] : []),
+    ...new Array<string>(blank).fill(''),
+    ...body.slice(start, end),
+    ...activity,
+  ];
+
+  // 防御：固定区之和理论上总在屏幕内，但 renderLive 的裁切与这里的分配是两处算术，
+  // 万一不一致就会把状态栏挤出屏幕——最后一道夹紧放在这里，宁可让顶部内容丢掉。
+  if (lines.length > height) lines.splice(0, lines.length - height);
+  while (lines.length < height) lines.push('');
+
+  const cursorRow = plan.header + blank + (end - start) + (live.cursor ? live.cursor.row - dropped : 0);
   const cursor = live.cursor && live.cursor.row - dropped >= 0
     ? { row: cursorRow, col: live.cursor.col }
     : null;
-  return { lines, cursor };
+  // plan 一并交回：调用方（滚轮命中判断）需要知道对话流到底占了哪几行，
+  // 自己再算一遍就会和这里的分配漂移。
+  //
+  // body 区间按**最终 lines** 量：活动区（浮层 + 输入区 + 状态栏）钉在最底部，
+  // 对话流就是「标题栏之后、活动区之前」那一段。有浮层时活动区变高，对话流随之变矮，
+  // 这正是我们想要的——浮层盖住的那几行不该再响应滚轮。
+  const bodyTop = Math.min(plan.header, height);
+  const bodyRows = Math.max(0, height - bodyTop - activity.length);
+  // 选区高亮放在**最后**：此时行已经定稿（补空、夹紧都做完了），行号就是屏幕行号，
+  // 与 state.selection 存的屏幕坐标一一对应。
+  applySelection(lines, state.selection);
+  return { lines, cursor, plan, body: { top: bodyTop, rows: bodyRows } };
 }
 
 /**
- * 可回看的最大行数：历史长度减去一屏能显示的行数。给 0 表示「无需滚动」。
- * 夹在调用方而不是 composeFrame 里，是为了让 PgUp 顶到开头时偏移不再无限增长。
+ * 选中区间按 `anchor → head` 归一化后逐行反显。
+ *
+ * 区间是「闭」的（两端字符都算选中），这是所有终端选区的惯例：拖到第 5 列松手，
+ * 第 5 列那个字符应该被选中。因此末行的结束列要 +1 才对得上。
  */
-export function maxScroll(bodyRows: number, liveRows: number, height: number): number {
-  return Math.max(0, bodyRows - Math.max(1, height - liveRows));
+function applySelection(lines: string[], selection: Selection | undefined): void {
+  if (!selection) return;
+  const { anchor, head } = selection;
+  const reversed = anchor.row > head.row || (anchor.row === head.row && anchor.col > head.col);
+  const first = reversed ? head : anchor;
+  const last = reversed ? anchor : head;
+  for (let row = first.row; row <= last.row; row++) {
+    if (row < 0 || row >= lines.length) continue;
+    const startCol = row === first.row ? first.col : 0;
+    // 中间行整行选中：给一个足够大的上界，inverseRange 自己会在行尾停下。
+    const endCol = row === last.row ? last.col + 1 : Number.MAX_SAFE_INTEGER;
+    lines[row] = inverseRange(lines[row], startCol, endCol);
+  }
+}
+
+/**
+ * 取选区覆盖的可见文本。行内区间用 `visibleSlice` 按显示列切，
+ * 行之间用 `\n` 连起来——与终端原生复制的结果一致（每行末尾不留空格）。
+ */
+export function selectionText(lines: readonly string[], selection: Selection): string {
+  const { anchor, head } = selection;
+  const reversed = anchor.row > head.row || (anchor.row === head.row && anchor.col > head.col);
+  const first = reversed ? head : anchor;
+  const last = reversed ? anchor : head;
+  const out: string[] = [];
+  for (let row = first.row; row <= last.row; row++) {
+    if (row < 0 || row >= lines.length) continue;
+    const startCol = row === first.row ? first.col : 0;
+    const endCol = row === last.row ? last.col + 1 : Number.MAX_SAFE_INTEGER;
+    out.push(visibleSlice(lines[row], startCol, endCol).replace(/\s+$/, ''));
+  }
+  return out.join('\n');
+}
+
+/**
+ * 可回看的最大行数：历史长度减去视口能显示的行数。给 0 表示「无需滚动」。
+ *
+ * 与 composeFrame 共用 planFrame 的分配结果——两边各算一遍的话，只要有一处偏差
+ * （比如回看提示行只被一边计入），PgUp 就会在末尾多滚出一行空白。
+ */
+export function maxScroll(bodyRows: number, live: LiveView, height: number, state: TuiState): number {
+  const plan = planFrame(Math.max(1, height), live, state);
+  return Math.max(0, bodyRows - plan.body);
 }
 
 /**
@@ -358,38 +682,6 @@ function noticePaint(level: NoticeLevel, styler: Styler): (text: string) => stri
   if (level === 'warn') return (text) => styler.yellow(text);
   if (level === 'success') return (text) => styler.green(text);
   return (text) => styler.dim(text);
-}
-
-function noticeLine(notice: NonNullable<TuiState['notice']>, width: number, styler: Styler): string {
-  return noticePaint(notice.level, styler)(truncate(`${noticeMark(notice.level)} ${notice.text}`, width, ''));
-}
-
-function inputLine(editor: TuiState['editor'], width: number, styler: Styler): { line: string; column: number } {
-  const available = Math.max(1, width - 2);
-  const { segments, cursorColumn } = scrollEditor(editor, available);
-  return { line: `${styler.cyan('> ')}${segments.join('')}`, column: 2 + cursorColumn };
-}
-
-function hintLine(state: TuiState): { text: string; tone: 'dim' | 'warn' } | undefined {
-  if (state.prompt) return undefined;
-  // 只写实际接了的键：End 是行尾键，不能写进这里；鼠标被关掉时也不能写「滚轮」。
-  const recall = state.mouse ? '滚轮 / PgUp 回看' : 'PgUp 回看';
-  // 回看时提示行让位给「怎么回到最新」——这时候用户真正需要知道的是这一条。
-  if (state.scroll > 0) {
-    const back = state.mouse ? '滚轮下滚 / PgDn / Esc 回到最新' : 'PgDn / Esc 回到最新';
-    return { text: `已上翻 ${state.scroll} 行 | ${back}`, tone: 'warn' };
-  }
-  if (state.phase === 'menu') {
-    return {
-      text: state.menu?.nested ? '上下键 选择 | Enter 确认 | Esc 返回' : '上下键 选择 | Enter 执行 | Esc 取消',
-      tone: 'dim',
-    };
-  }
-  if (state.phase === 'status') return { text: '任意键返回', tone: 'dim' };
-  if (state.phase === 'running') {
-    return { text: `运行中 | ${recall} | Esc 中断本轮 | Ctrl+C 退出`, tone: 'dim' };
-  }
-  return { text: `Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | ${recall} | Ctrl+C 退出`, tone: 'dim' };
 }
 
 function overlayTitle(mark: string, title: string, width: number, styler: Styler): string {
@@ -455,15 +747,24 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
     const plain = truncate(`${column}${item.hint}`, width, '');
     if (i === menu.index) {
       // 反显整行：纯文本先补齐到整宽再着色，形成连续的选中条，且不会被截断。
-      out.push(styler.inverse(pad(plain, width)));
+      // 收尾不用 `\x1b[0m`——那会把对话框的浅灰底一起抹掉，选中条后面露出一截白缝。
+      out.push(styler.enabled
+        ? `\x1b[7m${pad(plain, width)}${INVERSE_BUBBLE_RESET}`
+        : pad(plain, width));
     } else {
       // 非选中行只把说明压暗，值保持默认前景；hint 部分按列宽截断后的余量切出来。
       const label = truncate(column, width, '');
       const hint = plain.slice(label.length);
-      out.push(`${label}${hint === '' ? '' : styler.dim(hint)}`);
+      out.push(`${label}${hint === '' ? '' : styler.dim(hint)}`.trimEnd());
     }
   }
   if (menu.items.length > rows) out.push(styler.dim(`  (${menu.index + 1}/${menu.items.length})`));
+  // 菜单末行补键位：提示行已经去掉，这里不写就没人知道怎么操作。
+  out.push(keysLine(
+    menu.nested ? '[上下键] 选择 | [Enter] 确认 | [Esc] 返回' : '[上下键] 选择 | [Enter] 执行 | [Esc] 取消',
+    width,
+    styler,
+  ));
   return out;
 }
 
@@ -516,6 +817,8 @@ function statusPanel(state: TuiState, width: number, styler: Styler): string[] {
   for (const [label, value, paint] of rows) {
     out.push(`${styler.dim(`  ${pad(label, 10)}`)}${paint(truncate(value, budget, ''))}`);
   }
+  // 提示行去掉之后，「怎么返回」交给这个面板自己说。
+  out.push(keysLine('[任意键] 返回', width, styler));
   return out;
 }
 
@@ -633,12 +936,49 @@ function highlightMentions(text: string, styler: Styler): string {
   );
 }
 
-// ---------------------------------------------------------------- 首屏横幅
+// ---------------------------------------------------------------- 区域 1：标题栏
 
+/** 标题栏文案。收在常量里，测试与文档都引用同一份，不会各写各的。 */
+export const HEADER_TITLE = 'SPRING HARNESS';
+
+/**
+ * 标题栏（区域 1，固定 1 行）：
+ *
+ *   SPRING HARNESS v0.1.0            工作区 spring-harness | 分支 main
+ *
+ * 左半是品牌标识 + 版本号，右半是「我在哪儿」的位置信息。版本号取自 package.json
+ * （state.version），不在这里再写一份常量。
+ *
+ * 两侧内容**各自独立截断**：先按显示宽度算出右侧可用列，右侧不够就整块放弃（位置信息
+ * 比版本号次要），左侧不够才截断标题。这样窄终端下丢掉的是「在哪」而不是「是什么」。
+ * 版本号在极窄时随标题一起被截——它属于标识的一部分，不该单独留个孤零零的数字。
+ */
+export function renderHeader(state: TuiState, options: ViewOptions): string {
+  const { width, styler } = options;
+  const left = `${styler.bold(HEADER_TITLE)}${state.version === '' ? '' : styler.dim(` v${state.version}`)}`;
+  const leftWidth = displayWidth(HEADER_TITLE) + (state.version === '' ? 0 : ` v${state.version}`.length);
+
+  const parts = [state.projectName];
+  if (state.branch) parts.push(`分支 ${state.branch}`);
+  const right = parts.join(SEPARATOR);
+  const rightWidth = displayWidth(right);
+
+  // 至少留 2 列空隙，否则左右会粘在一起读不出来。
+  if (leftWidth + rightWidth + 2 > width) {
+    return truncate(left, width, '');
+  }
+  const gap = Math.max(1, width - leftWidth - rightWidth);
+  return `${left}${' '.repeat(gap)}${styler.dim(right)}`;
+}
+
+/**
+ * 首屏横幅（对话流的第一条内容，**不是**固定区域）。
+ *
+ * 标题与位置信息已由标题栏接管，这里只留「本次会话用什么跑」与键位提示——两处都不重复。
+ */
 export function renderBanner(state: TuiState, options: ViewOptions): string[] {
   const { width, styler } = options;
   return [
-    `${styler.bold('Spring Harness')}${styler.dim(SEPARATOR)}${styler.cyan('交互模式')}`,
     composeSegments(
       [
         { text: state.model, paint: (text) => styler.bold(text), priority: 4 },
@@ -649,8 +989,7 @@ export function renderBanner(state: TuiState, options: ViewOptions): string[] {
       width,
       styler,
     ),
-    styler.dim(`工作区 ${truncate(state.workspaceRoot, Math.max(8, width - 4), '')}`),
     '',
-    styler.dim(truncate('Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | /status 状态 | /help 帮助', width, '')),
+    styler.dim(truncate('Enter 发送 | Ctrl+J 换行 | / 命令菜单 | Ctrl+K 全部操作 | /status 状态 | /help 帮助', width, '')),
   ];
 }

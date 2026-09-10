@@ -113,7 +113,13 @@ export function sanitize(text: string): string {
   return out;
 }
 
-/** 码点簇：零宽字符（变音符等）附着到前一个字符，硬切时不会把一个字符切开。 */
+/**
+ * 码点簇：零宽字符（变音符等）附着到前一个字符，硬切时不会把一个字符切开。
+ *
+ * 换行符**必须自成一簇**，不能按「零宽 → 黏到前一个字符」的规则并进去：多行输入靠
+ * `parts[i] === '\n'` 找行边界，一旦 `\n` 被并成 `"a\n"` 这种簇，行边界就永远匹配不上
+ * ——表现是编辑器里敲回车看不到换行，折行布局也算不对。
+ */
 export function clusters(text: string): Array<{ ch: string; width: number }> {
   const out: Array<{ ch: string; width: number }> = [];
   for (let i = 0; i < text.length; ) {
@@ -128,6 +134,10 @@ export function clusters(text: string): Array<{ ch: string; width: number }> {
       const last = out[out.length - 1];
       if (last) last.ch += escape;
       else out.push({ ch: escape, width: 0 });
+      continue;
+    }
+    if (cp === 0x0a) {
+      out.push({ ch, width: 0 });
       continue;
     }
     const width = charWidth(cp);
@@ -269,10 +279,110 @@ export interface Styler {
   underline(text: string): string;
   /** 删除线。 */
   strike(text: string): string;
+  /**
+   * 指定背景色。**必须自己补齐到整行宽度**：SGR 的背景只覆盖实际打印出的字符，
+   * 不覆盖行尾空白，短行会露出一截没上色的缝隙。
+   * @param reset 收尾序列——上层可能叠了别的属性（如选中态反显），复位时要一并还原。
+   */
+  bg(text: string, code: number, reset?: string): string;
+  /**
+   * 真彩背景。`#2e2e2e` 这类指定色值必须走 24 位 SGR，但真彩不是到处都有，
+   * 因此按终端能力降级：真彩 → 256 色 → 16 色。调用方只给色值，不关心落到哪一级。
+   */
+  bgRgb(text: string, r: number, g: number, b: number, reset?: string): string;
+}
+
+/**
+ * 对话框背景：亮黑（`100`）在浅色终端里就是一层浅灰，在深色终端里也只是一条低调的
+ * 深灰衬底，两种主题下都不刺眼。刻意不用 `47`（白底）——那种「白得发亮」的块在
+ * Windows Terminal 浅色主题下比正文还抢眼。
+ *
+ * 它落在 16 色亮色段：少数终端主题里亮黑偏冷或偏紫，因此只作为「区域衬底」，
+ * 不承载任何语义——无色终端下直接退化为无背景，正文依然可读。
+ */
+export const DIALOG_BG = 100;
+
+/** 反显收尾：先关反显（27），再恢复对话框背景（49）。顺序反了会把背景一起抹掉。 */
+export const INVERSE_BUBBLE_RESET = '\x1b[27m\x1b[49m';
+
+/**
+ * 色彩深度：3 = 真彩（24 位），2 = 256 色，1 = 16 色。
+ *
+ * 只影响「指定色值」这一类需求（比如 `#2e2e2e`），语义色（红/绿/黄/青）一律走 16 色，
+ * 所以低深度终端下界面依然完整，只是衬底灰度差几级。
+ */
+export type ColorDepth = 1 | 2 | 3;
+
+/**
+ * 探测终端色彩深度。
+ *
+ * 只认两个信号：`COLORTERM` 含 `truecolor`/`24bit`，或 `TERM` 含 `256color`。
+ * 两者都没有就按 16 色处理 —— **宁可低估也不要高估**：高估会发出终端不认识的 SGR，
+ * 结果不是「颜色差点」而是「整块背景色丢失」或更糟的乱码。
+ */
+export function colorDepth(env: NodeJS.ProcessEnv = process.env): ColorDepth {
+  const colorTerm = (env.COLORTERM ?? '').toLowerCase();
+  if (colorTerm.includes('truecolor') || colorTerm.includes('24bit')) return 3;
+  if (/\b256(?:color)?\b/.test(env.TERM ?? '')) return 2;
+  return 1;
+}
+
+/**
+ * 取某行在 `[startCol, endCol)` 显示列区间内的**可见文本**（去掉所有着色）。
+ *
+ * 必须按簇走而不是按字符下标切：CJK 一个字占两列、组合字符零宽，`slice` 会切在半个字上。
+ */
+export function visibleSlice(text: string, startCol: number, endCol: number): string {
+  if (endCol <= startCol) return '';
+  let out = '';
+  let col = 0;
+  for (const cluster of clusters(text)) {
+    if (cluster.width === 0) continue; // 转义序列与零宽字符不占列
+    if (col >= endCol) break;
+    if (col >= startCol) out += stripAnsi(cluster.ch);
+    col += cluster.width;
+  }
+  return out;
+}
+
+/**
+ * 把某行的 `[startCol, endCol)` 列区间置为**反显**（选区高亮）。
+ *
+ * 难点是区间内部本身就带着色：一段 `\x1b[36m…\x1b[0m` 里的完整复位会顺手把反显一起
+ * 关掉，只在高亮开头插一次 `\x1b[7m` 的话，高亮到第一个 `\x1b[0m` 就断了。
+ * 因此区间内每个复位之后都要**重新开一次反显**——`\x1b[0m` → `\x1b[0m\x1b[7m`。
+ *
+ * 只在簇边界切开，转义序列永远不会被截成可见文本。
+ */
+export function inverseRange(text: string, startCol: number, endCol: number): string {
+  if (endCol <= startCol) return text;
+  let out = '';
+  let col = 0;
+  let armed = false;
+  for (const cluster of clusters(text)) {
+    // 零宽的簇（行首转义、组合字符）不占列，不能成为选区的起点。
+    const selected = cluster.width > 0 && col >= startCol && col < endCol;
+    if (selected && !armed) {
+      out += '\x1b[7m';
+      armed = true;
+    } else if (!selected && armed) {
+      out += '\x1b[27m';
+      armed = false;
+    }
+    out += selected ? cluster.ch.replace(/\x1b\[0m/g, '\x1b[0m\x1b[7m') : cluster.ch;
+    col += cluster.width;
+  }
+  return armed ? `${out}\x1b[27m` : out;
+}
+
+/** 24 位色 → 256 色灰度档（232..255 是灰阶，232=#080808，每档 +10）。 */
+function grayIndex(r: number, g: number, b: number): number {
+  const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+  return Math.min(255, Math.max(232, 232 + Math.round((gray - 8) / 10)));
 }
 
 /** 着色器：关闭时所有方法退化为恒等函数，调用方无需到处判断是否支持彩色。 */
-export function createStyler(enabled: boolean): Styler {
+export function createStyler(enabled: boolean, depth: ColorDepth = 1): Styler {
   const code = (sgr: string) => (text: string) => (enabled ? `\x1b[${sgr}m${text}\x1b[0m` : text);
   return {
     enabled,
@@ -289,6 +399,12 @@ export function createStyler(enabled: boolean): Styler {
     italic: code('3'),
     underline: code('4'),
     strike: code('9'),
+    bg: (text, bgCode, reset = '\x1b[0m') => (enabled ? `\x1b[${bgCode}m${text}${reset}` : text),
+    bgRgb: (text, r, g, b, reset = '\x1b[0m') => {
+      if (!enabled) return text;
+      const open = depth >= 3 ? `\x1b[48;2;${r};${g};${b}m` : depth === 2 ? `\x1b[48;5;${grayIndex(r, g, b)}m` : `\x1b[${DIALOG_BG}m`;
+      return `${open}${text}${reset}`;
+    },
   };
 }
 
@@ -328,17 +444,18 @@ export const ansi = {
   bracketedPasteOn: '\x1b[?2004h',
   bracketedPasteOff: '\x1b[?2004l',
   /**
-   * 鼠标跟踪。只开两样，别的都不开：
+   * 鼠标跟踪。只开三样，别的都不开：
    * - `?1000h` 按键事件跟踪——够收到滚轮（滚轮就是一个「按键」），且不发鼠标移动；
    * - `?1006h` SGR 扩展坐标——坐标用文本 `\x1b[<b;x;yM` 给出，不像老的 X10 格式那样
-   *   塞原始字节（那些字节会落进输入行变成乱码），且坐标不受 223 列上限约束。
+   *   塞原始字节（那些字节会落进输入行变成乱码），且坐标不受 223 列上限约束；
+   * - `?1002h` **按住拖动**时的移动事件——应用内拖选靠它拿到连续的终点坐标。
    *
-   * 刻意**不开** `?1002h`（按住拖动时的移动事件）：本项目不做拖拽选择，开了只会让
-   * 每个鼠标移动都变成一个待解析的序列。
+   * 刻意**不开** `?1003h`（任意移动）：那会让每次鼠标划过都变成一条待解析的序列，
+   * 而本项目只在「按住左键」期间需要坐标。
    *
    * 代价：终端不再自己处理鼠标拖选，Windows Terminal 下要按住 Shift 才是原生选择。
-   * 因此这是可关闭的（见 app.ts 的 SPH_MOUSE）。
+   * 因此拖选由我们自己实现（按下 → 拖动 → 松开即复制），见 app 的 handleMouseKey。
    */
-  mouseOn: '\x1b[?1000h\x1b[?1006h',
-  mouseOff: '\x1b[?1006l\x1b[?1000l',
+  mouseOn: '\x1b[?1000h\x1b[?1002h\x1b[?1006h',
+  mouseOff: '\x1b[?1006l\x1b[?1002l\x1b[?1000l',
 };

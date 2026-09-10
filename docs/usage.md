@@ -129,21 +129,39 @@ scrollbar and scrollback can no longer move the conversation.** Nothing outside
 the app can shift the view — not the scrollbar, not `Shift+PgUp`, not the wheel
 on its own. Scrolling is handled inside the app instead; see the keys below.
 
-Each frame is painted as a whole: the screen is split into a **conversation
-viewport** on top and a **fixed activity area at the bottom** (overlays, input
-line, hint line, status line). The input line therefore never moves, no matter
-how much history there is. Because every frame rewrites the entire screen, a
-terminal resize cannot leave the stale copies behind that a patch-based
-redrawer would.
+Each frame is painted as a whole. The screen is divided into **four fixed regions**,
+stacked top to bottom like block boxes in HTML:
+
+| # | Region | Height | Contents |
+| :-- | :--- | :--- | :--- |
+| 1 | Title bar | fixed 1 row | `SPRING HARNESS v<version>` on the left, project and branch on the right |
+| 2 | Conversation | all remaining rows | the scrollable user/model dialogue (banner, turns, tool blocks) |
+| 3 | Input | fixed 3 rows | background band, no border, `>` vertically centred on the middle row |
+| 4 | Status bar | fixed 1 row | the `📁 | 🌿 | 🤖 | 🧠 | 🧮 | 🔁 | 🔒` segments |
+
+Only region 2 changes size: regions 1, 3 and 4 keep their exact position and
+height at every window size, and the conversation viewport simply grows or
+shrinks between them. Region 2 is bottom-aligned, so the newest line always sits
+directly above the input area and the empty space (when history is short) is at
+the *top*. The version in region 1 is read from `package.json` at startup — one
+source of truth, never hand-copied.
+
+When the terminal is too short for the full stack the regions degrade in a fixed
+priority order — conversation first, then title bar, then input, and the status
+bar last (a single-row terminal still shows the status bar):
 
 ```
-  ... 3 个工具调用 | 1 个失败 | 13.5s
-    read_file src/tui/ansi.ts:1-3 (3 行)                       380ms
-    grep "displayWidth" -> 2 处                                 620ms
-> 重构 compact.ts 的估算是怎么做的
-Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | 滚轮 / PgUp 回看 | Ctrl+C 退出
-📁 spring-harness | 🌿 main | 🤖 gpt-x | 🧠 medium | 🧮 [#---] 24% | 🔁 85% | 🔒 ask
+|SPRING HARNESS v0.1.0                              spring-harness | 分支 main
+|                                                                          <- blank
+|这是最新的助手回复，贴着输入区上沿。                                      <- region 2: conversation
+|                                                                          <- region 3, row 1
+|> 重构 compact.ts 的估算是怎么做的                                        <- region 3, row 2 (centred)
+|                                                                          <- region 3, row 3
+|📁 spring-harness | 🌿 main | 🤖 gpt-x | 🧠 medium | 🧮 [#---] 24% | 🔁 85% | 🔒 ask
 ```
+
+Because every frame rewrites the entire screen, a terminal resize cannot leave
+the stale copies behind that a patch-based redrawer would.
 
 Keys:
 
@@ -166,15 +184,33 @@ Keys:
   `Esc` returns to the latest (a first `Esc` while scrolled only goes back to
   the bottom — a second one aborts the running turn), and typing anything jumps
   back to the latest too.
-- **Mouse reporting** is on by default so the wheel works. The cost is that the
-  terminal no longer does drag-to-select itself: in Windows Terminal hold `Shift`
-  while dragging for a native selection. Set `SPH_MOUSE=0` (also `false`, `off`,
-  `no`) to turn mouse reporting off and keep drag-select native — the wheel then
-  does nothing, and the hint line stops advertising it. `PgUp`/`PgDn` always work.
+- **Selecting text.** Mouse reporting is on, which means the *terminal* no longer
+  does drag-to-select — the app owns the mouse. Selecting is therefore implemented
+  in the app: **drag with the left button and release, and the selection is already
+  on your clipboard** (copy-on-select, no `Ctrl+C` needed — `Ctrl+C` stays
+  "abort the turn"). Copying goes out as OSC 52 first, then falls back to the
+  platform command (`clip` on Windows, `pbcopy` on macOS, `wl-copy`/`xclip` on
+  Linux); a notice says which one worked. Set `SPH_CLIPBOARD=osc52` to skip the
+  subprocess, or `off` to stop writing the clipboard entirely.
+
+  This is the same tradeoff opencode makes. If you would rather have the
+  terminal's own selection, set `SPH_MOUSE=0` (also `false`, `off`, `no`) to turn
+  mouse reporting off — native drag-select comes back, the wheel stops working,
+  and `PgUp`/`PgDn` still do. In Windows Terminal you can also hold `Shift` while
+  dragging for a native selection even with reporting on.
+- **The wheel only scrolls the conversation region.** Wheel events over the title
+  bar, the input area or the status bar are ignored — those regions have nothing
+  to scroll, and swallowing the wheel there only makes it feel like the view
+  jumped somewhere else.
 - `Ctrl+A/E/K/U/W`, `Ctrl+B/F` — line editing as in readline.
 - `Ctrl+L` — clear the conversation view. The session itself is untouched
-  (`/export` still gets the whole thing). `Ctrl+C` — abort the running turn;
-  exit when idle.
+  (`/export` still gets the whole thing).
+- **`Ctrl+C` — abort the running turn; press it twice to exit.** A single `Ctrl+C`
+  aborts the running turn (or, when idle, clears the input) and shows
+  `再按一次 Ctrl+C 退出`; a second press within one second quits. Exiting is
+  therefore never one keystroke away from "just stop this step" — the terminal
+  convention that `Ctrl+C` means *interrupt* is preserved. `Ctrl+D` on an empty
+  input is the one-key exit.
 - `Esc` — abort the running turn, close an overlay, or clear the input.
 
 Commands: `/help` `/new` `/sessions` (pick from a menu of past sessions)

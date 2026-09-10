@@ -24,10 +24,15 @@ export type Key =
   | { kind: 'end' }
   | { kind: 'pageup' }
   | { kind: 'pagedown' }
-  /** 鼠标滚轮：方向即滚动方向。 */
-  | { kind: 'wheel'; direction: 'up' | 'down' }
+  /** 鼠标滚轮：方向即滚动方向。坐标是终端报的 1 基行/列，用于判断是否落在对话流内。 */
+  | { kind: 'wheel'; direction: 'up' | 'down'; row: number; col: number }
   /**
-   * 已识别但当前不处理的事件（鼠标按键、拖拽移动等）。
+   * 鼠标按键事件（左/中/右键的按下、拖拽、松开）。本项目用它做应用内拖选。
+   * `motion` 为 true 表示「按住并移动」，由 `?1002h` 上报。
+   */
+  | { kind: 'mouse'; button: number; row: number; col: number; motion: boolean; release: boolean }
+  /**
+   * 已识别但当前不处理的事件（水平滚轮等）。
    * 必须显式忽略而不是当成 unknown —— unknown 会带着原始文本继续往下走，最终可能被
    * 写进输入行；而这些字节是终端的协议数据，不该出现在用户的输入里。
    */
@@ -84,14 +89,26 @@ function csiKey(sequence: string): Key {
       const match = /^<(\d+);(\d+);(\d+)$/.exec(body);
       if (!match) return { kind: 'unknown', raw: `\x1b${sequence}` };
       const button = Number(match[1]);
-      // 按键码：低两位是键号，bit2..4 是 Shift/Meta/Ctrl，bit5 是「拖动中」。
-      // 掩掉修饰位与拖动位之后，64/65 就是滚轮上/下，66/67 是水平滚轮。
-      const code = button & ~0b11100;
+      // SGR 坐标是**1 基**的：左上角是 (1,1)。
+      const col = Number(match[2]);
+      const row = Number(match[3]);
+      // 按键码：低两位是键号，bit2..4 是 Shift/Meta/Ctrl，bit5 是「拖动中」，
+      // bit6 起是滚轮（64 上 / 65 下 / 66 67 水平）。
+      // `~0b111100` 一次性掩掉修饰位与拖动位，滚轮的 64/65 不受影响。
+      const code = button & ~0b111100;
       if (final === 'M' && (code === 64 || code === 65)) {
-        return { kind: 'wheel', direction: code === 64 ? 'up' : 'down' };
+        return { kind: 'wheel', direction: code === 64 ? 'up' : 'down', row, col };
       }
-      // 左/中/右键与拖拽：本轮不做鼠标交互，显式忽略。
-      return { kind: 'ignore' };
+      // 水平滚轮（66/67）没有对应的滚动维度，忽略；其余是按键/拖拽，交给应用内选区。
+      if (code === 66 || code === 67) return { kind: 'ignore' };
+      return {
+        kind: 'mouse',
+        button: code,
+        row,
+        col,
+        motion: (button & 32) !== 0,
+        release: final === 'm',
+      };
     }
     default:
       return { kind: 'unknown', raw: `\x1b${sequence}` };

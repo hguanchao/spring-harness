@@ -57,7 +57,9 @@ TUI keys: /            command menu (Up/Down pick, Enter run)
           Wheel / PgUp / PgDn  scroll the conversation view (full-screen UI)
           Up / Down    prompt history
           Esc          back to latest / abort the running turn / cancel a prompt
-          Ctrl+L       clear the view       Ctrl+C  abort; exit when idle
+          Ctrl+L       clear the view
+          Ctrl+C       abort the running turn; press twice to exit
+          Ctrl+D       exit (when the input is empty)
 TUI commands: /help /new /sessions /switch /status /plan /model /effort
               /approval /todo /jobs /export /clear /quit
 

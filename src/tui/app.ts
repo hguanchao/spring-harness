@@ -30,19 +30,22 @@ import type { TodoList } from '../runtime/todos.js';
 import type { SandboxHandle } from '../sandbox/open.js';
 import { exportJson, exportMarkdown } from '../session/export.js';
 import { createSession, JsonlSession, listSessions, setCurrentSession, type SessionInfo } from '../session/store.js';
-import { colorEnabled, createStyler, truncate, type Styler } from './ansi.js';
+import { colorDepth, colorEnabled, createStyler, truncate, type Styler } from './ansi.js';
 import { InteractiveApprover } from './approver.js';
 import {
   backspace, deleteForward, emptyEditor, insertText, killToEnd, killToStart, killWordBefore,
-  moveEnd, moveHome, moveLeft, moveRight, setText, type EditorState,
+  moveDown, moveEnd, moveHome, moveLeft, moveRight, moveUp, newline, setText, type EditorState,
 } from './editor.js';
 import { KeyParser, type Key } from './keys.js';
 import { readGitBranch } from './git.js';
 import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TranscriptEntry, type TuiState } from './state.js';
 import { InputQueue, Terminal } from './terminal.js';
 import {
-  anchorScroll, composeFrame, maxScroll, renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions,
+  anchorScroll, composeFrame, maxScroll, renderEntry, renderHeader, renderLive,
+  renderToolBlock, selectionText, type BodyRegion, type ViewOptions,
 } from './view.js';
+import { writeClipboard } from './clipboard.js';
+import type { Cell, Selection } from './state.js';
 import type { ToolCallView } from './tool-view.js';
 
 export interface TuiDeps {
@@ -121,11 +124,14 @@ const HELP_LINES = [
   '  /switch <id>    切换到指定会话（支持 id 前缀）',
   '',
   '快捷键：Enter 发送 | / 打开命令菜单 | Ctrl+K 全部操作 | 上下键 历史 | Ctrl+L 清空视图',
-  '        滚轮 / PgUp / PgDn 回看历史（Esc 回到最新） | Esc 中断本轮 / 取消浮层 | Ctrl+C 退出',
+  '        滚轮 / PgUp / PgDn 回看历史（Esc 回到最新） | Esc 中断本轮 / 取消浮层',
+  '        Ctrl+C 中断本轮（空闲时清空输入），连按两次才退出 | Ctrl+D 直接退出',
   '',
   '全屏界面没有终端自身的滚动条，回看用滚轮或 PgUp/PgDn。',
-  '开启鼠标滚轮后不再能用鼠标拖选复制（Windows Terminal 需按住 Shift）；',
-  '想回到纯键盘操作（保留原生拖选）设 SPH_MOUSE=0。',
+  // 下面这条已经过时：拖选现在由程序自己实现（按下 → 拖动 → 松开即复制），
+  // Shift 只是「想要终端原生那份」时的附加选项。
+  '鼠标拖选由程序自己实现：按住左键拖动、松开即复制（走 OSC 52，失败则回退系统命令）。',
+  '想拿回终端原生拖选设 SPH_MOUSE=0（代价是滚轮失效）。',
   '',
   '界面符号只用 ASCII：东亚歧义宽度字符（中点、省略号、箭头）在部分终端按 2 列渲染，',
   '会让底部活动区的宽度计算失真并吃掉一行已提交内容，因此一律不用。',
@@ -150,6 +156,14 @@ const RESIZE_MIN_INTERVAL_MS = 50;
 const PAGE_OVERLAP = 1;
 /** 滚轮一格的滚动行数。多数终端一格 = 3 行，跟随这个惯例手感最自然。 */
 const WHEEL_STEP = 3;
+/**
+ * 「连按两次 Ctrl+C 退出」的判定窗口。
+ *
+ * 单击 Ctrl+C 是**中断**，不是退出——这是终端几十年的惯例，一键退出会让「只想停掉
+ * 这一步」的人误伤整个会话。所以要退出必须连按两次，且两次间隔要短到明显是「同一个
+ * 意图」。1 秒足够：手快的人连按远小于 1 秒，而「中断完想了想再退出」通常不止 1 秒。
+ */
+const DOUBLE_CTRL_C_MS = 1000;
 
 /**
  * 可用列数 = 终端上报列数 - 1。
@@ -223,6 +237,10 @@ class TuiApp {
   private renderQueued = false;
   /** 上一帧历史视口的高度，PgUp/PgDn 按它翻页。 */
   private lastBodyRows = 10;
+  /** 上一帧对话流在屏幕上的真实行区间，用于判断滚轮是否落在对话流内。 */
+  private lastBodyRegion: BodyRegion = { top: 0, rows: 0 };
+  /** 上一帧画出的行。选区取文本要用——选区存的是屏幕坐标，只能对着最终帧取。 */
+  private lastFrameLines: readonly string[] = [];
   /** 上一帧历史的总行数，用于滚动锚定（视口上方内容长高时同步推偏移）。 */
   private lastBodyLength = 0;
   /** 本步攒下的工具调用，等这一步结束一次性渲染成块。 */
@@ -248,7 +266,7 @@ class TuiApp {
     this.effort = deps.effort;
     this.approvalModeValue = deps.approvalMode;
     this.client = deps.makeClient({ model: deps.model, api: deps.api, effort: deps.effort });
-    this.styler = createStyler(colorEnabled());
+    this.styler = createStyler(colorEnabled(), colorDepth());
     const mouse = mouseEnabled();
     this.terminal = new Terminal((text) => this.feed(text), mouse);
     // 分类器按需构造：/model 换模型后审查器要跟着用新 client，闭包不能固化旧实例。
@@ -276,7 +294,8 @@ class TuiApp {
     const restoreOnExit = (): void => this.terminal.restore();
     process.on('exit', restoreOnExit);
     try {
-      this.commit((width) => renderBanner(this.state, this.optionsAt(width)));
+      // 首屏不再往对话流里塞横幅：本次会话的参数（模型/协议/审批/沙箱）与键位提示
+      // 都已在标题栏与状态栏里，横幅只会白占几行、还得多按几次 PgUp 才能翻过去。
       this.render();
       for (;;) {
         const key = await this.input.next();
@@ -291,6 +310,36 @@ class TuiApp {
       this.terminal.restore();
     }
   }
+
+  /**
+   * Ctrl+C：单击中断，连按两次退出。
+   *
+   * 运行中单击 = 中断本轮；空闲时没有可中断的任务，退化成终端惯例的「清空输入行」。
+   * 两种情况下第一次按都只给提示、不退出，第二次（窗口内）才真的退出。
+   */
+  private handleCtrlC(): void {
+    const now = Date.now();
+    const again = now - this.lastCtrlCAt <= DOUBLE_CTRL_C_MS;
+    this.lastCtrlCAt = now;
+    if (again) {
+      this.quit();
+      return;
+    }
+    if (this.state.phase === 'running') {
+      this.abortTurn();
+      this.notify('已中断本轮 · 再按一次 Ctrl+C 退出');
+      this.render();
+      return;
+    }
+    // 空闲：按终端惯例清掉输入行；本来就是空的就只给提示。
+    const hadText = this.state.editor.text !== '';
+    if (hadText) this.state.editor = emptyEditor();
+    this.notify(hadText ? '已清空输入 · 再按一次 Ctrl+C 退出' : '再按一次 Ctrl+C 退出');
+    this.render();
+  }
+
+  /** 上一次按下 Ctrl+C 的时刻，用于「连按两次退出」的判定。 */
+  private lastCtrlCAt = 0;
 
   private quit(): void {
     this.abortTurn();
@@ -316,8 +365,11 @@ class TuiApp {
   }
 
   private dispatch(key: Key): void {
-    // 终端协议事件（鼠标按键、拖拽）显式丢弃，不进入任何交互路径。
+    // 终端协议事件（水平滚轮）显式丢弃，不进入任何交互路径。
     if (key.kind === 'ignore') return;
+    // 鼠标按键：交给应用内选区，绝不能落进文本输入（那会把协议字节写进输入行）。
+    if (key.kind === 'mouse') return this.handleMouseKey(key);
+    this.clearSelection();
     if (this.state.prompt) return this.handlePromptKey(key);
     if (this.state.phase === 'menu') return this.handleMenuKey(key);
     if (this.state.phase === 'status') {
@@ -327,7 +379,9 @@ class TuiApp {
     }
     if (this.handleScrollKey(key)) return;
     if (this.state.phase === 'running') {
-      if (key.kind === 'escape' || (key.kind === 'ctrl' && key.key === 'c')) this.abortTurn();
+      if (key.kind === 'escape') this.abortTurn();
+      // Ctrl+C 走「单击中断、双击退出」；Esc 仍是单击即中断（没有退出语义，不需要防误触）。
+      if (key.kind === 'ctrl' && key.key === 'c') this.handleCtrlC();
       return;
     }
     return this.handleIdleKey(key);
@@ -348,6 +402,12 @@ class TuiApp {
       return true;
     }
     if (key.kind === 'wheel') {
+      // 滚轮只在对话流区域内生效：标题栏、输入区、状态栏上的滚轮一律不响应。
+      // 这些区域本来就没有可滚内容，让它们吞掉滚轮只会让人以为「滚到别处去了」。
+      // 坐标是 1 基的，先转成 0 基行号再比区间。
+      const row = key.row - 1;
+      const { top, rows } = this.lastBodyRegion;
+      if (row < top || row >= top + rows) return true; // 消费掉，但不滚动
       // 滚轮一次一格手感太肉，按行给一个固定步长。
       this.scrollTo(this.state.scroll + (key.direction === 'up' ? WHEEL_STEP : -WHEEL_STEP));
       return true;
@@ -360,9 +420,65 @@ class TuiApp {
     return false;
   }
 
-  /** 一屏可翻的行数，去掉与上一屏的重叠部分。 */
+  /**
+   * 鼠标按键：按下起选区、拖动改终点、松开即复制（copy-on-select）。
+   *
+   * 与 opencode 一致（它的 `onMouseUp → Selection.copy`）：拖完松手内容就已经在剪贴板里，
+   * 不需要再按 Ctrl+C——终端里 Ctrl+C 是「中断当前任务」的惯例，抢过来做复制会更危险。
+   * 选中期间不做任何别的事：不滚屏、不改输入行、不切 phase。
+   */
+  private handleMouseKey(key: Extract<Key, { kind: 'mouse' }>): void {
+    // 只认左键：中键在多数终端是粘贴、右键各家语义不一，都不参与选区。
+    if (key.button !== 0) return;
+    const cell: Cell = { row: Math.max(0, key.row - 1), col: Math.max(0, key.col - 1) };
+    const current = this.state.selection;
+
+    if (key.release) {
+      if (!current) return;
+      this.state.selection = undefined;
+      // 单击（按下与松开同格）不算选区：既没有可复制的内容，也不该去动剪贴板。
+      const empty = current.anchor.row === current.head.row && current.anchor.col === current.head.col;
+      if (empty) this.render();
+      else void this.copySelection(current);
+      return;
+    }
+    // 只有「拖动中」的报文才延长已有选区；单独一个 motion（起点在屏幕外）没有锚点可用。
+    if (key.motion && !current) return;
+    this.state.selection = key.motion && current ? { ...current, head: cell } : { anchor: cell, head: cell };
+    this.render();
+  }
+
+  /** 敲键、滚动都会让屏幕内容与选区的屏幕坐标错位，所以一律先清掉。 */
+  private clearSelection(): void {
+    if (!this.state.selection) return;
+    this.state.selection = undefined;
+    this.render();
+  }
+
+  private async copySelection(selection: Selection): Promise<void> {
+    const text = selectionText(this.lastFrameLines, selection);
+    this.render(); // 先把高亮撤掉，再去做可能耗时的剪贴板写入
+    if (text === '') return;
+    const result = await writeClipboard(text);
+    // 提示要诚实：只有原生命令退出码 0 才算「确定写进去了」；OSC 52 是只写通道，
+    // 终端支不支持我们收不到反馈，所以只能报「已发送」而不是「已复制」。
+    if (result === 'native') this.notify('已复制到剪贴板');
+    else if (result === 'osc52') this.notify('已发送复制请求（OSC 52）', 'warn');
+    else this.notify('复制失败：系统剪贴板与 OSC 52 都不可用', 'error');
+    this.render();
+  }
+
+  /**
+   * 一屏可翻的行数，去掉与上一屏的重叠部分。
+   *
+   * 刻意**不用上一帧的活动区行数**：回看行（「已上翻 N 行」）只在滚动中出现，它会让
+   * 活动区比贴底时高一行，于是 PgUp 与紧随的 PgDn 用到的页大小不一致，按一下上一页、
+   * 按一下下一页却回不到原位。这里按「贴底时」的活动区高度推算，两次翻页就是对称的。
+   */
   private pageSize(): number {
-    return Math.max(1, this.lastBodyRows - PAGE_OVERLAP);
+    const height = this.terminal.size().height;
+    const settled = renderLive(this.state, this.viewOptions()).lines.length;
+    return Math.max(1, height - Math.max(settled, this.lastBodyRows) - PAGE_OVERLAP);
   }
 
   private scrollTo(offset: number): void {
@@ -392,7 +508,8 @@ class TuiApp {
       return;
     }
     if (key.kind === 'ctrl') {
-      if (key.key === 'c') return this.quit();
+      if (key.key === 'c') return this.handleCtrlC();
+      // Ctrl+D 保留为「一键退出」：连按两次 Ctrl+C 之外总得留一条不打断任务的退路。
       if (key.key === 'd' && this.state.editor.text === '') return this.quit();
       if (key.key === 'k') return this.openCommandMenu('');
       if (key.key === 'l') {
@@ -400,7 +517,7 @@ class TuiApp {
         return;
       }
     }
-    const next = applyEditorKey(this.state.editor, key);
+    const next = applyEditorKey(this.state.editor, key, this.composerTextWidth());
     if (!next) return;
     this.state.editor = next;
     this.syncCommandMenu();
@@ -450,7 +567,7 @@ class TuiApp {
         return this.settlePrompt(() => prompt.resolve(answer));
       }
       if (cancel) return this.settlePrompt(() => prompt.resolve(''));
-      const next = applyEditorKey(prompt.editor, key);
+      const next = applyEditorKey(prompt.editor, key, this.composerTextWidth());
       if (!next) return;
       prompt.editor = next;
       return this.render();
@@ -465,7 +582,7 @@ class TuiApp {
       return this.settlePrompt(() => prompt.resolve(feedback === '' ? { approved: false } : { approved: false, feedback }));
     }
     if (cancel) return this.settlePrompt(() => prompt.resolve({ approved: false }));
-    const next = applyEditorKey(prompt.editor, key);
+    const next = applyEditorKey(prompt.editor, key, this.composerTextWidth());
     if (!next) return;
     prompt.editor = next;
     this.render();
@@ -503,7 +620,7 @@ class TuiApp {
     if (key.kind === 'backspace' && this.menuOptions && this.state.editor.text === '') {
       return this.backToCommands();
     }
-    const next = applyEditorKey(this.state.editor, key);
+    const next = applyEditorKey(this.state.editor, key, this.composerTextWidth());
     if (!next) return;
     this.state.editor = next;
     this.syncMenuFilter();
@@ -1147,6 +1264,14 @@ class TuiApp {
     return { width, height: this.terminal.size().height, styler: this.styler };
   }
 
+  /**
+   * 对话框正文的可用列数：与 renderLive 里的折行宽度同源（`width - 2` 让给「> 」）。
+   * 上下键按视觉行移动，必须和渲染时用同一个宽度，否则折点对不上、一次跳半屏。
+   */
+  private composerTextWidth(): number {
+    return Math.max(1, liveWidth(this.terminal.size().width) - 2);
+  }
+
   private viewOptions(): ViewOptions {
     const size = this.terminal.size();
     return { width: liveWidth(size.width), height: size.height, styler: this.styler };
@@ -1202,9 +1327,14 @@ class TuiApp {
     this.state.scroll = anchorScroll(this.state.scroll, this.lastBodyLength, body.length);
     this.lastBodyLength = body.length;
     // 夹住偏移：PgUp 顶到开头之后偏移不该继续无限增长，否则要按很多次 PgDn 才回得来。
-    this.state.scroll = Math.max(0, Math.min(this.state.scroll, maxScroll(body.length, live.lines.length, size.height)));
-    const frame = composeFrame(body, live, options, this.state.scroll);
-    this.lastBodyRows = Math.max(1, size.height - live.lines.length);
+    this.state.scroll = Math.max(0, Math.min(this.state.scroll, maxScroll(body.length, live, size.height, this.state)));
+    const header = renderHeader(this.state, options);
+    const frame = composeFrame(header, body, live, options, this.state.scroll, this.state);
+    // 对话流的实际行数由布局分配给出（framebody），页面大小必须与它一致。
+    this.lastBodyRows = Math.max(1, frame.lines.length - live.lines.length);
+    // 滚轮命中判断用**帧内真实区间**：浮层压上来时它会自动变矮。
+    this.lastBodyRegion = frame.body;
+    this.lastFrameLines = frame.lines;
     this.terminal.paint(frame.lines, frame.cursor);
   }
 
@@ -1295,8 +1425,16 @@ function parseSlashInput(text: string): { name: string; args: string } | undefin
   return { name: match[1].toLowerCase(), args: match[2].trim() };
 }
 
-/** 编辑器按键映射；返回 undefined 表示该键不是编辑动作。 */
-function applyEditorKey(editor: EditorState, key: Key): EditorState | undefined {
+/**
+ * 编辑器按键映射；返回 undefined 表示该键不是编辑动作。
+ *
+ * `width` 只有上下键用得到：对话框能显示多行，上下键按**视觉行**移动（而不是硬换行），
+ * 所以需要知道当前宽度才能算出折行位置。上下键在空闲态另作历史回溯，见 handleIdleKey。
+ *
+ * `Ctrl+J` 是换行键：对话框中 Enter 归「发送」，换行只能让给别的组合键。选 Ctrl+J 是因为
+ * 它就是 LF 本身——终端把 Enter 发成 CR（`\r`）、把 Ctrl+J 发成 LF（`\n`）时二者天然可分。
+ */
+function applyEditorKey(editor: EditorState, key: Key, width: number): EditorState | undefined {
   switch (key.kind) {
     case 'text':
       return insertText(editor, key.text);
@@ -1314,9 +1452,14 @@ function applyEditorKey(editor: EditorState, key: Key): EditorState | undefined 
       return moveHome(editor);
     case 'end':
       return moveEnd(editor);
+    case 'up':
+      return moveUp(editor, width);
+    case 'down':
+      return moveDown(editor, width);
     case 'ctrl':
       if (key.key === 'a') return moveHome(editor);
       if (key.key === 'e') return moveEnd(editor);
+      if (key.key === 'j') return newline(editor);
       if (key.key === 'k') return killToEnd(editor);
       if (key.key === 'u') return killToStart(editor);
       if (key.key === 'w') return killWordBefore(editor);
