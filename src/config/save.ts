@@ -13,7 +13,7 @@
  * 把用户的配置截断成半截。
  */
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 
 export type ConfigValue = string | number;
 
@@ -26,6 +26,11 @@ export interface SaveResult {
 }
 
 export function updateConfigFile(path: string, patch: Readonly<Record<string, ConfigValue>>): SaveResult {
+  // 先挡一道：路径为空/未定义时 existsSync 返回 false（不抛错），会一路走到
+  // 「在 cwd 写出 undefined.tmp-<pid> 然后 rename 失败」，留下谁也不知道来历的垃圾文件。
+  if (typeof path !== 'string' || path === '') {
+    throw new Error('updateConfigFile: config path is empty');
+  }
   const original = existsSync(path) ? readFileSync(path, 'utf8') : '';
   const eol = original.includes('\r\n') ? '\r\n' : '\n';
   const endsWithNewline = original.endsWith('\n');
@@ -63,7 +68,17 @@ export function updateConfigFile(path: string, patch: Readonly<Record<string, Co
 function writeAtomically(path: string, text: string): void {
   const temp = `${path}.tmp-${process.pid}`;
   writeFileSync(temp, text, 'utf8');
-  renameSync(temp, path);
+  try {
+    renameSync(temp, path);
+  } catch (error) {
+    // rename 失败必须自己清掉临时文件：留在磁盘上就是无主垃圾，还可能被顺手提交。
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      // 清理失败就算了，别把原始错误盖掉
+    }
+    throw error;
+  }
 }
 
 /** `model = "x"` / `  model=1` 这类未注释的键行。 */
