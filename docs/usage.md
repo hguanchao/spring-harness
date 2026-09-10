@@ -197,8 +197,16 @@ Notes:
 - Colors are dropped when `NO_COLOR` is set or the output is not a TTY. There
   is no mouse support and no emoji.
 - Windows Terminal is the primary target; the same ANSI path keeps it usable on
-  Linux and macOS terminals. Resizing the terminal may occasionally leave one
-  stale line above the live region.
+  Linux and macOS terminals. Legacy cmd.exe (conhost) reflows the screen most
+  aggressively, so it is the worst case for any line-oriented TUI.
+- Resizing is debounced: a window drag coalesces into one redraw after you stop,
+  and the redraw erases the old activity area before drawing. The activity area
+  is rendered one column narrower than reported (`columns - 1`) because some
+  conhost builds report a usable width one column too wide — a single wrapped
+  line would drift the redraw's row accounting and start stacking residue.
+  Residual after a resize: at most the rows *above* the input line when an
+  overlay was open (the overlay's title/detail), and rows the terminal itself
+  reflowed from earlier output.
 
 
 

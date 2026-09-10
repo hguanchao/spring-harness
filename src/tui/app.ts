@@ -98,6 +98,19 @@ const HISTORY_LIMIT = 200;
 const NOTICE_TTL_MS = 4000;
 /** git 分支的重新读取间隔：状态行高频重绘，不能每帧读盘。 */
 const BRANCH_TTL_MS = 2000;
+/** 拖动窗口期间只在停下来之后重绘一次。 */
+const RESIZE_DEBOUNCE_MS = 150;
+
+/**
+ * 活动区可用列数 = 终端上报列数 - 1。
+ *
+ * 留一列安全带：老 conhost（cmd.exe）上报的 columns 可能比实际可写区宽 1 列，写到那一列
+ * 就提前换行；而我们重绘是「上移 N 行 + 清到屏末」，一旦某行意外折成两行，行数记账就会
+ * 整体漂移，屏幕上开始堆残影。宁可少用一列，也不要这种漂移。
+ */
+function liveWidth(columns: number): number {
+  return Math.max(20, columns - 1);
+}
 
 export async function runTui(deps: TuiDeps): Promise<void> {
   await new TuiApp(deps).run();
@@ -134,6 +147,8 @@ class TuiApp {
   private noticeTimer?: NodeJS.Timeout;
   /** 上次读 git 分支的时间（2s 节流）。 */
   private lastBranchCheck = 0;
+  /** resize 合并计时器。 */
+  private resizeTimer?: NodeJS.Timeout;
   private escTimer?: NodeJS.Timeout;
   private menuKind: 'commands' | 'sessions' = 'commands';
   private sessions: SessionInfo[] = [];
@@ -183,6 +198,7 @@ class TuiApp {
       process.off('exit', restoreOnExit);
       this.stopSpinner();
       if (this.escTimer) clearTimeout(this.escTimer);
+      if (this.resizeTimer) clearTimeout(this.resizeTimer);
       this.terminal.restore();
     }
   }
@@ -867,12 +883,18 @@ class TuiApp {
     this.committed = true;
   }
 
+  private viewOptions(): ViewOptions {
+    const size = this.terminal.size();
+    return { width: liveWidth(size.width), height: size.height, styler: this.styler };
+  }
+
   private render(): void {
     if (!this.terminal.active) return;
     this.flushRaw();
     this.refreshBranch(Date.now());
-    const options = this.viewOptions();
-    this.lastSize = { width: options.width, height: options.height };
+    const size = this.terminal.size();
+    const options: ViewOptions = { width: liveWidth(size.width), height: size.height, styler: this.styler };
+    this.lastSize = { width: size.width, height: size.height };
     const { lines, cursor } = renderLive(this.state, options);
     this.terminal.drawLive(lines, cursor);
   }
@@ -886,11 +908,6 @@ class TuiApp {
     this.lastBranchCheck = now;
     const branch = readGitBranch(this.deps.workspaceRoot);
     if (branch !== this.state.branch) this.state.branch = branch;
-  }
-
-  private viewOptions(): ViewOptions {
-    const size = this.terminal.size();
-    return { width: size.width, height: size.height, styler: this.styler };
   }
 
   private startSpinner(): void {
@@ -910,9 +927,17 @@ class TuiApp {
   private handleResize(): void {
     const size = this.terminal.size();
     if (size.width === this.lastSize.width && size.height === this.lastSize.height) return;
-    // 重排后旧的行数记账不再可信：只重置记账，不做上移擦除，避免误删已提交内容。
-    this.terminal.resetLive();
-    this.render();
+    // 拖动窗口会连续抛事件（每拖一步一次）。不合并的话每一次都会重绘一份，
+    // 加上重排让行数记账失真，屏幕上就会叠出几十份残影。
+    if (this.resizeTimer) clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => {
+      this.resizeTimer = undefined;
+      const settled = this.terminal.size();
+      if (settled.width === this.lastSize.width && settled.height === this.lastSize.height) return;
+      // 先擦掉活动区（从光标行往下）再重置记账，重绘才是「替换」而不是「追加」。
+      this.terminal.resetLive();
+      this.render();
+    }, RESIZE_DEBOUNCE_MS);
   }
 
   // ---------------------------------------------------------------- ApprovalUi
