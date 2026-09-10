@@ -310,7 +310,9 @@ function inputLine(editor: TuiState['editor'], width: number, styler: Styler): {
 
 function hintLine(state: TuiState): string | undefined {
   if (state.prompt) return undefined;
-  if (state.phase === 'menu') return '上下键 选择 | Enter 执行 | Esc 取消';
+  if (state.phase === 'menu') {
+    return state.menu?.nested ? '上下键 选择 | Enter 确认 | Esc 返回' : '上下键 选择 | Enter 执行 | Esc 取消';
+  }
   if (state.phase === 'status') return '任意键返回';
   if (state.phase === 'running') return '运行中 | Esc 中断本轮 | Ctrl+C 退出';
   return 'Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | Ctrl+C 退出';
@@ -367,7 +369,7 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
   if (!menu) return [];
   const rows = Math.max(1, Math.min(budget, menu.items.length));
   const start = Math.max(0, Math.min(menu.index - Math.floor(rows / 2), menu.items.length - rows));
-  const header = menu.filter ? `命令 | 过滤「${menu.filter}」` : '命令';
+  const header = menu.filter ? `${menu.title} | 过滤「${menu.filter}」` : menu.title;
   const out = [truncate(styler.bold(styler.cyan(header)), width, '')];
   if (menu.items.length === 0) {
     out.push(styler.dim('  （无匹配命令）'));
@@ -375,13 +377,16 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
   }
   for (let i = start; i < start + rows; i++) {
     const item = menu.items[i];
-    const label = `  ${pad(item.label, 18)}`;
-    const hint = truncate(item.hint, Math.max(0, width - displayWidth(label)), '');
+    const column = `  ${pad(item.label, 18)}`;
+    const plain = truncate(`${column}${item.hint}`, width, '');
     if (i === menu.index) {
       // 反显整行：纯文本先补齐到整宽再着色，形成连续的选中条，且不会被截断。
-      out.push(styler.inverse(pad(`${label}${hint}`, width)));
+      out.push(styler.inverse(pad(plain, width)));
     } else {
-      out.push(`${label}${styler.dim(hint)}`);
+      // 非选中行只把说明压暗，值保持默认前景；hint 部分按列宽截断后的余量切出来。
+      const label = truncate(column, width, '');
+      const hint = plain.slice(label.length);
+      out.push(`${label}${hint === '' ? '' : styler.dim(hint)}`);
     }
   }
   if (menu.items.length > rows) out.push(styler.dim(`  (${menu.index + 1}/${menu.items.length})`));

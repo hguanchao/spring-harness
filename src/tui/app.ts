@@ -79,6 +79,36 @@ const COMMAND_ITEMS: readonly MenuItem[] = [
 /** 命令名集合：由菜单项派生，避免菜单与解析表漂移。 */
 const COMMAND_NAMES = new Set<string>([...COMMAND_ITEMS.map((item) => item.id), 'exit', 'switch']);
 
+interface OptionEntry {
+  /** 传给命令的值。 */
+  value: string;
+  /** 一句话说明，显示在选项右侧。 */
+  hint: string;
+}
+
+/**
+ * 带二级选项的斜杠命令。
+ *
+ * 菜单里对这类命令按 Enter 不是「执行」而是「下钻」：列出候选值让你上下选，避免
+ * 还得记参数怎么写。没有列在这里的命令要么是零参动作（/help、/clear…），要么开的是
+ * 动态列表（/sessions、/switch 从会话目录读），要么需要自由文本而没有可枚举候选（/model）。
+ */
+const OPTION_TABLE: Readonly<Record<string, readonly OptionEntry[]>> = {
+  approval: [
+    { value: 'ask', hint: '每个受审工具都问你' },
+    { value: 'auto', hint: '先过 LLM 审查器，否决时升级到你' },
+    { value: 'yolo', hint: '全部放行，不再询问（危险）' },
+  ],
+  effort: REASONING_EFFORTS.map((level) => ({
+    value: level,
+    hint: level === 'off' ? '不上报推理档位' : `${level} 推理档位`,
+  })),
+  export: [
+    { value: 'md', hint: '导出为 Markdown' },
+    { value: 'json', hint: '导出为原始 JSON' },
+  ],
+};
+
 const HELP_LINES = [
   '命令',
   ...COMMAND_ITEMS.map((item) => `  ${item.label.padEnd(16)}${item.hint}`),
@@ -150,7 +180,7 @@ class TuiApp {
   /** resize 合并计时器。 */
   private resizeTimer?: NodeJS.Timeout;
   private escTimer?: NodeJS.Timeout;
-  private menuKind: 'commands' | 'sessions' = 'commands';
+  private menuOptions?: { parent: string; entries: readonly OptionEntry[] };
   private sessions: SessionInfo[] = [];
   private lastSize = { width: 0, height: 0 };
 
@@ -259,7 +289,7 @@ class TuiApp {
     if (key.kind === 'ctrl') {
       if (key.key === 'c') return this.quit();
       if (key.key === 'd' && this.state.editor.text === '') return this.quit();
-      if (key.key === 'k') return this.openMenu('commands', '');
+      if (key.key === 'k') return this.openCommandMenu('');
       if (key.key === 'l') {
         this.terminal.clearScreen();
         this.render();
@@ -275,20 +305,17 @@ class TuiApp {
 
   /**
    * 输入形如 `/xxx`（尚未敲空格）时自动展开命令菜单，并把已敲的名字当作过滤词；
-   * 一旦出现空格说明用户在写参数，菜单收起、Enter 直接执行。
+   * 一旦出现空格说明用户在写参数（`/approval yolo`），菜单收起、Enter 直接执行。
    */
   private syncCommandMenu(): void {
     const text = this.state.editor.text;
     if (/^\/\S*$/.test(text)) {
-      if (!this.state.menu) {
-        this.menuKind = 'commands';
-        this.state.menu = { title: '命令', items: [], index: 0, filter: '' };
-        this.state.phase = 'menu';
-      }
-      this.syncMenuFilter();
+      if (!this.state.menu) this.openCommandMenu(text);
+      else this.syncMenuFilter();
       return;
     }
-    if (this.state.menu && this.menuKind === 'commands') {
+    if (this.state.menu && !this.menuOptions) {
+      // 只收起菜单、不清空输入行：此刻输入行里是用户正在写的参数。
       this.state.menu = undefined;
       this.state.phase = this.running ? 'running' : 'idle';
     }
@@ -356,7 +383,11 @@ class TuiApp {
       this.closeMenu();
       return;
     }
-    if (key.kind === 'escape' || (key.kind === 'ctrl' && key.key === 'c')) return this.closeMenu();
+    if (key.kind === 'escape' || (key.kind === 'ctrl' && key.key === 'c')) {
+      // 二级菜单里 Esc 是「返回上一级」，再按一次才关菜单——和文件管理器的直觉一致。
+      if (this.menuOptions) return this.backToCommands();
+      return this.closeMenu();
+    }
     if (key.kind === 'up' || key.kind === 'down') {
       if (menu.items.length === 0) return;
       const delta = key.kind === 'up' ? -1 : 1;
@@ -364,6 +395,10 @@ class TuiApp {
       return this.render();
     }
     if (key.kind === 'enter') return this.runMenuSelection();
+    // 二级菜单里、过滤串已空时再按退格：等同于返回上一级。
+    if (key.kind === 'backspace' && this.menuOptions && this.state.editor.text === '') {
+      return this.backToCommands();
+    }
     const next = applyEditorKey(this.state.editor, key);
     if (!next) return;
     this.state.editor = next;
@@ -376,34 +411,70 @@ class TuiApp {
     const menu = this.state.menu;
     if (!menu) return;
     const raw = this.state.editor.text.trim();
-    menu.filter = raw.startsWith('/') ? raw.slice(1) : raw;
+    // 一级菜单的输入行带着 `/` 前缀，二级菜单的输入行就是纯粹的过滤词。
+    menu.filter = this.menuOptions ? raw : raw.startsWith('/') ? raw.slice(1) : raw;
     const query = menu.filter.toLowerCase();
-    menu.items = this.menuItems(this.menuKind).filter((item) =>
-      query === '' || item.id.toLowerCase().startsWith(query) || item.label.toLowerCase().includes(query),
+    menu.items = this.menuItems().filter(
+      (item) =>
+        query === '' ||
+        item.id.toLowerCase().startsWith(query) ||
+        item.label.toLowerCase().includes(query) ||
+        item.hint.toLowerCase().includes(query),
     );
     menu.index = Math.min(menu.index, Math.max(0, menu.items.length - 1));
   }
 
-  private menuItems(kind: 'commands' | 'sessions'): MenuItem[] {
-    if (kind === 'commands') return [...COMMAND_ITEMS];
-    return this.sessions.map((info) => ({
-      id: info.id,
-      label: info.id.slice(0, 24),
-      hint: `消息 ${info.messages} | ${info.preview || '(空会话)'}`,
+  /** 一级：命令列表；二级：当前命令的候选值。 */
+  private menuItems(): MenuItem[] {
+    if (!this.menuOptions) return [...COMMAND_ITEMS];
+    const current = this.currentOptionValue(this.menuOptions.parent);
+    return this.menuOptions.entries.map((entry) => ({
+      id: entry.value,
+      label: entry.value,
+      hint: entry.value === current ? `${entry.hint}（当前）` : entry.hint,
     }));
   }
 
-  private openMenu(kind: 'commands' | 'sessions', initial: string): void {
-    this.menuKind = kind;
+  /** 一级菜单：`/` 或 Ctrl+K 打开。initial 是输入行已有内容（`/xxx`）。 */
+  private openCommandMenu(initial: string): void {
+    this.menuOptions = undefined;
     this.state.editor = initial === '' ? emptyEditor() : setText(initial);
-    this.state.menu = { title: kind === 'commands' ? '命令' : '会话', items: [], index: 0, filter: '' };
+    this.state.menu = { title: '命令', items: [], index: 0, filter: '' };
     this.state.phase = 'menu';
     this.syncMenuFilter();
     this.render();
   }
 
+  /**
+   * 二级菜单：列出某个命令的候选值，并把高亮预置到当前值上。
+   * 输入行留空：它就是过滤框，面板标题里已经写明了父命令。
+   */
+  private openOptionsMenu(parent: string, entries: readonly OptionEntry[], current?: string): void {
+    this.menuOptions = { parent, entries };
+    this.state.editor = emptyEditor();
+    this.state.menu = { title: `命令 | /${parent}`, items: [], index: 0, filter: '', nested: true };
+    this.state.phase = 'menu';
+    this.syncMenuFilter();
+    const at = current === undefined ? -1 : entries.findIndex((entry) => entry.value === current);
+    if (at >= 0 && this.state.menu) this.state.menu.index = at;
+    this.render();
+  }
+
+  /** 从二级菜单回到一级（保留在菜单里，不回到输入状态）。 */
+  private backToCommands(): void {
+    this.openCommandMenu('');
+  }
+
+  /** 当前生效的值，用于在二级菜单里标注「（当前）」并预置高亮。 */
+  private currentOptionValue(parent: string): string | undefined {
+    if (parent === 'approval') return this.approvalModeValue;
+    if (parent === 'effort') return this.effort ?? 'off';
+    return undefined;
+  }
+
   private closeMenu(): void {
     this.state.menu = undefined;
+    this.menuOptions = undefined;
     this.state.editor = emptyEditor();
     this.state.phase = this.running ? 'running' : 'idle';
     this.render();
@@ -412,21 +483,48 @@ class TuiApp {
   private runMenuSelection(): void {
     const menu = this.state.menu;
     if (!menu) return;
+    const item = menu.items.length > 0 ? menu.items[Math.min(menu.index, menu.items.length - 1)] : undefined;
+
+    // 二级菜单：选中即应用，然后关掉整个菜单。
+    if (this.menuOptions && item) {
+      const parent = this.menuOptions.parent;
+      this.closeMenu();
+      this.applyOption(parent, item.id);
+      return;
+    }
+
     const typed = this.state.editor.text.trim();
     const parsed = parseSlashInput(typed);
-    if (menu.items.length > 0) {
-      const item = menu.items[Math.min(menu.index, menu.items.length - 1)];
-      this.closeMenu();
-      if (this.menuKind === 'sessions') this.switchSession(item.id);
-      else this.executeCommand(item.id, '', true);
+    // 手打了参数（`/approval yolo`）或过滤后没有候选：按输入执行。
+    if ((parsed && parsed.args !== '') || !item) {
+      if (parsed && COMMAND_NAMES.has(parsed.name)) {
+        this.closeMenu();
+        this.executeCommand(parsed.name, parsed.args, true);
+        return;
+      }
+      this.notify(typed === '' ? '没有可执行的命令' : `未知命令：${typed}`, 'warn');
+      this.render();
       return;
     }
-    if (parsed) {
-      this.closeMenu();
-      this.executeCommand(parsed.name, parsed.args, true);
+
+    // 一级菜单：有候选值的命令下钻，其余直接执行。
+    const options = OPTION_TABLE[item.id];
+    if (options) {
+      this.openOptionsMenu(item.id, options, this.currentOptionValue(item.id));
       return;
     }
-    this.notify(typed === '' ? '没有可执行的命令' : `未知命令：${typed}`, 'warn');
+    this.closeMenu();
+    this.executeCommand(item.id, '', true);
+  }
+
+  /** 二级菜单选中后的落点：值交给对应命令，复用同一条执行路径。 */
+  private applyOption(parent: string, value: string): void {
+    this.clearNotice();
+    if (parent === 'approval') this.setApprovalMode(value);
+    else if (parent === 'effort') this.setEffort(value);
+    else if (parent === 'export') this.exportSession(value);
+    else if (parent === 'sessions') this.switchSession(value);
+    else this.executeCommand(parent, value, true);
     this.render();
   }
 
@@ -486,6 +584,10 @@ class TuiApp {
         void this.openSessionsMenu();
         return;
       case 'switch':
+        if (args.trim() === '') {
+          void this.openSessionsMenu();
+          return;
+        }
         void this.switchTo(args.trim());
         return;
       case 'status':
@@ -500,9 +602,17 @@ class TuiApp {
         else this.setModel(args.trim());
         break;
       case 'effort':
+        if (args.trim() === '') {
+          this.openOptionsMenu('effort', OPTION_TABLE.effort, this.currentOptionValue('effort'));
+          return;
+        }
         this.setEffort(args.trim());
         break;
       case 'approval':
+        if (args.trim() === '') {
+          this.openOptionsMenu('approval', OPTION_TABLE.approval, this.approvalModeValue);
+          return;
+        }
         this.setApprovalMode(args.trim());
         break;
       case 'todo':
@@ -512,6 +622,10 @@ class TuiApp {
         this.commitLines(this.jobLines());
         break;
       case 'export':
+        if (args.trim() === '') {
+          this.openOptionsMenu('export', OPTION_TABLE.export);
+          return;
+        }
         this.exportSession(args.trim());
         break;
       case 'clear':
@@ -541,7 +655,14 @@ class TuiApp {
       this.render();
       return;
     }
-    this.openMenu('sessions', '');
+    this.openOptionsMenu(
+      'sessions',
+      this.sessions.map((info) => ({
+        value: info.id,
+        hint: `消息 ${info.messages} | ${info.preview || '(空会话)'}`,
+      })),
+      this.state.sessionId,
+    );
   }
 
   /** 菜单路径：会话列表已加载，直接按 id 激活。 */

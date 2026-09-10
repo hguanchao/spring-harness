@@ -134,6 +134,13 @@ Keys:
 - `Enter` — send. A line starting with `/` is a command instead.
 - `/` or `Ctrl+K` — command menu; Up/Down pick, `Enter` run, `Esc` cancel.
   Typing filters it (`Ctrl+K` opens the full list, `/` opens it already prefixed).
+- Commands that take a value drill down instead of running: `Enter` on `/approval`
+  opens a second-level list (`ask` / `auto` / `yolo`) with the current value marked
+  `（当前）` and pre-selected; `Enter` applies it, `Esc` or `Backspace` on an empty
+  filter goes back to the command list, a second `Esc` closes. Same for `/effort`,
+  `/export` and the `/sessions` · `/switch` session picker. Typical flow:
+  `/` → `approval` → `Enter` → Down → `Enter`.
+  Typing the value directly (`/approval yolo`) still works and skips the list.
 - Up / Down — prompt history (when the input is empty).
 - `Ctrl+A/E/K/U/W`, `Ctrl+B/F` — line editing as in readline.
 - `Ctrl+L` — clear screen. `Ctrl+C` — abort the running turn; exit when idle.

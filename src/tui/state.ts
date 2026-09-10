@@ -71,6 +71,8 @@ export interface MenuState {
   index: number;
   /** 输入的过滤串（`/` 前缀的命令面板直接复用输入行内容）。 */
   filter: string;
+  /** 二级选项菜单：键位提示改成「Enter 确认 | Esc 返回」。 */
+  nested?: boolean;
 }
 
 export interface ApprovalPrompt {
