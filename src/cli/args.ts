@@ -54,7 +54,7 @@ Usage:
 
 TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+K       all actions (sessions, model, approval, export, ...)
-          PgUp / PgDn  scroll the conversation view (full-screen UI)
+          Wheel / PgUp / PgDn  scroll the conversation view (full-screen UI)
           Up / Down    prompt history
           Esc          back to latest / abort the running turn / cancel a prompt
           Ctrl+L       clear the view       Ctrl+C  abort; exit when idle

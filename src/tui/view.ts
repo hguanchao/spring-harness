@@ -372,10 +372,12 @@ function inputLine(editor: TuiState['editor'], width: number, styler: Styler): {
 
 function hintLine(state: TuiState): { text: string; tone: 'dim' | 'warn' } | undefined {
   if (state.prompt) return undefined;
+  // 只写实际接了的键：End 是行尾键，不能写进这里；鼠标被关掉时也不能写「滚轮」。
+  const recall = state.mouse ? '滚轮 / PgUp 回看' : 'PgUp 回看';
   // 回看时提示行让位给「怎么回到最新」——这时候用户真正需要知道的是这一条。
-  // 只写实际接了的键：End 是行尾键，不能写进这里。
   if (state.scroll > 0) {
-    return { text: `已上翻 ${state.scroll} 行 | PgDn / Esc 回到最新`, tone: 'warn' };
+    const back = state.mouse ? '滚轮下滚 / PgDn / Esc 回到最新' : 'PgDn / Esc 回到最新';
+    return { text: `已上翻 ${state.scroll} 行 | ${back}`, tone: 'warn' };
   }
   if (state.phase === 'menu') {
     return {
@@ -384,8 +386,10 @@ function hintLine(state: TuiState): { text: string; tone: 'dim' | 'warn' } | und
     };
   }
   if (state.phase === 'status') return { text: '任意键返回', tone: 'dim' };
-  if (state.phase === 'running') return { text: '运行中 | Esc 中断本轮 | Ctrl+C 退出', tone: 'dim' };
-  return { text: 'Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | PgUp 回看 | Ctrl+C 退出', tone: 'dim' };
+  if (state.phase === 'running') {
+    return { text: `运行中 | ${recall} | Esc 中断本轮 | Ctrl+C 退出`, tone: 'dim' };
+  }
+  return { text: `Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | ${recall} | Ctrl+C 退出`, tone: 'dim' };
 }
 
 function overlayTitle(mark: string, title: string, width: number, styler: Styler): string {

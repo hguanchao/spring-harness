@@ -143,9 +143,11 @@ export interface TuiState {
   spinner: number;
   /**
    * 回看偏移：从最新一行往上数的行数，0 表示跟随底部最新内容。
-   * 全屏模式放弃了终端原生滚动历史，回看改由主循环自己实现（PgUp/PgDn）。
+   * 全屏模式放弃了终端原生滚动历史，回看改由主循环自己实现（滚轮 / PgUp / PgDn）。
    */
   scroll: number;
+  /** 鼠标滚轮是否启用。提示行据此决定要不要写「滚轮」——提示必须与真实按键一致。 */
+  mouse: boolean;
   /** 运行中正在流式写入的 thinking 条目下标，供 thinking_end 回填正文。 */
   thinkingIndex?: number;
 }
@@ -162,6 +164,8 @@ export interface TuiInit {
   contextWindow: number;
   mcpServers: number;
   mcpTools: number;
+  /** 鼠标滚轮是否启用；省略视为启用（测试与预览不必关心这一项）。 */
+  mouse?: boolean;
 }
 
 export function createState(init: TuiInit): TuiState {
@@ -189,6 +193,7 @@ export function createState(init: TuiInit): TuiState {
     jobs: 0,
     spinner: 0,
     scroll: 0,
+    mouse: init.mouse ?? true,
   };
 }
 

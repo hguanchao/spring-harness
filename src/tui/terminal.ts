@@ -56,12 +56,32 @@ export interface TerminalSize {
   height: number;
 }
 
+/**
+ * 进入全屏现场要发的序列。抽成纯函数是为了可断言：鼠标模式与 bracketed paste 都
+ * **必须成对开关**，漏掉一半会让用户回到 shell 后拖选失灵或粘贴异常。
+ */
+export function enterSequences(mouse: boolean): string {
+  return ansi.altScreenOn + ansi.bracketedPasteOn + (mouse ? ansi.mouseOn : '') + ansi.hideCursor;
+}
+
+/** 退出时恢复现场的序列（与进入严格对应，多余的模式一律不关）。 */
+export function exitSequences(mouse: boolean): string {
+  return ansi.showCursor + (mouse ? ansi.mouseOff : '') + ansi.bracketedPasteOff + ansi.altScreenOff;
+}
+
 export class Terminal {
   private entered = false;
   private readonly decoder = new StringDecoder('utf8');
   private resizeHandler: (() => void) | null = null;
 
-  constructor(private readonly onInput: (text: string) => void) {}
+  constructor(
+    private readonly onInput: (text: string) => void,
+    /**
+     * 是否启用鼠标滚轮。开着才能用滚轮翻历史，代价是终端不再自己处理鼠标拖选
+     * （Windows Terminal 下要按住 Shift 才是原生选择），所以允许关掉。
+     */
+    private readonly mouse: boolean = true,
+  ) {}
 
   get active(): boolean {
     return this.entered;
@@ -86,8 +106,8 @@ export class Terminal {
     // Windows 不发 SIGWINCH，但 TTY 流会发 'resize'，两端共用这一条路径。
     this.resizeHandler = onResize;
     process.stdout.on('resize', onResize);
-    // 先切到替代屏幕（含清屏回左上），再开 bracketed paste、藏光标。
-    process.stdout.write(ansi.altScreenOn + ansi.bracketedPasteOn + ansi.hideCursor);
+    // 先切到替代屏幕（含清屏回左上），再开 bracketed paste 与鼠标、藏光标。
+    process.stdout.write(enterSequences(this.mouse));
   }
 
   private readonly handleData = (chunk: Buffer | string): void => {
@@ -118,13 +138,15 @@ export class Terminal {
   /**
    * 恢复现场。必须能在任何退出路径（正常退出、Ctrl+C、未捕获异常）上安全重复调用。
    *
-   * 顺序有讲究：先恢复光标可见性，最后才切回主屏幕——主屏幕里用户原本的光标状态
-   * 本来就该是可见的，而 alt screen 里的隐藏状态会随缓冲区一起被丢弃。
+   * 顺序有讲究：先恢复光标可见性，再关掉鼠标与 bracketed paste，最后才切回主屏幕
+   * —— 主屏幕里用户原本的光标状态本来就该是可见的，而 alt screen 里的隐藏状态会随
+   * 缓冲区一起被丢弃。鼠标模式**必须显式关闭**：它是终端侧的状态，不随 alt screen
+   * 一起丢弃，漏关会让用户回到 shell 后仍无法正常拖选。
    */
   restore(): void {
     if (!this.entered) return;
     this.entered = false;
-    process.stdout.write(ansi.showCursor + ansi.bracketedPasteOff + ansi.altScreenOff);
+    process.stdout.write(exitSequences(this.mouse));
     process.stdin.off('data', this.handleData);
     if (this.resizeHandler) {
       process.stdout.off('resize', this.resizeHandler);

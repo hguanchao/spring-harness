@@ -121,7 +121,11 @@ const HELP_LINES = [
   '  /switch <id>    切换到指定会话（支持 id 前缀）',
   '',
   '快捷键：Enter 发送 | / 打开命令菜单 | Ctrl+K 全部操作 | 上下键 历史 | Ctrl+L 清空视图',
-  '        PgUp / PgDn 回看历史（Esc 回到最新） | Esc 中断本轮 / 取消浮层 | Ctrl+C 退出',
+  '        滚轮 / PgUp / PgDn 回看历史（Esc 回到最新） | Esc 中断本轮 / 取消浮层 | Ctrl+C 退出',
+  '',
+  '全屏界面没有终端自身的滚动条，回看用滚轮或 PgUp/PgDn。',
+  '开启鼠标滚轮后不再能用鼠标拖选复制（Windows Terminal 需按住 Shift）；',
+  '想回到纯键盘操作（保留原生拖选）设 SPH_MOUSE=0。',
   '',
   '界面符号只用 ASCII：东亚歧义宽度字符（中点、省略号、箭头）在部分终端按 2 列渲染，',
   '会让底部活动区的宽度计算失真并吃掉一行已提交内容，因此一律不用。',
@@ -144,6 +148,8 @@ const BRANCH_TTL_MS = 2000;
 const RESIZE_MIN_INTERVAL_MS = 50;
 /** 回看翻页时保留的重叠行数：刚好切在两行中间时还能看清上下文。 */
 const PAGE_OVERLAP = 1;
+/** 滚轮一格的滚动行数。多数终端一格 = 3 行，跟随这个惯例手感最自然。 */
+const WHEEL_STEP = 3;
 
 /**
  * 可用列数 = 终端上报列数 - 1。
@@ -153,6 +159,19 @@ const PAGE_OVERLAP = 1;
  */
 function liveWidth(columns: number): number {
   return Math.max(20, columns - 1);
+}
+
+/**
+ * 鼠标滚轮是否启用；`SPH_MOUSE=0|false|off|no` 关闭。
+ *
+ * 默认开。界面跑在替代屏幕（alt screen）里，**终端自身的滚动能力在这里是失效的**：
+ * 没有 scrollback 可滚、滚动条拖不动、滚轮也不会被转发给我们。所以不接滚轮，用户
+ * 会认为「窗口根本滚不动」。代价是终端不再自己处理鼠标拖选——Windows Terminal 下要
+ * 按住 Shift 才是原生选择——因此留这个开关作为退路。
+ */
+export function mouseEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = (env.SPH_MOUSE ?? '').trim().toLowerCase();
+  return value !== '0' && value !== 'false' && value !== 'off' && value !== 'no';
 }
 
 /**
@@ -230,7 +249,8 @@ class TuiApp {
     this.approvalModeValue = deps.approvalMode;
     this.client = deps.makeClient({ model: deps.model, api: deps.api, effort: deps.effort });
     this.styler = createStyler(colorEnabled());
-    this.terminal = new Terminal((text) => this.feed(text));
+    const mouse = mouseEnabled();
+    this.terminal = new Terminal((text) => this.feed(text), mouse);
     // 分类器按需构造：/model 换模型后审查器要跟着用新 client，闭包不能固化旧实例。
     this.approver = new InteractiveApprover(this, (request) => createLlmClassifier(this.client)(request));
     this.state = createState({
@@ -245,6 +265,7 @@ class TuiApp {
       contextWindow: deps.contextWindow,
       mcpServers: deps.mcpServerCount,
       mcpTools: deps.mcp.listTools().length,
+      mouse,
     });
   }
 
@@ -295,6 +316,8 @@ class TuiApp {
   }
 
   private dispatch(key: Key): void {
+    // 终端协议事件（鼠标按键、拖拽）显式丢弃，不进入任何交互路径。
+    if (key.kind === 'ignore') return;
     if (this.state.prompt) return this.handlePromptKey(key);
     if (this.state.phase === 'menu') return this.handleMenuKey(key);
     if (this.state.phase === 'status') {
@@ -322,6 +345,11 @@ class TuiApp {
     }
     if (key.kind === 'pagedown') {
       this.scrollTo(this.state.scroll - this.pageSize());
+      return true;
+    }
+    if (key.kind === 'wheel') {
+      // 滚轮一次一格手感太肉，按行给一个固定步长。
+      this.scrollTo(this.state.scroll + (key.direction === 'up' ? WHEEL_STEP : -WHEEL_STEP));
       return true;
     }
     // Esc 分两级：回看中先回到底部，再按一次才轮到「中断本轮」。避免翻历史时误中断。

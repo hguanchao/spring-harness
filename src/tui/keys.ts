@@ -24,6 +24,14 @@ export type Key =
   | { kind: 'end' }
   | { kind: 'pageup' }
   | { kind: 'pagedown' }
+  /** 鼠标滚轮：方向即滚动方向。 */
+  | { kind: 'wheel'; direction: 'up' | 'down' }
+  /**
+   * 已识别但当前不处理的事件（鼠标按键、拖拽移动等）。
+   * 必须显式忽略而不是当成 unknown —— unknown 会带着原始文本继续往下走，最终可能被
+   * 写进输入行；而这些字节是终端的协议数据，不该出现在用户的输入里。
+   */
+  | { kind: 'ignore' }
   | { kind: 'ctrl'; key: string }
   | { kind: 'unknown'; raw: string };
 
@@ -70,6 +78,21 @@ function csiKey(sequence: string): Key {
       if (num === 6) return { kind: 'pagedown' };
       return { kind: 'unknown', raw: `\x1b${sequence}` };
     }
+    // SGR 鼠标（?1006h）：`ESC [ < 按键 ; 列 ; 行` + `M`(按下) 或 `m`(释放)。
+    case 'M':
+    case 'm': {
+      const match = /^<(\d+);(\d+);(\d+)$/.exec(body);
+      if (!match) return { kind: 'unknown', raw: `\x1b${sequence}` };
+      const button = Number(match[1]);
+      // 按键码：低两位是键号，bit2..4 是 Shift/Meta/Ctrl，bit5 是「拖动中」。
+      // 掩掉修饰位与拖动位之后，64/65 就是滚轮上/下，66/67 是水平滚轮。
+      const code = button & ~0b11100;
+      if (final === 'M' && (code === 64 || code === 65)) {
+        return { kind: 'wheel', direction: code === 64 ? 'up' : 'down' };
+      }
+      // 左/中/右键与拖拽：本轮不做鼠标交互，显式忽略。
+      return { kind: 'ignore' };
+    }
     default:
       return { kind: 'unknown', raw: `\x1b${sequence}` };
   }
@@ -100,11 +123,19 @@ export class KeyParser {
   private buffer = '';
   private pasting = false;
   private pasteText = '';
+  /** 老式 X10 鼠标报文还需吞掉的字节数（见 push 里的 `\x1b[M` 分支）。 */
+  private x10Remaining = 0;
 
   push(chunk: string): Key[] {
     this.buffer += chunk;
     const keys: Key[] = [];
     while (this.buffer.length > 0) {
+      if (this.x10Remaining > 0) {
+        const take = Math.min(this.x10Remaining, this.buffer.length);
+        this.buffer = this.buffer.slice(take);
+        this.x10Remaining -= take;
+        continue;
+      }
       if (this.pasting) {
         const end = this.buffer.indexOf('\x1b[201~');
         if (end === -1) {
@@ -130,6 +161,13 @@ export class KeyParser {
         if (body === '[200~') {
           this.pasting = true;
           this.pasteText = '';
+          continue;
+        }
+        // 老式 X10 鼠标报文：`ESC [ M` 之后紧跟 3 个**原始字节**（不含 `<` 的终端
+        // 会这么发）。这 3 个字节多半落在可打印区，若不吞掉就会被当成用户输入写进
+        // 输入行，表现为「一动鼠标就冒出一串乱码」。
+        if (body === '[M') {
+          this.x10Remaining = 3;
           continue;
         }
         keys.push(body.startsWith('[') ? csiKey(body) : body.startsWith('O') ? ss3Key(body) : { kind: 'escape' });

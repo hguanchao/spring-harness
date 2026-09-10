@@ -124,6 +124,11 @@ mechanism vim and htop use), so you get a clean, empty screen instead of a wall
 of your shell's previous output — and when you quit, the terminal is restored
 exactly as it was. Nothing from the session is left behind in your scrollback.
 
+One consequence of giving up the terminal's own screen: **the terminal's
+scrollbar and scrollback can no longer move the conversation.** Nothing outside
+the app can shift the view — not the scrollbar, not `Shift+PgUp`, not the wheel
+on its own. Scrolling is handled inside the app instead; see the keys below.
+
 Each frame is painted as a whole: the screen is split into a **conversation
 viewport** on top and a **fixed activity area at the bottom** (overlays, input
 line, hint line, status line). The input line therefore never moves, no matter
@@ -136,7 +141,7 @@ redrawer would.
     read_file src/tui/ansi.ts:1-3 (3 行)                       380ms
     grep "displayWidth" -> 2 处                                 620ms
 > 重构 compact.ts 的估算是怎么做的
-Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | PgUp 回看 | Ctrl+C 退出
+Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | 滚轮 / PgUp 回看 | Ctrl+C 退出
 📁 spring-harness | 🌿 main | 🤖 gpt-x | 🧠 medium | 🧮 [#---] 24% | 🔁 85% | 🔒 ask
 ```
 
@@ -153,11 +158,19 @@ Keys:
   `/` → `approval` → `Enter` → Down → `Enter`.
   Typing the value directly (`/approval yolo`) still works and skips the list.
 - Up / Down — prompt history (when the input is empty).
-- `PgUp` / `PgDn` — scroll the conversation view back and forward by a page.
-  Since the full-screen UI gives up the terminal's own scrollback, this is how
-  you read earlier output. `Esc` returns to the latest (a first `Esc` while
-  scrolled only goes back to the bottom — a second one aborts the running turn),
-  and typing anything jumps back to the latest too.
+- **Scrolling the conversation.** Because the app owns the screen (above), the
+  terminal itself cannot move the view. Two things can:
+  - the **mouse wheel** — 3 lines per notch;
+  - **`PgUp` / `PgDn`** — one page at a time, keeping one line of overlap.
+
+  `Esc` returns to the latest (a first `Esc` while scrolled only goes back to
+  the bottom — a second one aborts the running turn), and typing anything jumps
+  back to the latest too.
+- **Mouse reporting** is on by default so the wheel works. The cost is that the
+  terminal no longer does drag-to-select itself: in Windows Terminal hold `Shift`
+  while dragging for a native selection. Set `SPH_MOUSE=0` (also `false`, `off`,
+  `no`) to turn mouse reporting off and keep drag-select native — the wheel then
+  does nothing, and the hint line stops advertising it. `PgUp`/`PgDn` always work.
 - `Ctrl+A/E/K/U/W`, `Ctrl+B/F` — line editing as in readline.
 - `Ctrl+L` — clear the conversation view. The session itself is untouched
   (`/export` still gets the whole thing). `Ctrl+C` — abort the running turn;
@@ -255,8 +268,13 @@ Notes:
 
 - The TUI holds the workspace session lock for as long as it runs, so a second
   `sph` in the same workspace exits with `session already in use by pid ...`.
-- Colors are dropped when `NO_COLOR` is set or the output is not a TTY. There
-  is no mouse support and no emoji.
+- Colors are dropped when `NO_COLOR` is set or the output is not a TTY.
+- Mouse support is limited to the **wheel**, and only for scrolling the
+  conversation view. There is no click, drag, in-app selection or context menu.
+- The wheel needs SGR mouse reporting (`?1006h`). Terminals that speak only the
+  old X10 format send wheel events in a shape the app deliberately discards — so
+  they can never leak into the input line, but the wheel is inert there and
+  `PgUp`/`PgDn` are the only way to scroll.
 - Windows Terminal is the primary target; the same ANSI path keeps it usable on
   Linux and macOS terminals. Legacy cmd.exe (conhost) needs Windows 10 1607+ for
   the alternate screen buffer; without it the sequences are ignored and the UI
