@@ -67,6 +67,8 @@ export interface BootstrapOptions {
    * headless 只能报错退出（无人可问），TUI 可以在终端里问一次。
    */
   untrusted: 'error' | 'confirm';
+  /** TUI 启动前的信任确认；headless 不提供，继续走 fail-closed。 */
+  confirmUntrustedWorkspace?: (workspaceRoot: string) => Promise<boolean>;
   newSession: boolean;
   resumeId?: string;
   fork: boolean;
@@ -90,7 +92,7 @@ export interface Runtime {
   jobs: JobBoard;
   persistent: PersistentShell;
   /** 按覆盖参数重建 client（TUI 的 /model、/effort 用）。 */
-  makeClient(overrides: { model: string; api: ApiProtocol; effort?: ReasoningEffort }): LlmClient;
+  makeClient(overrides: { model: string; api: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
   /** 幂等清理：所有退出路径都调它。 */
   cleanup(): void;
 }
@@ -112,7 +114,9 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         2,
       );
     }
-    const ok = await confirmTrust(options.workspaceRoot);
+    const ok = options.confirmUntrustedWorkspace
+      ? await options.confirmUntrustedWorkspace(options.workspaceRoot)
+      : await confirmTrust(options.workspaceRoot);
     if (!ok) throw new CliError(`workspace is not trusted: ${options.workspaceRoot}`, 2);
     rememberTrustedWorkspace(options.workspaceRoot);
   }
@@ -197,7 +201,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         model: overrides.model,
         api: overrides.api,
         reasoningEffort: overrides.effort,
-        maxTokens: options.maxTokens ?? config.maxTokens,
+        maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
       });
     },
     cleanup,

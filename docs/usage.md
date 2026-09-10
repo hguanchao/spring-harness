@@ -214,8 +214,13 @@ Keys:
 - `Esc` — abort the running turn, close an overlay, or clear the input.
 
 Commands: `/help` `/new` `/sessions` (pick from a menu of past sessions)
-`/switch <id>` `/status` `/plan` `/model [name]` `/effort <level>`
+`/switch <id>` `/status` `/plan` `/model` `/effort <level>`
 `/approval <mode>` `/todo` `/jobs` `/export [md|json]` `/clear` `/quit`.
+
+`/model` fetches the upstream model list from the configured `base_url` with the
+configured API key, then guides you through model selection, context window,
+maximum output tokens, and a final confirmation. Model IDs cannot be typed into
+this command directly.
 
 Persistence: `/model`, `/effort` and `/approval` write your choice back to
 `~/.sph/config.toml`, so it survives a restart — the notice says which file was

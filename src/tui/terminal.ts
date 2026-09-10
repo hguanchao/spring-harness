@@ -66,7 +66,7 @@ export function enterSequences(mouse: boolean): string {
 
 /** 退出时恢复现场的序列（与进入严格对应，多余的模式一律不关）。 */
 export function exitSequences(mouse: boolean): string {
-  return ansi.showCursor + (mouse ? ansi.mouseOff : '') + ansi.bracketedPasteOff + ansi.altScreenOff;
+  return ansi.resetCursorStyle + ansi.showCursor + (mouse ? ansi.mouseOff : '') + ansi.bracketedPasteOff + ansi.altScreenOff;
 }
 
 export class Terminal {
@@ -130,7 +130,7 @@ export class Terminal {
       out += ansi.clearLine + clipLine(lines[row] ?? '', limit);
       if (row < height - 1) out += ansi.newline;
     }
-    out += cursor ? ansi.position(cursor.row, cursor.col) + ansi.showCursor : ansi.hideCursor;
+    out += cursor ? ansi.barCursor + ansi.position(cursor.row, cursor.col) + ansi.showCursor : ansi.hideCursor;
     out += ansi.syncOff;
     process.stdout.write(out);
   }

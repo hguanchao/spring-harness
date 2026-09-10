@@ -302,9 +302,6 @@ export interface Styler {
  */
 export const DIALOG_BG = 100;
 
-/** 反显收尾：先关反显（27），再恢复对话框背景（49）。顺序反了会把背景一起抹掉。 */
-export const INVERSE_BUBBLE_RESET = '\x1b[27m\x1b[49m';
-
 /**
  * 色彩深度：3 = 真彩（24 位），2 = 256 色，1 = 16 色。
  *
@@ -316,13 +313,19 @@ export type ColorDepth = 1 | 2 | 3;
 /**
  * 探测终端色彩深度。
  *
- * 只认两个信号：`COLORTERM` 含 `truecolor`/`24bit`，或 `TERM` 含 `256color`。
- * 两者都没有就按 16 色处理 —— **宁可低估也不要高估**：高估会发出终端不认识的 SGR，
+ * 只认终端明确声明的信号：`COLORTERM` 含 `truecolor`/`24bit`、Windows 平台或
+ * Windows Terminal 提供 `WT_SESSION`，或 `TERM` 含 `256color`。
+ * 这些信号都没有就按 16 色处理 —— **宁可低估也不要高估**：高估会发出终端不认识的 SGR，
  * 结果不是「颜色差点」而是「整块背景色丢失」或更糟的乱码。
  */
-export function colorDepth(env: NodeJS.ProcessEnv = process.env): ColorDepth {
+export function colorDepth(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): ColorDepth {
   const colorTerm = (env.COLORTERM ?? '').toLowerCase();
-  if (colorTerm.includes('truecolor') || colorTerm.includes('24bit')) return 3;
+  if (
+    colorTerm.includes('truecolor') ||
+    colorTerm.includes('24bit') ||
+    platform === 'win32' ||
+    env.WT_SESSION !== undefined
+  ) return 3;
   if (/\b256(?:color)?\b/.test(env.TERM ?? '')) return 2;
   return 1;
 }
@@ -419,6 +422,10 @@ export function colorEnabled(env: NodeJS.ProcessEnv = process.env, isTty = proce
 export const ansi = {
   hideCursor: '\x1b[?25l',
   showCursor: '\x1b[?25h',
+  /** 将原生光标设为闪烁竖线，避免额外绘制字符造成双光标。 */
+  barCursor: '\x1b[5 q',
+  /** 退出 TUI 时恢复终端默认光标样式。 */
+  resetCursorStyle: '\x1b[0 q',
   /** 清整行（含行尾）。整帧重绘时逐行调用，上一帧更长的一行不会留下残尾。 */
   clearLine: '\x1b[2K',
   /** 光标移回左上角，作为整帧重绘的起点。 */

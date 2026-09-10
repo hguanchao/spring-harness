@@ -81,6 +81,8 @@ export interface ApprovalPrompt {
   request: ApprovalRequest;
   /** 附加说明（例如 auto 模式下审查器的否决理由）。 */
   note?: string;
+  /** 当前选中的审批动作；默认选中一次性允许，避免误触扩大授权范围。 */
+  choice: 'allow' | 'allow-session' | 'deny';
   resolve: (allow: boolean) => void;
 }
 

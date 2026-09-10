@@ -8,12 +8,14 @@ import { createLlmClassifier } from '../approval/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { runTui } from '../tui/app.js';
+import { confirmWorkspaceTrust } from '../tui/trust.js';
 import { sessionDirFor } from '../session/path.js';
 import { lastAssistantMessage, messagesOf } from '../session/query.js';
 import { exportJson, exportMarkdown } from '../session/export.js';
 import { JsonlSession, listSessions, type SessionInfo } from '../session/store.js';
 import type { SessionRecord } from '../session/types.js';
 import { resolveWorkspaceRoot } from '../workspace/root.js';
+import { listAvailableModels } from '../llm/models.js';
 
 function printSessionInfos(infos: SessionInfo[]): void {
   for (const info of infos) {
@@ -83,6 +85,7 @@ async function bootstrap(
   args: CliArgs,
   workspaceRoot: string,
   untrusted: 'error' | 'confirm',
+  confirmUntrustedWorkspace?: (workspaceRoot: string) => Promise<boolean>,
 ): Promise<Runtime | undefined> {
   try {
     return await bootstrapRuntime({
@@ -90,6 +93,7 @@ async function bootstrap(
       sandboxOverride: args.sandbox,
       trust: args.trust,
       untrusted,
+      confirmUntrustedWorkspace,
       newSession: args.newSession,
       resumeId: args.resumeId,
       fork: args.fork,
@@ -129,7 +133,7 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
     return;
   }
 
-  const runtime = await bootstrap(args, workspaceRoot, 'confirm');
+  const runtime = await bootstrap(args, workspaceRoot, 'confirm', confirmWorkspaceTrust);
   if (!runtime) return;
   try {
     for (const warning of runtime.mcpWarnings) process.stderr.write(`${warning}\n`);
@@ -146,10 +150,13 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       persistent: runtime.persistent,
       approvalMode: args.approval ?? runtime.config.approval ?? 'ask',
       configPath: runtime.configPath,
+      baseUrl: runtime.config.baseUrl,
       model: args.model ?? runtime.config.model,
       api: args.api ?? runtime.config.api,
       effort: args.effort ?? runtime.config.reasoningEffort,
+      maxTokens: args.maxTokens ?? runtime.config.maxTokens,
       makeClient: (overrides) => runtime.makeClient(overrides),
+      fetchModels: () => listAvailableModels(runtime.config.baseUrl, runtime.config.apiKey),
     });
   } finally {
     runtime.cleanup();
