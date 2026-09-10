@@ -331,6 +331,21 @@ export function maxScroll(bodyRows: number, liveRows: number, height: number): n
   return Math.max(0, bodyRows - Math.max(1, height - liveRows));
 }
 
+/**
+ * 滚动锚定：历史在**视口上方**长高时，把偏移同步推上去，视口才会停在原处。
+ *
+ * 触发场景是流式正文在底部增长：不推偏移的话视口会自己往下滑、慢慢露出新内容，
+ * 用户正在读的那一段就飘走了。
+ *
+ * 两条边界：
+ * - `scroll === 0`（贴底）时不动 —— 这时候跟随最新才是正确行为。
+ * - 只在变长时调整。长度骤减（/clear、切会话）不该反向修正，那种情况由调用方重置偏移。
+ */
+export function anchorScroll(scroll: number, previousLength: number, currentLength: number): number {
+  if (scroll <= 0 || currentLength <= previousLength) return scroll;
+  return scroll + (currentLength - previousLength);
+}
+
 function noticeMark(level: NoticeLevel): string {
   if (level === 'error') return '[x]';
   if (level === 'warn') return '[!]';

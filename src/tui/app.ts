@@ -41,7 +41,7 @@ import { readGitBranch } from './git.js';
 import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TranscriptEntry, type TuiState } from './state.js';
 import { InputQueue, Terminal } from './terminal.js';
 import {
-  composeFrame, maxScroll, renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions,
+  anchorScroll, composeFrame, maxScroll, renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions,
 } from './view.js';
 import type { ToolCallView } from './tool-view.js';
 
@@ -204,6 +204,8 @@ class TuiApp {
   private renderQueued = false;
   /** 上一帧历史视口的高度，PgUp/PgDn 按它翻页。 */
   private lastBodyRows = 10;
+  /** 上一帧历史的总行数，用于滚动锚定（视口上方内容长高时同步推偏移）。 */
+  private lastBodyLength = 0;
   /** 本步攒下的工具调用，等这一步结束一次性渲染成块。 */
   private pendingTools: ToolCallView[] = [];
   private readonly toolStartedAt = new Map<string, number>();
@@ -1103,8 +1105,6 @@ class TuiApp {
     const width = this.viewOptions().width;
     const lines = typeof content === 'function' ? content(width) : content;
     if (lines.length === 0) return;
-    // 回看中时新内容不该把视线拽走：偏移跟着一起增长，视口停在原处。
-    if (this.state.scroll > 0) this.state.scroll += lines.length + (options?.blank === true ? 1 : 0);
     this.body.push({
       lines,
       width,
@@ -1169,6 +1169,10 @@ class TuiApp {
     this.lastSize = { width: size.width, height: size.height };
     const live = renderLive(this.state, options);
     const body = this.bodyLines(options.width);
+    // 滚动锚定：视口上方长高时把偏移同步推上去（见 anchorScroll 的两条边界）。
+    // 新提交的行也走这一条路径，不再由 commit 记账，否则两条路径会重复累加。
+    this.state.scroll = anchorScroll(this.state.scroll, this.lastBodyLength, body.length);
+    this.lastBodyLength = body.length;
     // 夹住偏移：PgUp 顶到开头之后偏移不该继续无限增长，否则要按很多次 PgDn 才回得来。
     this.state.scroll = Math.max(0, Math.min(this.state.scroll, maxScroll(body.length, live.lines.length, size.height)));
     const frame = composeFrame(body, live, options, this.state.scroll);
