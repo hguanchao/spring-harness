@@ -1,17 +1,17 @@
 /**
  * 纯渲染层：状态 → 屏幕行。没有任何 IO，也没有 TTY 依赖，可直接在测试里断言。
  *
- * 渲染模型是「行内（inline）」而不是全屏替代缓冲区：
- * - 对话正文由 app 直接写进终端原生滚动区，天然支持终端自身的滚动/搜索/复制；
- * - 这里只负责底部那块会重绘的「活动区」：浮层 + 输入行 + 提示行 + notice + 状态行。
+ * 渲染模型是**整屏**：屏幕切成「上半部分 = 对话历史视口」+「底部 = 活动区（浮层 + 输入行
+ * + 提示行 + notice + 状态行）」两段，整帧交给 terminal.paint 覆盖式绘制。历史视口由
+ * composeFrame 按滚动偏移裁出，因此输入行永远钉在屏幕底部，位置不随内容多少跳动。
  *
  * 三条硬约定，改动时不要破：
- * 1. 活动区每行 displayWidth <= width。超了会被终端折成两行，重绘时「上移 N 行」算错、
- *    吃掉已提交内容。折行一律由本模块负责。
+ * 1. 每一行 displayWidth <= width。写满最后一列会触发终端自动换行，让整帧整体错位一行。
+ *    折行一律由本模块负责（terminal.paint 里还有一道 clipLine 保险丝兜底）。
  * 2. 骨架字符只用 ASCII。东亚歧义宽度字符（·、…、↑↓、制表符）在部分终端按 2 列渲染，
  *    会让第 1 条失效——要表达方向键就写「上下键」，不要用箭头字形。
- * 3. 不补齐行尾（菜单选中条除外）。clearLive() 已用 ESC[J 清到屏幕末尾，短行不会留残影；
- *    补齐只会让复制内容带上行尾空格，并让「截断带色文本丢复位序列」的风险扩散。
+ * 3. 不做行尾补齐（菜单选中条除外）。整帧绘制时每行都从 ESC[2K 清行开始，短行不会留下
+ *    上一帧的残尾；补齐只会给复制内容带上行尾空格。
  *
  * 色彩语义（16 色，落在终端自身调色板上，随浅色/深色主题自适应，不硬编码亮度）：
  *   cyan    用户输入前缀、可交互焦点、菜单标题
@@ -270,11 +270,13 @@ export function renderLive(state: TuiState, options: ViewOptions): LiveView {
   }
 
   const hint = hintLine(state);
-  if (hint) lines.push(styler.dim(truncate(hint, width, '')));
+  if (hint) lines.push(hint.tone === 'warn'
+    ? styler.yellow(truncate(hint.text, width, ''))
+    : styler.dim(truncate(hint.text, width, '')));
   if (state.notice) lines.push(noticeLine(state.notice, width, styler));
   lines.push(composeSegments(statusSegments(state, styler, now), width, styler));
 
-  // 硬上限：活动区绝不能高过终端，否则重绘时「上移 N 行」会吃掉已提交的滚动内容。
+  // 活动区硬上限：必须给历史视口留出至少一行，否则整屏只有输入框，看起来像卡死了。
   const maxRows = Math.max(3, options.height - 1);
   if (lines.length > maxRows) {
     const drop = lines.length - maxRows;
@@ -282,6 +284,49 @@ export function renderLive(state: TuiState, options: ViewOptions): LiveView {
     cursor = cursor && cursor.row - drop >= 0 ? { row: cursor.row - drop, col: cursor.col } : null;
   }
   return { lines, cursor };
+}
+
+// ---------------------------------------------------------------- 整帧
+
+/**
+ * 把「历史视口 + 底部活动区」组合成**正好一屏**的整帧。
+ *
+ * 布局约定：活动区钉在屏幕底部（输入行位置固定，视线不用每次去找），历史从下往上填满
+ * 剩余空间。scroll=0 时贴着最新内容；scroll 越大越往早前看。历史不足一屏时**在顶部补
+ * 空行**而不是让活动区上浮——否则输入行会随内容多少上下跳。
+ *
+ * 调用方负责把 scroll 夹到有效范围内（见 app 的 maxScroll 计算），这里只做防御性收敛。
+ */
+export function composeFrame(
+  body: readonly string[],
+  live: LiveView,
+  options: ViewOptions,
+  scroll: number,
+): LiveView {
+  const height = Math.max(3, options.height);
+  const liveLines = live.lines.slice(Math.max(0, live.lines.length - (height - 1)));
+  const dropped = live.lines.length - liveLines.length;
+  const bodyRows = height - liveLines.length;
+
+  const offset = Math.max(0, Math.floor(scroll));
+  const end = Math.max(0, Math.min(body.length, body.length - offset));
+  const start = Math.max(0, end - bodyRows);
+  const blank = bodyRows - (end - start);
+
+  const lines = [...new Array<string>(blank).fill(''), ...body.slice(start, end), ...liveLines];
+  const cursorRow = bodyRows + (live.cursor ? live.cursor.row - dropped : 0);
+  const cursor = live.cursor && live.cursor.row - dropped >= 0
+    ? { row: cursorRow, col: live.cursor.col }
+    : null;
+  return { lines, cursor };
+}
+
+/**
+ * 可回看的最大行数：历史长度减去一屏能显示的行数。给 0 表示「无需滚动」。
+ * 夹在调用方而不是 composeFrame 里，是为了让 PgUp 顶到开头时偏移不再无限增长。
+ */
+export function maxScroll(bodyRows: number, liveRows: number, height: number): number {
+  return Math.max(0, bodyRows - Math.max(1, height - liveRows));
 }
 
 function noticeMark(level: NoticeLevel): string {
@@ -308,14 +353,22 @@ function inputLine(editor: TuiState['editor'], width: number, styler: Styler): {
   return { line: `${styler.cyan('> ')}${segments.join('')}`, column: 2 + cursorColumn };
 }
 
-function hintLine(state: TuiState): string | undefined {
+function hintLine(state: TuiState): { text: string; tone: 'dim' | 'warn' } | undefined {
   if (state.prompt) return undefined;
-  if (state.phase === 'menu') {
-    return state.menu?.nested ? '上下键 选择 | Enter 确认 | Esc 返回' : '上下键 选择 | Enter 执行 | Esc 取消';
+  // 回看时提示行让位给「怎么回到最新」——这时候用户真正需要知道的是这一条。
+  // 只写实际接了的键：End 是行尾键，不能写进这里。
+  if (state.scroll > 0) {
+    return { text: `已上翻 ${state.scroll} 行 | PgDn / Esc 回到最新`, tone: 'warn' };
   }
-  if (state.phase === 'status') return '任意键返回';
-  if (state.phase === 'running') return '运行中 | Esc 中断本轮 | Ctrl+C 退出';
-  return 'Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | Ctrl+C 退出';
+  if (state.phase === 'menu') {
+    return {
+      text: state.menu?.nested ? '上下键 选择 | Enter 确认 | Esc 返回' : '上下键 选择 | Enter 执行 | Esc 取消',
+      tone: 'dim',
+    };
+  }
+  if (state.phase === 'status') return { text: '任意键返回', tone: 'dim' };
+  if (state.phase === 'running') return { text: '运行中 | Esc 中断本轮 | Ctrl+C 退出', tone: 'dim' };
+  return { text: 'Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | PgUp 回看 | Ctrl+C 退出', tone: 'dim' };
 }
 
 function overlayTitle(mark: string, title: string, width: number, styler: Styler): string {

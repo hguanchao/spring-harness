@@ -159,6 +159,27 @@ export function truncate(text: string, width: number, marker = '~'): string {
   return used + markerWidth <= limit ? out + marker : out;
 }
 
+/**
+ * 整帧绘制前的最后一道保险：把一行硬夹到宽度以内，不加截断标记。
+ *
+ * 为什么需要它：写满最后一列会触发终端的自动换行，让整帧**整体上移一行**——一行超宽
+ * 就毁掉整屏。所以宁可截断也不能放过。截断带色文本会连带丢掉它末尾的复位序列，颜色会
+ * 泄漏到之后的所有行上，因此只要这一行里出现过 SGR，就补一个复位收尾。
+ */
+export function clipLine(text: string, width: number): string {
+  const limit = Math.max(0, Math.floor(width));
+  if (limit === 0) return '';
+  if (displayWidth(text) <= limit) return text;
+  let out = '';
+  let used = 0;
+  for (const cluster of clusters(text)) {
+    if (used + cluster.width > limit) break;
+    out += cluster.ch;
+    used += cluster.width;
+  }
+  return out === '' ? '' : out.includes('\x1b[') ? `${out}\x1b[0m` : out;
+}
+
 /** 右侧补空格到指定宽度；超宽则先截断。 */
 export function pad(text: string, width: number): string {
   const limit = Math.max(0, Math.floor(width));
@@ -273,12 +294,28 @@ export function colorEnabled(env: NodeJS.ProcessEnv = process.env, isTty = proce
 export const ansi = {
   hideCursor: '\x1b[?25l',
   showCursor: '\x1b[?25h',
+  /** 清整行（含行尾）。整帧重绘时逐行调用，上一帧更长的一行不会留下残尾。 */
   clearLine: '\x1b[2K',
-  eraseToEnd: '\x1b[J',
-  /** 光标移到本行第 col 列（0-based）。 */
-  column: (col: number): string => `\x1b[${Math.max(1, col + 1)}G`,
-  /** 光标上移 n 行（n<=0 时为空串，便于无条件拼接）。 */
-  up: (rows: number): string => (rows > 0 ? `\x1b[${rows}A` : ''),
+  /** 光标移回左上角，作为整帧重绘的起点。 */
+  home: '\x1b[H',
+  /** 光标移到绝对位置（0-based 行列）。 */
+  position: (row: number, col: number): string =>
+    `\x1b[${Math.max(1, row + 1)};${Math.max(1, col + 1)}H`,
+  /** 换行并回到行首。raw mode 关掉了 OPOST，`\n` 不再带回车，必须显式带上 `\r`。 */
+  newline: '\r\n',
+  /**
+   * 进入替代屏幕缓冲区：得到一个全新的空白屏幕，退出时终端自动还原进入前的画面。
+   * 这是「独立界面」的实现方式，也是 vim / htop 一类全屏程序的标准做法。
+   */
+  altScreenOn: '\x1b[?1049h\x1b[2J\x1b[H',
+  altScreenOff: '\x1b[?1049l',
+  /**
+   * 同步输出（DECSET/DECRST 2026）：让终端把一帧当作一个整体提交，避免整帧重绘时
+   * 出现「上半屏是旧帧、下半屏是新帧」的撕裂或闪烁。不支持的终端会忽略这两个序列，
+   * 因此无条件发送是安全的。
+   */
+  syncOn: '\x1b[?2026h',
+  syncOff: '\x1b[?2026l',
   bracketedPasteOn: '\x1b[?2004h',
   bracketedPasteOff: '\x1b[?2004l',
 };

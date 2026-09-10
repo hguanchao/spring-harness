@@ -52,11 +52,12 @@ Usage:
   sph --trust               Remember this workspace as trusted (required for untrusted -p)
   sph --sandbox MODE        off | workspace | read-only  (default: workspace)
 
-TUI keys: /            command menu (↑↓ pick, Enter run)
+TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+K       all actions (sessions, model, approval, export, ...)
-          ↑ / ↓        prompt history
-          Esc          abort the running turn / cancel a prompt
-          Ctrl+L       clear screen        Ctrl+C  abort; exit when idle
+          PgUp / PgDn  scroll the conversation view (full-screen UI)
+          Up / Down    prompt history
+          Esc          back to latest / abort the running turn / cancel a prompt
+          Ctrl+L       clear the view       Ctrl+C  abort; exit when idle
 TUI commands: /help /new /sessions /switch /status /plan /model /effort
               /approval /todo /jobs /export /clear /quit
 

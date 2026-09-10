@@ -118,15 +118,26 @@ interactively instead. `--schema` and `--output json|stream-json` require `-p`.
 
 ## Interactive TUI
 
-`sph` alone gives you a conversation you can steer. The transcript goes into
-the terminal's own scrollback (so native scroll, search and copy all work);
-only a small live region at the bottom is redrawn — the overlays, the input
-line and the status line.
+`sph` alone gives you a conversation you can steer. The interface is
+**full-screen**: it switches to the terminal's alternate screen buffer (the same
+mechanism vim and htop use), so you get a clean, empty screen instead of a wall
+of your shell's previous output — and when you quit, the terminal is restored
+exactly as it was. Nothing from the session is left behind in your scrollback.
+
+Each frame is painted as a whole: the screen is split into a **conversation
+viewport** on top and a **fixed activity area at the bottom** (overlays, input
+line, hint line, status line). The input line therefore never moves, no matter
+how much history there is. Because every frame rewrites the entire screen, a
+terminal resize cannot leave the stale copies behind that a patch-based
+redrawer would.
 
 ```
+  ... 3 个工具调用 | 1 个失败 | 13.5s
+    read_file src/tui/ansi.ts:1-3 (3 行)                       380ms
+    grep "displayWidth" -> 2 处                                 620ms
 > 重构 compact.ts 的估算是怎么做的
-                    ← 正文与工具结果追加在滚动区，工具输出折叠成前 8 行
-  gpt-x · 审批 ask · 沙箱 workspace · ↑12.3k ↓1.1k · todo 2/5 · jobs 1
+Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | PgUp 回看 | Ctrl+C 退出
+📁 spring-harness | 🌿 main | 🤖 gpt-x | 🧠 medium | 🧮 [#---] 24% | 🔁 85% | 🔒 ask
 ```
 
 Keys:
@@ -142,8 +153,15 @@ Keys:
   `/` → `approval` → `Enter` → Down → `Enter`.
   Typing the value directly (`/approval yolo`) still works and skips the list.
 - Up / Down — prompt history (when the input is empty).
+- `PgUp` / `PgDn` — scroll the conversation view back and forward by a page.
+  Since the full-screen UI gives up the terminal's own scrollback, this is how
+  you read earlier output. `Esc` returns to the latest (a first `Esc` while
+  scrolled only goes back to the bottom — a second one aborts the running turn),
+  and typing anything jumps back to the latest too.
 - `Ctrl+A/E/K/U/W`, `Ctrl+B/F` — line editing as in readline.
-- `Ctrl+L` — clear screen. `Ctrl+C` — abort the running turn; exit when idle.
+- `Ctrl+L` — clear the conversation view. The session itself is untouched
+  (`/export` still gets the whole thing). `Ctrl+C` — abort the running turn;
+  exit when idle.
 - `Esc` — abort the running turn, close an overlay, or clear the input.
 
 Commands: `/help` `/new` `/sessions` (pick from a menu of past sessions)
@@ -175,12 +193,11 @@ escalates to you rather than failing closed silently.
 
 Visual conventions:
 
-- The activity area at the bottom is the only part that gets redrawn; everything
-  above it is ordinary terminal scrollback. Every line there is measured with
-  CJK-aware width and wrapped by us, and skeleton glyphs are ASCII only: middle
-  dots, ellipses, arrows and box-drawing characters are East-Asian-ambiguous
-  width and render as 2 cells in some terminals, which would desynchronise the
-  redraw and eat a line of committed output.
+- Every line is measured with CJK-aware width and wrapped by us, and skeleton
+  glyphs are ASCII only: middle dots, ellipses, arrows and box-drawing characters
+  are East-Asian-ambiguous width and render as 2 cells in some terminals, which
+  would wrap a line and shift the whole frame up by one row. As a last line of
+  defence the painter clips each row to the terminal width before writing it.
 - Colors are 16-color SGR on purpose — they resolve through the terminal's own
   palette, so a light and a dark theme both stay readable, with no hardcoded
   brightness. Semantic mapping: cyan = your input and interactive focus,
@@ -190,7 +207,8 @@ Visual conventions:
   tool output — keeps the default foreground.
 - Tool calls belonging to one model step are collected and printed as a single
   block once that step ends, with a header (`3 个工具调用 | 1 个失败 | 1.2s`).
-  While they run, the live indicator shows `[2/3] grep 1.4s`.
+  While they run, the live indicator in the status line shows the tool and its
+  elapsed time (`shell 1.4s`).
 - Summaries are per tool: `read_file src/a.ts:1-40 (40 行)`, `grep "foo" -> 7 处`,
   `write src/a.ts +12`, `search_replace src/a.ts -2/+1 x3`,
   `shell $ npm test -> exit 0`. Long output folds to 8 lines for a lone call, to
@@ -218,16 +236,18 @@ Notes:
 - Colors are dropped when `NO_COLOR` is set or the output is not a TTY. There
   is no mouse support and no emoji.
 - Windows Terminal is the primary target; the same ANSI path keeps it usable on
-  Linux and macOS terminals. Legacy cmd.exe (conhost) reflows the screen most
-  aggressively, so it is the worst case for any line-oriented TUI.
-- Resizing is debounced: a window drag coalesces into one redraw after you stop,
-  and the redraw erases the old activity area before drawing. The activity area
-  is rendered one column narrower than reported (`columns - 1`) because some
-  conhost builds report a usable width one column too wide — a single wrapped
-  line would drift the redraw's row accounting and start stacking residue.
-  Residual after a resize: at most the rows *above* the input line when an
-  overlay was open (the overlay's title/detail), and rows the terminal itself
-  reflowed from earlier output.
+  Linux and macOS terminals. Legacy cmd.exe (conhost) needs Windows 10 1607+ for
+  the alternate screen buffer; without it the sequences are ignored and the UI
+  degrades to painting over the current screen.
+- Resizing needs no repair work: every frame rewrites the whole screen from the
+  top-left, so whatever the terminal reflowed is overwritten by the next frame
+  instead of accumulating. Repaints are throttled (one immediately, then at most
+  one per 50 ms) purely so that a window drag does not turn into a redraw storm.
+  Frames are painted one column narrower than reported (`columns - 1`) because
+  some conhost builds report a usable width one column too wide.
+- Painting is wrapped in the `?2026` synchronized-output sequence so a frame is
+  committed atomically and does not visibly tear; terminals that do not know the
+  sequence ignore it.
 
 
 

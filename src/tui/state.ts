@@ -141,6 +141,11 @@ export interface TuiState {
   /** 正在执行的工具（若有）。 */
   activeTool?: ActiveTool;
   spinner: number;
+  /**
+   * 回看偏移：从最新一行往上数的行数，0 表示跟随底部最新内容。
+   * 全屏模式放弃了终端原生滚动历史，回看改由主循环自己实现（PgUp/PgDn）。
+   */
+  scroll: number;
   /** 运行中正在流式写入的 thinking 条目下标，供 thinking_end 回填正文。 */
   thinkingIndex?: number;
 }
@@ -183,6 +188,7 @@ export function createState(init: TuiInit): TuiState {
     todo: { total: 0, done: 0 },
     jobs: 0,
     spinner: 0,
+    scroll: 0,
   };
 }
 

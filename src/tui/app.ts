@@ -5,12 +5,13 @@
  * 不能各自去读 stdin。所有按键统一进 dispatch()，由它按当前 phase 路由到浮层或输入行，
  * 浮层用 Promise 把结果回给等待中的 agent 调用，从而不会出现两处抢 stdin 的情况。
  *
- * 输出分两条路径：
- *   - 滚动区：对话正文、工具结果、命令反馈，写进去就不再变（终端自己管滚动回看）；
- *   - 活动区：底部会重绘的浮层/输入行/状态行，由 Terminal 按行数精确擦除重画。
- * 因此任何一次向滚动区写入之前，都必须先清活动区，写完再由 render() 画回来。
+ * 界面是**全屏**的（终端替代屏幕缓冲区）：对话历史存在 body[] 里，每帧由 render() 组合成
+ * 「历史视口 + 底部活动区」一整屏交给 Terminal.paint 覆盖式绘制。所以不再有「滚动区写一次
+ * 就不变、活动区跟着重绘」的分工，也没有「先清活动区再写滚动区」的先后要求——任何输入都
+ * 只是改状态、然后重绘一帧。代价是放弃终端原生滚动历史，回看改由 PgUp/PgDn 驱动 state.scroll。
  *
- * 已知限制：终端 resize 后活动区的行数记账可能失真，重绘时可能出现一行残留。
+ * body[] 存的是**可重排的块**而不是折好行的字符串：宽度变化时块会按新宽度重新折行
+ * （见 bodyLines），因此拖动窗口之后历史不会留着旧宽度的硬折痕。
  */
 
 import { existsSync, writeFileSync } from 'node:fs';
@@ -29,7 +30,7 @@ import type { TodoList } from '../runtime/todos.js';
 import type { SandboxHandle } from '../sandbox/open.js';
 import { exportJson, exportMarkdown } from '../session/export.js';
 import { createSession, JsonlSession, listSessions, setCurrentSession, type SessionInfo } from '../session/store.js';
-import { colorEnabled, createStyler, type Styler } from './ansi.js';
+import { colorEnabled, createStyler, truncate, type Styler } from './ansi.js';
 import { InteractiveApprover } from './approver.js';
 import {
   backspace, deleteForward, emptyEditor, insertText, killToEnd, killToStart, killWordBefore,
@@ -37,9 +38,11 @@ import {
 } from './editor.js';
 import { KeyParser, type Key } from './keys.js';
 import { readGitBranch } from './git.js';
-import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TuiState } from './state.js';
+import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TranscriptEntry, type TuiState } from './state.js';
 import { InputQueue, Terminal } from './terminal.js';
-import { renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions } from './view.js';
+import {
+  composeFrame, maxScroll, renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions,
+} from './view.js';
 import type { ToolCallView } from './tool-view.js';
 
 export interface TuiDeps {
@@ -117,8 +120,8 @@ const HELP_LINES = [
   ...COMMAND_ITEMS.map((item) => `  ${item.label.padEnd(16)}${item.hint}`),
   '  /switch <id>    切换到指定会话（支持 id 前缀）',
   '',
-  '快捷键：Enter 发送 | / 打开命令菜单 | Ctrl+K 全部操作 | 上下键 历史 | Ctrl+L 清屏',
-  '        Esc 中断本轮 / 取消浮层 | Ctrl+C 运行中中断、空闲时退出',
+  '快捷键：Enter 发送 | / 打开命令菜单 | Ctrl+K 全部操作 | 上下键 历史 | Ctrl+L 清空视图',
+  '        PgUp / PgDn 回看历史（Esc 回到最新） | Esc 中断本轮 / 取消浮层 | Ctrl+C 退出',
   '',
   '界面符号只用 ASCII：东亚歧义宽度字符（中点、省略号、箭头）在部分终端按 2 列渲染，',
   '会让底部活动区的宽度计算失真并吃掉一行已提交内容，因此一律不用。',
@@ -131,18 +134,44 @@ const HISTORY_LIMIT = 200;
 const NOTICE_TTL_MS = 4000;
 /** git 分支的重新读取间隔：状态行高频重绘，不能每帧读盘。 */
 const BRANCH_TTL_MS = 2000;
-/** 拖动窗口期间只在停下来之后重绘一次。 */
-const RESIZE_DEBOUNCE_MS = 150;
+/**
+ * 拖动窗口时相邻两次整帧重绘的最小间隔（前缘节流）。
+ *
+ * 整帧重绘本身对 resize 是天然正确的——每次覆盖一整屏，重排留下的旧像素会被整个抹掉，
+ * 不可能像之前的相对光标实现那样叠加残影。这里限流只是为了不被「每拖一步抛一次」的
+ * 事件风暴拖垮：立即响应一次，其后最多 20 帧/秒。
+ */
+const RESIZE_MIN_INTERVAL_MS = 50;
+/** 回看翻页时保留的重叠行数：刚好切在两行中间时还能看清上下文。 */
+const PAGE_OVERLAP = 1;
 
 /**
- * 活动区可用列数 = 终端上报列数 - 1。
+ * 可用列数 = 终端上报列数 - 1。
  *
  * 留一列安全带：老 conhost（cmd.exe）上报的 columns 可能比实际可写区宽 1 列，写到那一列
- * 就提前换行；而我们重绘是「上移 N 行 + 清到屏末」，一旦某行意外折成两行，行数记账就会
- * 整体漂移，屏幕上开始堆残影。宁可少用一列，也不要这种漂移。
+ * 会提前换行。整帧绘制里一行折成两行，会让整屏内容整体上移一行再被底部截掉一行。宁可少用一列。
  */
 function liveWidth(columns: number): number {
   return Math.max(20, columns - 1);
+}
+
+/**
+ * 对话历史里的一块。
+ *
+ * 存的是「怎么渲染」而不是「渲染成什么」：`render(width)` 在宽度变化时重新生成 lines，
+ * 所以 resize 之后历史会按新宽度重新折行，而不是留着旧宽度的硬折痕。
+ * `live` 的块每帧都重排（流式正文的内容一直在变），其余块只在宽度变化时重排一次。
+ */
+interface BodyBlock {
+  lines: readonly string[];
+  /** lines 是按哪个宽度渲染的；决定是否需要重排。 */
+  width: number;
+  render?: (width: number) => readonly string[];
+  live?: boolean;
+  /** 块前插入一个空行（呼吸空间）；前一行已经是空行时不会再插。 */
+  blank?: boolean;
+  /** 流式块归属的条目：用来判断流是不是已经翻到新的一条了。 */
+  entry?: TranscriptEntry;
 }
 
 export async function runTui(deps: TuiDeps): Promise<void> {
@@ -167,11 +196,14 @@ class TuiApp {
   private running = false;
   private abort?: AbortController;
 
-  private rawBuffer = '';
-  private atLineStart = true;
-  /** 上一行是否为空行 / 滚动区是否已有内容：决定「块前留白」要不要补。 */
-  private lastBlank = true;
-  private committed = false;
+  /** 对话历史：可重排的块列表（正文、工具块、横幅、命令反馈都按块存）。 */
+  private readonly body: BodyBlock[] = [];
+  /** 正在流式增长的块；它每帧重排，其余块只在宽度变化时重排。 */
+  private streamBlock?: BodyBlock;
+  /** 合并同一时刻内的多次重绘请求（流式正文可能在一个事件循环里来好几段）。 */
+  private renderQueued = false;
+  /** 上一帧历史视口的高度，PgUp/PgDn 按它翻页。 */
+  private lastBodyRows = 10;
   /** 本步攒下的工具调用，等这一步结束一次性渲染成块。 */
   private pendingTools: ToolCallView[] = [];
   private readonly toolStartedAt = new Map<string, number>();
@@ -180,8 +212,9 @@ class TuiApp {
   private noticeTimer?: NodeJS.Timeout;
   /** 上次读 git 分支的时间（2s 节流）。 */
   private lastBranchCheck = 0;
-  /** resize 合并计时器。 */
+  /** resize 节流计时器。 */
   private resizeTimer?: NodeJS.Timeout;
+  private lastResizePaint = 0;
   private escTimer?: NodeJS.Timeout;
   private menuOptions?: { parent: string; entries: readonly OptionEntry[] };
   private sessions: SessionInfo[] = [];
@@ -220,7 +253,7 @@ class TuiApp {
     const restoreOnExit = (): void => this.terminal.restore();
     process.on('exit', restoreOnExit);
     try {
-      this.commitLines(renderBanner(this.state, this.viewOptions()));
+      this.commit((width) => renderBanner(this.state, this.optionsAt(width)));
       this.render();
       for (;;) {
         const key = await this.input.next();
@@ -267,6 +300,7 @@ class TuiApp {
       this.render();
       return;
     }
+    if (this.handleScrollKey(key)) return;
     if (this.state.phase === 'running') {
       if (key.kind === 'escape' || (key.kind === 'ctrl' && key.key === 'c')) this.abortTurn();
       return;
@@ -274,7 +308,45 @@ class TuiApp {
     return this.handleIdleKey(key);
   }
 
+  /**
+   * 回看历史。放在 phase 路由之前，所以运行中也能往上翻。
+   *
+   * 返回 true 表示这个按键已经被滚动消费掉了。
+   */
+  private handleScrollKey(key: Key): boolean {
+    if (key.kind === 'pageup') {
+      this.scrollTo(this.state.scroll + this.pageSize());
+      return true;
+    }
+    if (key.kind === 'pagedown') {
+      this.scrollTo(this.state.scroll - this.pageSize());
+      return true;
+    }
+    // Esc 分两级：回看中先回到底部，再按一次才轮到「中断本轮」。避免翻历史时误中断。
+    if (key.kind === 'escape' && this.state.scroll > 0) {
+      this.scrollTo(0);
+      return true;
+    }
+    return false;
+  }
+
+  /** 一屏可翻的行数，去掉与上一屏的重叠部分。 */
+  private pageSize(): number {
+    return Math.max(1, this.lastBodyRows - PAGE_OVERLAP);
+  }
+
+  private scrollTo(offset: number): void {
+    // 上限由 render() 按历史长度夹住。
+    this.state.scroll = Math.max(0, offset);
+    this.render();
+  }
+
   private handleIdleKey(key: Key): void {
+    // 任何输入都表示「回到最新」：正在打字却还盯着历史会很别扭。
+    if (this.state.scroll > 0) {
+      this.state.scroll = 0;
+      this.render();
+    }
     if (key.kind === 'enter') {
       const text = this.state.editor.text.trim();
       if (text === '') return;
@@ -294,8 +366,7 @@ class TuiApp {
       if (key.key === 'd' && this.state.editor.text === '') return this.quit();
       if (key.key === 'k') return this.openCommandMenu('');
       if (key.key === 'l') {
-        this.terminal.clearScreen();
-        this.render();
+        this.clearBody();
         return;
       }
     }
@@ -576,12 +647,12 @@ class TuiApp {
     this.clearNotice();
     switch (name) {
       case 'help':
-        this.commitLines(HELP_LINES);
+        this.commit((width) => HELP_LINES.map((line) => truncate(line, width, '')));
         break;
       case 'new':
         this.session = createSession(this.deps.sessionDir, this.deps.workspaceRoot);
         this.state.sessionId = this.session.id;
-        this.commitLines([`== 新会话 ${this.session.id} ==`]);
+        this.commit((width) => [truncate(`== 新会话 ${this.session.id} ==`, width, '')]);
         break;
       case 'sessions':
         void this.openSessionsMenu();
@@ -619,10 +690,10 @@ class TuiApp {
         this.setApprovalMode(args.trim());
         break;
       case 'todo':
-        this.commitLines(this.todoLines());
+        this.commit((width) => this.todoLines().map((line) => truncate(line, width, '')));
         break;
       case 'jobs':
-        this.commitLines(this.jobLines());
+        this.commit((width) => this.jobLines().map((line) => truncate(line, width, '')));
         break;
       case 'export':
         if (args.trim() === '') {
@@ -632,7 +703,7 @@ class TuiApp {
         this.exportSession(args.trim());
         break;
       case 'clear':
-        this.terminal.clearScreen();
+        this.clearBody();
         break;
       case 'quit':
       case 'exit':
@@ -681,9 +752,8 @@ class TuiApp {
     this.state.sessionId = id;
     const entries = transcriptFromMessages(this.session.readMessages());
     const shown = entries.slice(-REPLAY_LIMIT);
-    const options = this.viewOptions();
     const head = `== 已切换到会话 ${id} | 历史 ${entries.length} 条${shown.length < entries.length ? `，仅显示最近 ${shown.length} 条` : ''} ==`;
-    this.commitLines([head, ...shown.flatMap((entry) => renderEntry(entry, options))]);
+    this.commit((width) => [truncate(head, width, ''), ...shown.flatMap((entry) => renderEntry(entry, this.optionsAt(width)))]);
     this.render();
   }
 
@@ -806,7 +876,7 @@ class TuiApp {
     this.state.editor = emptyEditor();
     this.clearNotice();
     this.state.phase = 'running';
-    this.commitLines(renderEntry({ kind: 'user', text: prompt }, this.viewOptions()), { blankBefore: true });
+    this.commit((width) => renderEntry({ kind: 'user', text: prompt }, this.optionsAt(width)), { blank: true });
     void this.executeTurn(prompt);
   }
 
@@ -867,9 +937,8 @@ class TuiApp {
         planState,
       });
     } catch (error) {
-      const options = this.viewOptions();
-      if (controller.signal.aborted) this.commitLines(renderEntry({ kind: 'notice', text: '本轮已中断', level: 'warn' }, options), { blankBefore: true });
-      else this.commitLines(renderEntry({ kind: 'error', text: message(error) }, options), { blankBefore: true });
+      if (controller.signal.aborted) this.commit((width) => renderEntry({ kind: 'notice', text: '本轮已中断', level: 'warn' }, this.optionsAt(width)), { blank: true });
+      else this.commit((width) => renderEntry({ kind: 'error', text: message(error) }, this.optionsAt(width)), { blank: true });
     } finally {
       // 中断 / 报错时工具块可能还挂在缓冲区里，兜底落盘，否则这一轮的调用记录会凭空消失。
       this.flushToolBlock();
@@ -901,12 +970,11 @@ class TuiApp {
   private readonly listener: AgentListener = (event) => {
     if (event.type === 'text') {
       applyAgentEvent(this.state, event);
-      this.appendRaw(event.text);
+      this.appendStream();
       return;
     }
     const thinkingIndex = this.state.thinkingIndex;
     applyAgentEvent(this.state, event);
-    const options = this.viewOptions();
     const now = Date.now();
 
     switch (event.type) {
@@ -917,7 +985,7 @@ class TuiApp {
         break;
       case 'thinking_end': {
         const entry = thinkingIndex === undefined ? undefined : this.state.entries[thinkingIndex];
-        if (entry) this.commitLines(renderEntry(entry, options));
+        if (entry) this.commit((width) => renderEntry(entry, this.optionsAt(width)));
         break;
       }
       case 'tool_start': {
@@ -952,13 +1020,13 @@ class TuiApp {
       }
       case 'status': {
         const entry = this.state.entries[this.state.entries.length - 1];
-        if (entry) this.commitLines(renderEntry(entry, options), { blankBefore: true });
+        if (entry) this.commit((width) => renderEntry(entry, this.optionsAt(width)), { blank: true });
         break;
       }
       case 'error': {
         this.flushToolBlock();
         const entry = this.state.entries[this.state.entries.length - 1];
-        if (entry) this.commitLines(renderEntry(entry, options), { blankBefore: true });
+        if (entry) this.commit((width) => renderEntry(entry, this.optionsAt(width)), { blank: true });
         break;
       }
       case 'done':
@@ -973,10 +1041,9 @@ class TuiApp {
   /** 把攒下的工具调用渲染成一个块写进滚动区。 */
   private flushToolBlock(): void {
     if (this.pendingTools.length === 0) return;
-    const options = this.viewOptions();
     const block = this.pendingTools;
     this.pendingTools = [];
-    this.commitLines(renderToolBlock(block, options), { blankBefore: true });
+    this.commit((width) => renderToolBlock(block, this.optionsAt(width)), { blank: true });
   }
 
   private abortTurn(): void {
@@ -993,36 +1060,63 @@ class TuiApp {
 
   // ---------------------------------------------------------------- 输出与重绘
 
-  private appendRaw(text: string): void {
-    this.rawBuffer += text;
-    if (this.rawBuffer.length >= 512 || text.includes('\n')) this.flushRaw();
+  /**
+   * 流式正文已经由 applyAgentEvent 累进 state.entries，因此不再需要「把片段直接写到终端」，
+   * 只要保证承载它的块每帧按当前宽度重排，再请求一次重绘即可。
+   */
+  private appendStream(): void {
+    const last = this.state.entries[this.state.entries.length - 1];
+    if (!last || last.kind !== 'assistant') return;
+    if (!this.streamBlock || this.streamBlock.entry !== last) {
+      // 上一步的正文到此定稿：不再每帧重排，但宽度变化时仍会重新折行。
+      this.freezeStream();
+      const block: BodyBlock = {
+        lines: [],
+        width: 0,
+        live: true,
+        entry: last,
+        render: (width) => renderEntry(last, this.optionsAt(width)),
+      };
+      this.streamBlock = block;
+      this.body.push(block);
+    }
+    this.scheduleRender();
   }
 
-  private flushRaw(): void {
-    if (this.rawBuffer === '') return;
-    const text = this.rawBuffer;
-    this.rawBuffer = '';
-    this.terminal.clearLive();
-    this.terminal.write(text);
-    this.atLineStart = text.endsWith('\n');
-    this.lastBlank = text.trim() === '';
-    this.committed = true;
+  private freezeStream(): void {
+    if (!this.streamBlock) return;
+    this.streamBlock.live = false;
+    this.streamBlock = undefined;
   }
 
   /**
-   * 写滚动区。blankBefore 用于给「块」留呼吸空间：只在已经有内容、且上一行不是空行时补，
-   * 因此不会出现连续两个空行。
+   * 往对话历史追加一块。
+   *
+   * 传进来的是「按宽度生成行」的函数而不是现成的行：宽度变化时块会重新折行，resize 之后
+   * 历史不会留着旧宽度的硬折痕。宽度无关的固定内容（帮助、清单）直接传数组即可。
    */
-  private commitLines(lines: readonly string[], options?: { blankBefore?: boolean }): void {
+  private commit(
+    content: readonly string[] | ((width: number) => readonly string[]),
+    options?: { blank?: boolean },
+  ): void {
+    this.freezeStream();
+    const width = this.viewOptions().width;
+    const lines = typeof content === 'function' ? content(width) : content;
     if (lines.length === 0) return;
-    this.flushRaw();
-    this.terminal.clearLive();
-    const wantBlank = options?.blankBefore === true && this.committed && !this.lastBlank;
-    const lead = this.atLineStart ? (wantBlank ? '\n' : '') : '\n';
-    this.terminal.write(`${lead}${lines.join('\n')}\n`);
-    this.atLineStart = true;
-    this.lastBlank = false;
-    this.committed = true;
+    // 回看中时新内容不该把视线拽走：偏移跟着一起增长，视口停在原处。
+    if (this.state.scroll > 0) this.state.scroll += lines.length + (options?.blank === true ? 1 : 0);
+    this.body.push({
+      lines,
+      width,
+      blank: options?.blank === true,
+      render: typeof content === 'function' ? content : undefined,
+    });
+    this.scheduleRender();
+  }
+
+  /** 按指定宽度生成渲染选项（历史重排用；高度对正文渲染没有影响）。 */
+  private optionsAt(width: number): ViewOptions {
+    return { width, height: this.terminal.size().height, styler: this.styler };
   }
 
   private viewOptions(): ViewOptions {
@@ -1030,15 +1124,56 @@ class TuiApp {
     return { width: liveWidth(size.width), height: size.height, styler: this.styler };
   }
 
+  /**
+   * 清空对话历史视图（Ctrl+L / /clear）。
+   *
+   * 全屏模式下「清屏」不再是往终端发一个清屏序列——整帧绘制本来就每帧覆盖一整屏，
+   * 真正要清掉的是 body[] 里的历史块。会话记录不受影响，`/export` 仍能拿到完整内容。
+   */
+  private clearBody(): void {
+    this.body.length = 0;
+    this.streamBlock = undefined;
+    this.state.scroll = 0;
+    this.render();
+  }
+
+  /** 历史全部行；顺带按当前宽度重排那些需要重排的块。 */
+  private bodyLines(width: number): string[] {
+    const out: string[] = [];
+    for (const block of this.body) {
+      if (block.render && (block.live === true || block.width !== width)) {
+        block.lines = block.render(width);
+        block.width = width;
+      }
+      if (block.blank === true && out.length > 0 && out[out.length - 1] !== '') out.push('');
+      out.push(...block.lines);
+    }
+    return out;
+  }
+
+  /** 合并同一时刻的多次重绘请求：流式正文可能在一个事件循环里来好几段。 */
+  private scheduleRender(): void {
+    if (this.renderQueued) return;
+    this.renderQueued = true;
+    queueMicrotask(() => {
+      this.renderQueued = false;
+      this.render();
+    });
+  }
+
   private render(): void {
     if (!this.terminal.active) return;
-    this.flushRaw();
     this.refreshBranch(Date.now());
     const size = this.terminal.size();
     const options: ViewOptions = { width: liveWidth(size.width), height: size.height, styler: this.styler };
     this.lastSize = { width: size.width, height: size.height };
-    const { lines, cursor } = renderLive(this.state, options);
-    this.terminal.drawLive(lines, cursor);
+    const live = renderLive(this.state, options);
+    const body = this.bodyLines(options.width);
+    // 夹住偏移：PgUp 顶到开头之后偏移不该继续无限增长，否则要按很多次 PgDn 才回得来。
+    this.state.scroll = Math.max(0, Math.min(this.state.scroll, maxScroll(body.length, live.lines.length, size.height)));
+    const frame = composeFrame(body, live, options, this.state.scroll);
+    this.lastBodyRows = Math.max(1, size.height - live.lines.length);
+    this.terminal.paint(frame.lines, frame.cursor);
   }
 
   /**
@@ -1066,20 +1201,28 @@ class TuiApp {
     this.spinnerTimer = undefined;
   }
 
+  /**
+   * 窗口尺寸变化。
+   *
+   * 整帧覆盖绘制对 resize 天然正确：终端重排留在屏幕上的只是旧像素，下一次整帧绘制会逐行
+   * 清掉重写，不可能像之前的相对光标实现那样叠出几十份残影。所以这里不需要任何「擦除 /
+   * 重置记账」动作，也不需要重新初始化什么——只要限流地重绘。
+   */
   private handleResize(): void {
     const size = this.terminal.size();
     if (size.width === this.lastSize.width && size.height === this.lastSize.height) return;
-    // 拖动窗口会连续抛事件（每拖一步一次）。不合并的话每一次都会重绘一份，
-    // 加上重排让行数记账失真，屏幕上就会叠出几十份残影。
+    const now = Date.now();
+    if (now - this.lastResizePaint >= RESIZE_MIN_INTERVAL_MS) {
+      this.lastResizePaint = now;
+      this.render();
+      return;
+    }
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = undefined;
-      const settled = this.terminal.size();
-      if (settled.width === this.lastSize.width && settled.height === this.lastSize.height) return;
-      // 先擦掉活动区（从光标行往下）再重置记账，重绘才是「替换」而不是「追加」。
-      this.terminal.resetLive();
+      this.lastResizePaint = Date.now();
       this.render();
-    }, RESIZE_DEBOUNCE_MS);
+    }, RESIZE_MIN_INTERVAL_MS);
   }
 
   // ---------------------------------------------------------------- ApprovalUi
