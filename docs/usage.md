@@ -150,6 +150,20 @@ Commands: `/help` `/new` `/sessions` (pick from a menu of past sessions)
 `/switch <id>` `/status` `/plan` `/model [name]` `/effort <level>`
 `/approval <mode>` `/todo` `/jobs` `/export [md|json]` `/clear` `/quit`.
 
+Persistence: `/model`, `/effort` and `/approval` write your choice back to
+`~/.sph/config.toml`, so it survives a restart — the notice says which file was
+written, or why it could not be. Precedence is command line > config file >
+built-in default (`--model`, `--effort`, `--approval` still win for that run).
+The writer edits the file surgically rather than re-serialising it: an existing
+key keeps its trailing comment, a commented-out template line such as
+`# reasoning_effort = "medium"   # off | low | ...` is activated **in place** (the
+hint stays), and an unknown key is appended. Comments, key order and unrelated
+keys are never touched.
+
+`/plan` is deliberately *not* persisted: plan mode is a per-task decision, and
+remembering it across restarts would silently reduce the tools available on the
+next launch.
+
 `/status` opens a panel with the session id, workspace, sandbox, MCP servers
 and tools, token usage against `context_window`, todo progress and background
 jobs. Token counters accumulate every model call of the session.

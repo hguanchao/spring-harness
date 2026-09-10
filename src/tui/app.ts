@@ -18,7 +18,8 @@ import { join } from 'node:path';
 import type { AgentListener } from '../agent/events.js';
 import { runTurn } from '../agent/loop.js';
 import { createLlmClassifier } from '../approval/auto.js';
-import type { ApprovalMode, ApprovalRequest } from '../approval/policy.js';
+import { APPROVAL_MODES, type ApprovalMode, type ApprovalRequest } from '../approval/policy.js';
+import { updateConfigFile } from '../config/save.js';
 import type { ApiProtocol } from '../config/load.js';
 import { REASONING_EFFORTS, type LlmClient, type ReasoningEffort } from '../llm/openai.js';
 import type { McpHub } from '../mcp/hub.js';
@@ -44,6 +45,8 @@ import type { ToolCallView } from './tool-view.js';
 export interface TuiDeps {
   workspaceRoot: string;
   sessionDir: string;
+  /** config.toml 路径：/model、/effort、/approval 的选择写回这里，下次启动仍生效。 */
+  configPath: string;
   contextWindow: number;
   sandbox: SandboxHandle;
   session: JsonlSession;
@@ -66,9 +69,9 @@ const COMMAND_ITEMS: readonly MenuItem[] = [
   { id: 'sessions', label: '/sessions', hint: '浏览并切换历史会话' },
   { id: 'status', label: '/status', hint: '查看完整状态' },
   { id: 'plan', label: '/plan', hint: '切换计划模式（只读调研 + 计划审批）' },
-  { id: 'model', label: '/model', hint: '查看 / 切换模型' },
-  { id: 'effort', label: '/effort', hint: '查看 / 设置推理档位' },
-  { id: 'approval', label: '/approval', hint: '查看 / 设置审批模式：ask | auto | yolo' },
+  { id: 'model', label: '/model', hint: '查看 / 切换模型（选择写回 config.toml）' },
+  { id: 'effort', label: '/effort', hint: '查看 / 设置推理档位（选择写回 config.toml）' },
+  { id: 'approval', label: '/approval', hint: '查看 / 设置审批模式：ask | auto | yolo（写回 config.toml）' },
   { id: 'todo', label: '/todo', hint: '查看任务清单' },
   { id: 'jobs', label: '/jobs', hint: '查看后台任务' },
   { id: 'export', label: '/export', hint: '导出当前会话（md | json）' },
@@ -713,7 +716,8 @@ class TuiApp {
     this.model = name;
     this.client = this.deps.makeClient({ model: this.model, api: this.api, effort: this.effort });
     this.state.model = name;
-    this.notify(`模型已切换：${name}`, 'success');
+    const warning = this.persistConfig({ model: name });
+    this.notify(`模型已切换：${name}${warning}`, warning === '' ? 'success' : 'warn');
   }
 
   private setEffort(level: string): void {
@@ -728,21 +732,38 @@ class TuiApp {
     this.effort = level as ReasoningEffort;
     this.client = this.deps.makeClient({ model: this.model, api: this.api, effort: this.effort });
     this.state.effort = this.effort;
-    this.notify(`推理档位：${this.effort}`, 'success');
+    const warning = this.persistConfig({ reasoning_effort: this.effort });
+    this.notify(`推理档位：${this.effort}${warning}`, warning === '' ? 'success' : 'warn');
+  }
+
+  /**
+   * 写回 config.toml。
+   *
+   * 失败只降级成提示、不抛：切换在本次进程内已经生效，不该因为磁盘只读/权限问题把已经
+   * 生效的改动回滚掉。但也绝不静默——用户特意要的是「下次启动还在」。
+   */
+  private persistConfig(patch: Record<string, string>): string {
+    try {
+      updateConfigFile(this.deps.configPath, patch);
+      return ` | 已写入 ${this.deps.configPath}`;
+    } catch (error) {
+      return ` | 未能写入 ${this.deps.configPath}：${message(error)}`;
+    }
   }
 
   private setApprovalMode(mode: string): void {
     if (mode === '') {
-      this.notify(`当前审批模式：${this.approvalModeValue} | 可选：ask | auto | yolo`);
+      this.notify(`当前审批模式：${this.approvalModeValue} | 可选：${APPROVAL_MODES.join(' | ')}`);
       return;
     }
-    if (mode !== 'ask' && mode !== 'auto' && mode !== 'yolo') {
-      this.notify(`无效审批模式：${mode} | 可选：ask | auto | yolo`, 'warn');
+    if (!(APPROVAL_MODES as readonly string[]).includes(mode)) {
+      this.notify(`无效审批模式：${mode} | 可选：${APPROVAL_MODES.join(' | ')}`, 'warn');
       return;
     }
-    this.approvalModeValue = mode;
+    this.approvalModeValue = mode as ApprovalMode;
     this.state.approvalMode = mode;
-    this.notify(`审批模式：${mode}`, 'success');
+    const warning = this.persistConfig({ approval: mode });
+    this.notify(`审批模式：${mode}${warning}`, warning === '' ? 'success' : 'warn');
   }
 
   private setPlan(enabled: boolean): void {

@@ -26,6 +26,7 @@ import { acquireSessionLock, SessionLockedError } from '../session/lock.js';
 import { sessionDirFor } from '../session/path.js';
 import { forkSession, resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
 import { ConfigError, loadConfig, type ApiProtocol, type SphConfig } from '../config/load.js';
+import { sphConfigPath } from '../home.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
 
 export class CliError extends Error {
@@ -79,6 +80,8 @@ export interface Runtime {
   workspaceRoot: string;
   sessionDir: string;
   config: SphConfig;
+  /** config.toml 路径：TUI 把 /model、/effort、/approval 的选择写回这里。 */
+  configPath: string;
   sandbox: SandboxHandle;
   session: JsonlSession;
   mcp: McpHub;
@@ -179,6 +182,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     workspaceRoot: options.workspaceRoot,
     sessionDir,
     config,
+    configPath: sphConfigPath(),
     sandbox,
     session,
     mcp,

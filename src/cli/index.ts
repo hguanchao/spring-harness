@@ -144,7 +144,8 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       todos: runtime.todos,
       jobs: runtime.jobs,
       persistent: runtime.persistent,
-      approvalMode: args.approval ?? 'ask',
+      approvalMode: args.approval ?? runtime.config.approval ?? 'ask',
+      configPath: runtime.configPath,
       model: args.model ?? runtime.config.model,
       api: args.api ?? runtime.config.api,
       effort: args.effort ?? runtime.config.reasoningEffort,
@@ -168,7 +169,8 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       const schema = readFileSync(args.schemaPath, 'utf8');
       finalPrompt = `${prompt}\n\n[output contract] Your final reply must be a single JSON object conforming to this JSON Schema, with no extra prose:\n${schema}`;
     }
-    const approvalMode: ApprovalMode = args.approval ?? 'ask';
+    // 优先级：命令行 > 配置文件 > 内置默认。这样 /approval 写回 config 后下次启动仍生效。
+    const approvalMode: ApprovalMode = args.approval ?? config.approval ?? 'ask';
     const client = runtime.makeClient({
       model: args.model ?? config.model,
       api: args.api ?? config.api,

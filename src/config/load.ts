@@ -1,3 +1,4 @@
+import { APPROVAL_MODES, type ApprovalMode } from '../approval/policy.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
 import { sphConfigPath } from '../home.js';
@@ -23,6 +24,8 @@ export interface SphConfig {
   maxTokens?: number;
   sandbox: SandboxMode;
   reasoningEffort?: ReasoningEffort;
+  /** 缺省审批模式；未配置时由 CLI 兜底为 ask。 */
+  approval?: ApprovalMode;
   api: ApiProtocol;
   mcpServers: McpServerConfigFile[];
 }
@@ -35,6 +38,7 @@ context_window = 256000
 sandbox = "workspace"
 # api = "chat-completions"      # chat-completions | responses | anthropic-messages
 # reasoning_effort = "medium"   # off | low | medium | high | xhigh | max
+# approval = "ask"              # ask | auto | yolo（/approval 的选择会写回这里）
 # [[mcp_servers]]
 # name = "demo"
 # command = "npx"
@@ -112,9 +116,22 @@ export function loadConfig(options?: {
 
   const sandbox = options?.sandboxOverride ?? parseSandboxMode(asString(file.sandbox, 'sandbox'));
   const reasoningEffort = parseReasoningEffort(file.reasoning_effort);
+  const approval = parseApprovalMode(file.approval);
   const api = parseApiProtocol(file.api);
   const mcpServers = parseMcpServers(file.mcp_servers);
-  return { baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, api, mcpServers };
+  return { baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers };
+}
+
+/**
+ * 审批模式可选。放在配置里是为了让 `/approval` 的选择能跨进程生效——
+ * 在此之前它只能来自 `--approval` / `--yolo`，命令行一过就没了。
+ */
+export function parseApprovalMode(value: unknown): ApprovalMode | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || !(APPROVAL_MODES as readonly string[]).includes(value)) {
+    throw new ConfigError(`approval must be one of: ${APPROVAL_MODES.join(' | ')}`);
+  }
+  return value as ApprovalMode;
 }
 
 /** 上游协议可选；未配置默认 chat-completions（兼容所有 OpenAI 形态端点）。 */
