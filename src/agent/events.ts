@@ -8,7 +8,8 @@ export type AgentEvent =
   | { type: 'tool_start'; name: string; id: string; args: Record<string, unknown> }
   | { type: 'tool_end'; name: string; id: string; ok: boolean; content: string }
   | { type: 'ask'; id: string; tool: string; detail: string }
-  | { type: 'usage'; promptTokens: number; completionTokens: number }
+  /** cachedTokens 仅在端点上报告缓存用量时出现（命中提示缓存的输入 token）。 */
+  | { type: 'usage'; promptTokens: number; completionTokens: number; cachedTokens?: number }
   | { type: 'error'; text: string }
   | { type: 'done' };
 

@@ -4,6 +4,31 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * 命中提示缓存的输入 token 数（可选：不是所有端点都上报）。
+   * 约定 promptTokens 是**含缓存**的总输入量，各协议在这一层归一化，
+   * 这样「命中率 = cachedTokens / promptTokens」在三家协议下含义一致。
+   */
+  cachedTokens?: number;
+}
+
+/**
+ * 各端点把「命中缓存的输入 token」放在不同字段：
+ * OpenAI 在 prompt_tokens_details.cached_tokens，DeepSeek 直接给 prompt_cache_hit_tokens，
+ * 部分中转站给 cached_tokens。都不认识时返回 undefined（而不是 0）——「没上报」和
+ * 「命中 0」在界面上应当区分开。
+ */
+function readCachedTokens(usage: Record<string, unknown>): number | undefined {
+  const details = usage.prompt_tokens_details;
+  if (details && typeof details === 'object') {
+    const value = (details as Record<string, unknown>).cached_tokens;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  for (const key of ['prompt_cache_hit_tokens', 'cached_tokens']) {
+    const value = usage[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return undefined;
 }
 
 export type ContentPart =
@@ -99,10 +124,12 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
     const completion = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined;
     const total = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
     if (prompt !== undefined || completion !== undefined) {
+      const cached = readCachedTokens(usage);
       acc.usage = {
         promptTokens: prompt ?? 0,
         completionTokens: completion ?? 0,
         totalTokens: total ?? (prompt ?? 0) + (completion ?? 0),
+        ...(cached === undefined ? {} : { cachedTokens: cached }),
       };
     }
   }

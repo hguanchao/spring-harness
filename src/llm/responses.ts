@@ -72,7 +72,12 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
     summary?: string;
     item?: { type?: string; call_id?: string; name?: string; arguments?: string };
     response?: {
-      usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+        input_tokens_details?: { cached_tokens?: number };
+      };
       error?: { message?: string } | null;
       status?: string;
     };
@@ -108,10 +113,12 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
     case 'response.incomplete': {
       const usage = data.response?.usage;
       if (usage) {
+        const cached = usage.input_tokens_details?.cached_tokens;
         acc.usage = {
           promptTokens: usage.input_tokens ?? 0,
           completionTokens: usage.output_tokens ?? 0,
           totalTokens: usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+          ...(typeof cached === 'number' && Number.isFinite(cached) ? { cachedTokens: cached } : {}),
         };
       }
       acc.finish = data.type === 'response.incomplete' ? 'length' : 'stop';

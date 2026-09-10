@@ -127,7 +127,9 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
   if (event === null || typeof event !== 'object') return {};
   const data = event as {
     type?: string;
-    message?: { usage?: { input_tokens?: number } };
+    message?: {
+      usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+    };
     index?: number;
     content_block?: { type?: string; id?: string; name?: string };
     delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; stop_reason?: string; usage?: { output_tokens?: number } };
@@ -137,13 +139,21 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
     throw new Error(`Anthropic stream error: ${data.error?.message?.trim() || 'unknown'}`);
   }
   switch (data.type) {
-    case 'message_start':
+    case 'message_start': {
+      // Anthropic 的 input_tokens 不含缓存部分，这里归一化成「含缓存的总输入」，
+      // 与 chat-completions / responses 的口径一致（命中率与窗口占用都需要总输入量）。
+      const uncached = data.message?.usage?.input_tokens ?? 0;
+      const cacheRead = data.message?.usage?.cache_read_input_tokens ?? 0;
+      const cacheWrite = data.message?.usage?.cache_creation_input_tokens ?? 0;
+      const prompt = uncached + cacheRead + cacheWrite;
       acc.usage = {
-        promptTokens: data.message?.usage?.input_tokens ?? 0,
+        promptTokens: prompt,
         completionTokens: 0,
-        totalTokens: data.message?.usage?.input_tokens ?? 0,
+        totalTokens: prompt,
+        ...(cacheRead + cacheWrite === 0 ? {} : { cachedTokens: cacheRead }),
       };
       return {};
+    }
     case 'content_block_start':
       if (data.content_block?.type === 'tool_use') {
         acc.tools.set(data.index ?? 0, { id: data.content_block.id ?? '', name: data.content_block.name ?? '', arguments: '' });

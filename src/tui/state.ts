@@ -53,6 +53,10 @@ export interface UsageTotals {
   completion: number;
   /** 最近一次调用，用于判断上下文压力。 */
   lastPrompt: number;
+  /** 累计命中缓存的输入 token；端点从不上报时保持 undefined。 */
+  cached: number;
+  /** 是否有端点上报过缓存用量——没有上报与「命中 0」在界面上要区分。 */
+  cacheReported: boolean;
 }
 
 export interface MenuItem {
@@ -119,6 +123,10 @@ export interface TuiState {
   planMode: boolean;
   sessionId: string;
   workspaceRoot: string;
+  /** 工作区目录名（状态行第一格）。 */
+  projectName: string;
+  /** 当前 git 分支；不在仓库里或读不到时为 undefined（状态行整格省略）。 */
+  branch?: string;
   contextWindow: number;
   mcpServers: number;
   mcpTools: number;
@@ -156,7 +164,7 @@ export function createState(init: TuiInit): TuiState {
     history: [],
     historyIndex: -1,
     entries: [],
-    usage: { prompt: 0, completion: 0, lastPrompt: 0 },
+    usage: { prompt: 0, completion: 0, lastPrompt: 0, cached: 0, cacheReported: false },
     model: init.model,
     api: init.api,
     effort: init.effort,
@@ -166,6 +174,7 @@ export function createState(init: TuiInit): TuiState {
     planMode: false,
     sessionId: init.sessionId,
     workspaceRoot: init.workspaceRoot,
+    projectName: projectNameOf(init.workspaceRoot),
     contextWindow: init.contextWindow,
     mcpServers: init.mcpServers,
     mcpTools: init.mcpTools,
@@ -178,8 +187,14 @@ export function createState(init: TuiInit): TuiState {
 /** 界面条目上限：条目只为「提交前」与「回放」存在，超限丢最旧的，避免长会话无界增长。 */
 export const ENTRY_LIMIT = 600;
 
-export function addEntry(state: TuiState, entry: TranscriptEntry): number {
-  state.entries.push(entry);
+/** 工作区目录名。手写而不引 path.basename：要同时吃 Windows 的反斜杠与 POSIX 斜杠。 */
+export function projectNameOf(workspaceRoot: string): string {
+  const trimmed = workspaceRoot.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || trimmed || workspaceRoot;
+}
+
+export function addEntry(state: TuiState, entry: TranscriptEntry): number {  state.entries.push(entry);
   if (state.entries.length > ENTRY_LIMIT) {
     state.entries.shift();
     // 丢头会让所有下标左移一位；被跟踪的 thinking 行若本身已被丢掉，就停止跟踪，
@@ -201,10 +216,25 @@ export function streamEntry(state: TuiState, kind: 'assistant' | 'thinking', tex
   return addEntry(state, { kind, text });
 }
 
-export function accumulateUsage(state: TuiState, promptTokens: number, completionTokens: number): void {
+export function accumulateUsage(
+  state: TuiState,
+  promptTokens: number,
+  completionTokens: number,
+  cachedTokens?: number,
+): void {
   state.usage.prompt += promptTokens;
   state.usage.completion += completionTokens;
   state.usage.lastPrompt = promptTokens;
+  if (cachedTokens !== undefined) {
+    state.usage.cached += cachedTokens;
+    state.usage.cacheReported = true;
+  }
+}
+
+/** 缓存命中率（0..1）；端点没上报过缓存用量时返回 undefined。 */
+export function cacheHitRate(usage: UsageTotals): number | undefined {
+  if (!usage.cacheReported || usage.prompt <= 0) return undefined;
+  return usage.cached / usage.prompt;
 }
 
 export function todoSummary(items: readonly TodoItem[]): TuiState['todo'] {
@@ -323,7 +353,7 @@ export function applyAgentEvent(state: TuiState, event: AgentEvent): void {
       state.notice = { text: `等待人工确认：${event.tool}`, level: 'info' };
       break;
     case 'usage':
-      accumulateUsage(state, event.promptTokens, event.completionTokens);
+      accumulateUsage(state, event.promptTokens, event.completionTokens, event.cachedTokens);
       break;
     case 'error':
       addEntry(state, { kind: 'error', text: event.text, level: 'error' });

@@ -27,6 +27,7 @@ import type { Styler } from './ansi.js';
 import { displayWidth, pad, truncate, wrap } from './ansi.js';
 import { scrollEditor } from './editor.js';
 import type { NoticeLevel, TranscriptEntry, TuiState } from './state.js';
+import { cacheHitRate } from './state.js';
 import { formatDuration, renderToolDetail, summarizeToolCall, toolTone, type ToolCallView } from './tool-view.js';
 
 export interface ViewOptions {
@@ -66,6 +67,32 @@ export function progressBar(ratio: number, width: number): string {
   // 非零占用至少点亮一格：否则 0.5% 的上下文压力看起来和「没调用过模型」一样。
   const filled = clamped === 0 ? 0 : Math.max(1, Math.round(clamped * limit));
   return `[${'#'.repeat(filled)}${'-'.repeat(limit - filled)}]`;
+}
+
+/**
+ * 状态行前缀图标。
+ *
+ * 只用「单码点、默认 emoji 呈现」的字符，且必须落在 ansi.ts 的宽字符表内（这几个都在
+ * 1F300-1F64F / 1F900-1F9FF，charWidth 算 2 列）。刻意避开两类字符：
+ * - 需要 U+FE0F 变体选择符才呈 emoji 的（如 ⚡ 26A1）：终端按 2 列渲染而 charWidth 按 1 列算；
+ * - ZWJ 组合序列（如 👨‍💻）：clusters() 会把 ZWJ 之后的部分算成独立簇，宽度多算 2 列。
+ */
+const ICON = {
+  project: '📁',
+  branch: '🌿',
+  model: '🤖',
+  effort: '🧠',
+  context: '🧮',
+  cache: '🔁',
+  ask: '🔒',
+  auto: '🔐',
+  yolo: '🔓',
+} as const;
+
+function permissionIcon(mode: string): string {
+  if (mode === 'yolo') return ICON.yolo;
+  if (mode === 'auto') return ICON.auto;
+  return ICON.ask;
 }
 
 // ---------------------------------------------------------------- 状态行
@@ -129,51 +156,79 @@ function pressureTone(ratio: number, styler: Styler): (text: string) => string {
   return (text) => styler.cyan(text);
 }
 
+/**
+ * 状态行字段（按用户指定的顺序与形态：`| <emoji> 值 | ... |`）：
+ *   项目 | 分支 | 模型 | 推理等级 | 上下文 | 缓存命中率 | 权限模式
+ * 运行中的实时指示作为前缀（只在跑的时候出现），PLAN 追加在末尾（计划模式会改变可用工具，
+ * 不能让它在窄终端里被静默丢掉，因此给了较高的保留优先级）。
+ */
 function statusSegments(state: TuiState, styler: Styler, now: number): Segment[] {
   const segments: Segment[] = [];
   if (state.phase === 'running') {
-    const frame = SPINNER[state.spinner % SPINNER.length];
     const active = state.activeTool;
     if (active) {
+      // 只留「工具名 + 已耗时」：耗时每秒在跳，本身就是活动指示，不需要再占一个帧字符。
+      // 状态行要同时放下 7 个字段，这里的每一列都影响「缓存命中率」会不会被挤掉。
       const elapsed = Math.max(0, now - active.startedAt);
-      const position = active.total > 1 ? `[${active.index}/${active.total}] ` : '';
-      const suffix = elapsed >= 1000 ? ` ${formatDuration(elapsed)}` : '';
       segments.push({
-        text: `${frame} ${position}${active.name}${suffix}`,
-        paint: (text) => styler.cyan(text),
+        text: `${active.name}${elapsed >= 1000 ? ` ${formatDuration(elapsed)}` : ''}`,
+        paint: (value) => styler.cyan(value),
         priority: PINNED,
       });
     } else {
-      segments.push({ text: frame, paint: (text) => styler.cyan(text), priority: PINNED });
+      segments.push({
+        text: SPINNER[state.spinner % SPINNER.length],
+        paint: (value) => styler.cyan(value),
+        priority: PINNED,
+      });
     }
   }
-  segments.push({ text: state.model, paint: (text) => styler.bold(text), priority: 8 });
-  if (state.planMode) segments.push({ text: 'PLAN', paint: (text) => styler.magenta(text), priority: 7 });
-  segments.push({ text: `审批 ${state.approvalMode}`, paint: approvalTone(state.approvalMode, styler), priority: 7 });
-  segments.push({ text: `沙箱 ${state.sandboxMode}`, paint: sandboxTone(state.sandboxMode, styler), priority: 6 });
+
+  segments.push({ text: `${ICON.project} ${state.projectName}`, paint: (v) => styler.cyan(v), priority: 8 });
+  if (state.branch) {
+    segments.push({ text: `${ICON.branch} ${state.branch}`, paint: (v) => styler.magenta(v), priority: 8 });
+  }
+  segments.push({ text: `${ICON.model} ${state.model}`, paint: (v) => styler.bold(v), priority: 8 });
+  segments.push({ text: `${ICON.effort} ${state.effort ?? 'off'}`, paint: (v) => styler.dim(v), priority: 5 });
+
   if (state.usage.lastPrompt > 0 && state.contextWindow > 0) {
     const ratio = state.usage.lastPrompt / state.contextWindow;
     segments.push({
-      text: `上下文 ${progressBar(ratio, 8)} ${Math.round(ratio * 100)}%`,
+      text: `${ICON.context} ${progressBar(ratio, 4)} ${Math.round(ratio * 100)}%`,
       paint: pressureTone(ratio, styler),
-      priority: 5,
+      priority: 6,
+    });
+  }
+  const hit = cacheHitRate(state.usage);
+  if (hit !== undefined) {
+    segments.push({
+      text: `${ICON.cache} ${Math.round(hit * 100)}%`,
+      paint: hit >= 0.5 ? (v) => styler.green(v) : (v) => styler.dim(v),
+      priority: 4,
     });
   }
   segments.push({
-    text: `+${formatTokens(state.usage.prompt)}/-${formatTokens(state.usage.completion)}`,
-    paint: (text) => styler.dim(text),
-    priority: 4,
+    text: `${permissionIcon(state.approvalMode)} ${state.approvalMode}`,
+    paint: approvalTone(state.approvalMode, styler),
+    // 权限格钉住：它决定工具会不会不经询问就跑，任何宽度下都不许被降级丢掉。
+    priority: PINNED,
   });
+
+  // 唯一破例的两个附加格：计划模式会改可用工具、沙箱 off 等于没有隔离，都属于
+  // 「不说出来就可能误判」的状态，不能因为窄终端被静默丢掉（沙箱也仍在 /status 与横幅里）。
+  if (state.planMode) segments.push({ text: 'PLAN', paint: (v) => styler.magenta(v), priority: 7 });
+  if (state.sandboxMode === 'off') segments.push({ text: '沙箱 off', paint: (v) => styler.red(v), priority: 7 });
+
   if (state.todo.total > 0) {
     const allDone = state.todo.done === state.todo.total;
     segments.push({
       text: `todo ${state.todo.done}/${state.todo.total}`,
-      paint: allDone ? (text) => styler.green(text) : (text) => styler.cyan(text),
+      paint: allDone ? (v) => styler.green(v) : (v) => styler.cyan(v),
       priority: 3,
     });
   }
   if (state.jobs > 0) {
-    segments.push({ text: `jobs ${state.jobs}`, paint: (text) => styler.yellow(text), priority: 2 });
+    segments.push({ text: `jobs ${state.jobs}`, paint: (v) => styler.yellow(v), priority: 2 });
   }
   return segments;
 }
@@ -336,6 +391,8 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
 function statusPanel(state: TuiState, width: number, styler: Styler): string[] {
   const pressure = state.contextWindow > 0 ? state.usage.lastPrompt / state.contextWindow : 0;
   const rows: Array<[string, string, (text: string) => string]> = [
+    ['项目', state.projectName, (text) => styler.cyan(text)],
+    ['分支', state.branch ?? '（不在 git 仓库）', state.branch ? (text) => styler.magenta(text) : (text) => styler.dim(text)],
     ['会话', state.sessionId, (text) => text],
     ['工作区', state.workspaceRoot, (text) => styler.dim(text)],
     ['模型', `${state.model} (${state.api}${state.effort ? `, ${state.effort}` : ''})`, (text) => styler.bold(text)],
@@ -349,6 +406,15 @@ function statusPanel(state: TuiState, width: number, styler: Styler): string[] {
       pressureTone(pressure, styler),
     ],
     ['用量', `+${formatTokens(state.usage.prompt)} / -${formatTokens(state.usage.completion)}`, (text) => styler.dim(text)],
+    [
+      '缓存',
+      (() => {
+        const hit = cacheHitRate(state.usage);
+        if (hit === undefined) return '（端点未上报缓存用量）';
+        return `${Math.round(hit * 100)}% (${formatTokens(state.usage.cached)} / ${formatTokens(state.usage.prompt)})`;
+      })(),
+      (text) => styler.dim(text),
+    ],
     [
       'TODO',
       state.todo.total === 0

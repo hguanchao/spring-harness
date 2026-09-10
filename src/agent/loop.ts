@@ -290,6 +290,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         type: 'usage',
         promptTokens: reply.usage.promptTokens,
         completionTokens: reply.usage.completionTokens,
+        ...(reply.usage.cachedTokens === undefined ? {} : { cachedTokens: reply.usage.cachedTokens }),
       });
     }
 

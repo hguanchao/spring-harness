@@ -35,6 +35,7 @@ import {
   moveEnd, moveHome, moveLeft, moveRight, setText, type EditorState,
 } from './editor.js';
 import { KeyParser, type Key } from './keys.js';
+import { readGitBranch } from './git.js';
 import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TuiState } from './state.js';
 import { InputQueue, Terminal } from './terminal.js';
 import { renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions } from './view.js';
@@ -95,6 +96,8 @@ const REPLAY_LIMIT = 40;
 const HISTORY_LIMIT = 200;
 /** info/success 级提示的存活时间；warn/error 留到用户下一次操作。 */
 const NOTICE_TTL_MS = 4000;
+/** git 分支的重新读取间隔：状态行高频重绘，不能每帧读盘。 */
+const BRANCH_TTL_MS = 2000;
 
 export async function runTui(deps: TuiDeps): Promise<void> {
   await new TuiApp(deps).run();
@@ -129,6 +132,8 @@ class TuiApp {
   private stepToolCount = 0;
   private spinnerTimer?: NodeJS.Timeout;
   private noticeTimer?: NodeJS.Timeout;
+  /** 上次读 git 分支的时间（2s 节流）。 */
+  private lastBranchCheck = 0;
   private escTimer?: NodeJS.Timeout;
   private menuKind: 'commands' | 'sessions' = 'commands';
   private sessions: SessionInfo[] = [];
@@ -865,10 +870,22 @@ class TuiApp {
   private render(): void {
     if (!this.terminal.active) return;
     this.flushRaw();
+    this.refreshBranch(Date.now());
     const options = this.viewOptions();
     this.lastSize = { width: options.width, height: options.height };
     const { lines, cursor } = renderLive(this.state, options);
     this.terminal.drawLive(lines, cursor);
+  }
+
+  /**
+   * 分支可能被外部 `git checkout` 改掉，但状态行在运行中每 120ms 重绘一次，
+   * 不可能每帧读盘 —— 2 秒一次足够新，代价可以忽略。
+   */
+  private refreshBranch(now: number): void {
+    if (now - this.lastBranchCheck < BRANCH_TTL_MS) return;
+    this.lastBranchCheck = now;
+    const branch = readGitBranch(this.deps.workspaceRoot);
+    if (branch !== this.state.branch) this.state.branch = branch;
   }
 
   private viewOptions(): ViewOptions {

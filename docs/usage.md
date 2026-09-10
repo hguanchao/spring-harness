@@ -174,9 +174,19 @@ Visual conventions:
   `write src/a.ts +12`, `search_replace src/a.ts -2/+1 x3`,
   `shell $ npm test -> exit 0`. Long output folds to 8 lines for a lone call, to
   2 lines per call inside a multi-call block (6 for failures).
-- The status line sheds its least important segments on narrow terminals instead
-  of truncating them; the model name and the live indicator always survive.
-  `/status` shows every field regardless of width.
+- The status line is `| <icon> value | ... |`, in this order: project directory,
+  git branch, model, reasoning effort, context usage, prompt-cache hit rate and
+  permission mode. Icons: 📁 project, 🌿 branch, 🤖 model, 🧠 effort, 🧮 context,
+  🔁 cache, 🔒 ask / 🔐 auto / 🔓 yolo. A field whose data is unavailable is
+  omitted entirely — no branch outside a git repository, no cache row when the
+  endpoint never reports cached tokens (which is not the same as 0% hits).
+  While a turn runs, the tool being executed is prefixed as `grep 1.4s`.
+  `PLAN` and `沙箱 off` are appended when relevant — they change what tools may
+  run, so they are never dropped for width.
+- On narrow terminals the status line sheds its least important fields instead of
+  truncating them; project, model and permission mode survive longest (permission
+  mode is pinned, since it decides whether tools run without asking you).
+  `/status` always shows every field, including the workspace path and sandbox.
 - Notices are levelled: info/success fade after a few seconds, warn/error stay
   until your next action.
 
