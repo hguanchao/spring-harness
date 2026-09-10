@@ -1,0 +1,32 @@
+{
+  "name": "@spring-harness/cli",
+  "version": "0.1.0",
+  "description": "Spring Harness — a personal general-purpose agent runtime (sph)",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "sph": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "sph": "tsx src/cli/index.ts",
+    "verify:sandbox": "tsx scripts/sandbox-outside-write.ts",
+    "verify:tui": "tsx test/verify-tui.ts",
+    "dogfood": "tsx scripts/dogfood-restful.ts first && tsx scripts/dogfood-restful.ts resume"
+  },
+  "dependencies": {
+    "koffi": "^2.12.1",
+    "smol-toml": "^1.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

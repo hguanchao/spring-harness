@@ -1,0 +1,13 @@
+node_modules/
+dist/
+test/
+*.log
+*.tsbuildinfo
+coverage/
+.env
+.env.*
+.DS_Store
+Thumbs.db
+
+# 本地智能体会话数据：每日工作日志与交付报告，不进仓库
+.workbuddy/
