@@ -238,6 +238,10 @@ export interface Styler {
   yellow(text: string): string;
   cyan(text: string): string;
   magenta(text: string): string;
+  /** 反显：终端里最标准的「选中」表达，不依赖色相，16 色下也醒目。 */
+  inverse(text: string): string;
+  /** 搜索命中：加粗黄，比单独一个色相更容易在一行里被看见。 */
+  highlight(text: string): string;
 }
 
 /** 着色器：关闭时所有方法退化为恒等函数，调用方无需到处判断是否支持彩色。 */
@@ -252,6 +256,9 @@ export function createStyler(enabled: boolean): Styler {
     yellow: code('33'),
     cyan: code('36'),
     magenta: code('35'),
+    inverse: code('7'),
+    // 组合 SGR 而不是嵌套调用：嵌套会让内层的 reset 提前终止外层样式。
+    highlight: code('1;33'),
   };
 }
 

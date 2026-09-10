@@ -132,9 +132,9 @@ line and the status line.
 Keys:
 
 - `Enter` — send. A line starting with `/` is a command instead.
-- `/` or `Ctrl+K` — command menu; `↑↓` pick, `Enter` run, `Esc` cancel. Typing
-  filters it (`Ctrl+K` opens the full list, `/` opens it already prefixed).
-- `↑` / `↓` — prompt history (when the input is empty).
+- `/` or `Ctrl+K` — command menu; Up/Down pick, `Enter` run, `Esc` cancel.
+  Typing filters it (`Ctrl+K` opens the full list, `/` opens it already prefixed).
+- Up / Down — prompt history (when the input is empty).
 - `Ctrl+A/E/K/U/W`, `Ctrl+B/F` — line editing as in readline.
 - `Ctrl+L` — clear screen. `Ctrl+C` — abort the running turn; exit when idle.
 - `Esc` — abort the running turn, close an overlay, or clear the input.
@@ -151,6 +151,34 @@ In the TUI, `ask` mode asks you instead of denying, `ask_user` reaches you, and
 `exit_plan_mode` gets a real approval — plan mode actually works. In `auto`
 mode a verdict of the reviewer that denies (or the reviewer being unavailable)
 escalates to you rather than failing closed silently.
+
+Visual conventions:
+
+- The activity area at the bottom is the only part that gets redrawn; everything
+  above it is ordinary terminal scrollback. Every line there is measured with
+  CJK-aware width and wrapped by us, and skeleton glyphs are ASCII only: middle
+  dots, ellipses, arrows and box-drawing characters are East-Asian-ambiguous
+  width and render as 2 cells in some terminals, which would desynchronise the
+  redraw and eat a line of committed output.
+- Colors are 16-color SGR on purpose — they resolve through the terminal's own
+  palette, so a light and a dark theme both stay readable, with no hardcoded
+  brightness. Semantic mapping: cyan = your input and interactive focus,
+  yellow = needs your decision (all three prompts share it), magenta = plan mode
+  only, green/red = success/failure, `dim` = metadata only (durations, counts,
+  folded bodies, hints), inverse = the selected menu row. Body text — replies and
+  tool output — keeps the default foreground.
+- Tool calls belonging to one model step are collected and printed as a single
+  block once that step ends, with a header (`3 个工具调用 | 1 个失败 | 1.2s`).
+  While they run, the live indicator shows `[2/3] grep 1.4s`.
+- Summaries are per tool: `read_file src/a.ts:1-40 (40 行)`, `grep "foo" -> 7 处`,
+  `write src/a.ts +12`, `search_replace src/a.ts -2/+1 x3`,
+  `shell $ npm test -> exit 0`. Long output folds to 8 lines for a lone call, to
+  2 lines per call inside a multi-call block (6 for failures).
+- The status line sheds its least important segments on narrow terminals instead
+  of truncating them; the model name and the live indicator always survive.
+  `/status` shows every field regardless of width.
+- Notices are levelled: info/success fade after a few seconds, warn/error stay
+  until your next action.
 
 Notes:
 

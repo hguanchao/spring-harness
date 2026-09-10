@@ -13,18 +13,39 @@ import type { SessionMessage } from '../session/types.js';
 import type { TodoItem } from '../runtime/todos.js';
 import type { EditorState } from './editor.js';
 import { emptyEditor } from './editor.js';
+import { summarizeToolCall } from './tool-view.js';
 
 export type Phase = 'idle' | 'running' | 'approval' | 'ask' | 'plan' | 'menu' | 'status';
+
+/** 一次性提示的级别：决定颜色与是否自动消失（warn/error 留到用户下一次操作）。 */
+export type NoticeLevel = 'info' | 'success' | 'warn' | 'error';
+
+export interface Notice {
+  text: string;
+  level: NoticeLevel;
+}
 
 export interface TranscriptEntry {
   kind: 'user' | 'assistant' | 'thinking' | 'tool' | 'notice' | 'error';
   text: string;
-  /** 工具名或 thinking 事件 id，用于标识来源。 */
+  /** tool: 工具名。 */
   label?: string;
+  /** tool: 工具调用 id——并行调用时靠它把结果回填到发起条目，不能依赖顺序。 */
+  id?: string;
+  /** tool: 入参，用于在拿到结果后重算摘要。 */
+  args?: Record<string, unknown>;
+  /** tool: 一行摘要（由 tool-view 推导）。 */
+  summary?: string;
+  /** tool: 结果正文。 */
+  detail?: string;
+  /** notice/error: 级别，决定着色。 */
+  level?: NoticeLevel;
   /** 工具结果的成败着色。 */
   ok?: boolean;
-  /** 折叠显示（工具输出、思考链不刷屏）。 */
+  /** 折叠显示（思考链不刷屏）。 */
   collapsed?: boolean;
+  /** 耗时（工具调用或整轮）。 */
+  durationMs?: number;
 }
 
 export interface UsageTotals {
@@ -72,6 +93,15 @@ export interface PlanPrompt {
 
 export type PendingPrompt = ApprovalPrompt | AskPrompt | PlanPrompt;
 
+/** 正在执行的工具：活动区的实时指示（工具输出进滚动区之前，用户靠它知道在跑什么）。 */
+export interface ActiveTool {
+  name: string;
+  /** 本步内的序号与已知总数（写入工具是串行发起的，total 会随后续 tool_start 增长）。 */
+  index: number;
+  total: number;
+  startedAt: number;
+}
+
 export interface TuiState {
   phase: Phase;
   editor: EditorState;
@@ -94,10 +124,12 @@ export interface TuiState {
   mcpTools: number;
   todo: { total: number; done: number; current?: string };
   jobs: number;
-  /** 一次性提示（命令反馈、错误），下次提交或清除后消失。 */
-  notice?: string;
+  /** 一次性提示（命令反馈、错误），由 app 决定何时清除或超时消失。 */
+  notice?: Notice;
   menu?: MenuState;
   prompt?: PendingPrompt;
+  /** 正在执行的工具（若有）。 */
+  activeTool?: ActiveTool;
   spinner: number;
   /** 运行中正在流式写入的 thinking 条目下标，供 thinking_end 回填正文。 */
   thinkingIndex?: number;
@@ -181,22 +213,27 @@ export function todoSummary(items: readonly TodoItem[]): TuiState['todo'] {
   return { total: items.length, done, current };
 }
 
-/** 工具调用的单行摘要，避免把整段 JSON 塞进界面。 */
-export function summarizeArgs(args: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    const text = typeof value === 'string' ? value : JSON.stringify(value);
-    if (text === undefined) continue;
-    parts.push(`${key}=${text.replace(/\s+/g, ' ').slice(0, 80)}`);
+/** 按 id 找工具条目：并行调用下顺序不可靠，只能按 id 回填。 */
+export function findToolEntry(state: TuiState, id: string): TranscriptEntry | undefined {
+  for (let i = state.entries.length - 1; i >= 0; i--) {
+    const entry = state.entries[i];
+    if (entry.kind === 'tool' && entry.id === id) return entry;
   }
-  return parts.join(' ');
+  return undefined;
 }
 
 /**
  * 会话消息 → 首屏回放条目。
- * 切换会话时把历史写回滚动区，用户能看到「切过去之后聊了什么」。
+ *
+ * 工具调用与它的结果合并成一条：`assistant` 里的 toolCalls 带着入参，紧随的 `tool`
+ * 消息带着结果，靠 toolCallId 配对才能既显示摘要又有正文。只有结果的调用（被中断）
+ * 也保留一条，避免回放里凭空少一次调用。
  */
 export function transcriptFromMessages(messages: readonly SessionMessage[]): TranscriptEntry[] {
+  const resultIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role === 'tool' && message.toolCallId) resultIds.add(message.toolCallId);
+  }
   const out: TranscriptEntry[] = [];
   for (const message of messages) {
     if (message.role === 'user') {
@@ -206,22 +243,48 @@ export function transcriptFromMessages(messages: readonly SessionMessage[]): Tra
     if (message.role === 'assistant') {
       if (message.content) out.push({ kind: 'assistant', text: message.content });
       for (const call of message.toolCalls ?? []) {
-        out.push({ kind: 'tool', label: call.name, text: summarizeArgs(call.arguments) });
+        if (resultIds.has(call.id)) continue; // 结果条目里会补上入参
+        out.push(toolEntry(call.id, call.name, call.arguments, ''));
       }
       continue;
     }
     if (message.role === 'tool') {
-      out.push({ kind: 'tool', label: message.toolName ?? 'tool', text: message.content, ok: true, collapsed: true });
+      const id = message.toolCallId ?? '';
+      const name = message.toolName ?? 'tool';
+      const args = argsOf(messages, id) ?? {};
+      out.push(toolEntry(id, name, args, message.content));
     }
   }
   return out;
+}
+
+function toolEntry(id: string, name: string, args: Record<string, unknown>, detail: string): TranscriptEntry {
+  return {
+    kind: 'tool',
+    text: '',
+    id,
+    label: name,
+    args,
+    detail,
+    summary: summarizeToolCall({ id, name, args, detail }),
+  };
+}
+
+function argsOf(messages: readonly SessionMessage[], id: string): Record<string, unknown> | undefined {
+  if (id === '') return undefined;
+  for (const message of messages) {
+    for (const call of message.toolCalls ?? []) {
+      if (call.id === id) return call.arguments;
+    }
+  }
+  return undefined;
 }
 
 /** agent 事件 → 界面条目。返回需要立刻写入滚动区的条目（流式片段请用返回值增量写）。 */
 export function applyAgentEvent(state: TuiState, event: AgentEvent): void {
   switch (event.type) {
     case 'status':
-      addEntry(state, { kind: 'notice', text: event.text });
+      addEntry(state, { kind: 'notice', text: event.text, level: 'info' });
       break;
     case 'thinking_start':
       state.thinkingIndex = addEntry(state, { kind: 'thinking', label: event.id, text: '', collapsed: true });
@@ -235,23 +298,35 @@ export function applyAgentEvent(state: TuiState, event: AgentEvent): void {
     case 'tool_start':
       addEntry(state, {
         kind: 'tool',
+        text: '',
+        id: event.id,
         label: event.name,
-        text: summarizeArgs(event.args),
-        collapsed: true,
+        args: event.args,
+        summary: summarizeToolCall({ id: event.id, name: event.name, args: event.args, detail: '' }),
+        detail: '',
       });
       break;
     case 'tool_end': {
-      addEntry(state, { kind: 'tool', label: `${event.name} 结果`, text: event.content, ok: event.ok, collapsed: true });
+      const entry = findToolEntry(state, event.id);
+      if (!entry) break;
+      entry.ok = event.ok;
+      entry.detail = event.content;
+      entry.summary = summarizeToolCall({
+        id: event.id,
+        name: entry.label ?? event.name,
+        args: entry.args ?? {},
+        detail: event.content,
+      });
       break;
     }
     case 'ask':
-      state.notice = `等待人工确认：${event.tool}`;
+      state.notice = { text: `等待人工确认：${event.tool}`, level: 'info' };
       break;
     case 'usage':
       accumulateUsage(state, event.promptTokens, event.completionTokens);
       break;
     case 'error':
-      addEntry(state, { kind: 'error', text: event.text });
+      addEntry(state, { kind: 'error', text: event.text, level: 'error' });
       break;
     case 'text':
       streamEntry(state, 'assistant', event.text);

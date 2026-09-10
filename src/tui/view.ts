@@ -3,23 +3,38 @@
  *
  * 渲染模型是「行内（inline）」而不是全屏替代缓冲区：
  * - 对话正文由 app 直接写进终端原生滚动区，天然支持终端自身的滚动/搜索/复制；
- * - 这里只负责底部那块会重绘的「活动区」：浮层 + 输入行 + 提示行 + 状态行。
- * 因此 renderLive 返回的行必须每条都 <= width，app 才能确定「一行 = 一屏一行」，
- * 用「上移 N 行 + 清到屏幕末尾」精确重绘。
+ * - 这里只负责底部那块会重绘的「活动区」：浮层 + 输入行 + 提示行 + notice + 状态行。
  *
- * 着色与截断的次序约定：先保证行宽不超限，再着色。反过来会截断掉结尾的复位序列，
- * 让颜色泄漏到后续内容上。
+ * 三条硬约定，改动时不要破：
+ * 1. 活动区每行 displayWidth <= width。超了会被终端折成两行，重绘时「上移 N 行」算错、
+ *    吃掉已提交内容。折行一律由本模块负责。
+ * 2. 骨架字符只用 ASCII。东亚歧义宽度字符（·、…、↑↓、制表符）在部分终端按 2 列渲染，
+ *    会让第 1 条失效——要表达方向键就写「上下键」，不要用箭头字形。
+ * 3. 不补齐行尾（菜单选中条除外）。clearLive() 已用 ESC[J 清到屏幕末尾，短行不会留残影；
+ *    补齐只会让复制内容带上行尾空格，并让「截断带色文本丢复位序列」的风险扩散。
+ *
+ * 色彩语义（16 色，落在终端自身调色板上，随浅色/深色主题自适应，不硬编码亮度）：
+ *   cyan    用户输入前缀、可交互焦点、菜单标题
+ *   yellow  需要你决策（审批 / 提问 / 计划三种浮层共用这一个色相，旧实现是三个任意色）
+ *   magenta 只表示「计划模式」这一开关状态
+ *   green   成功      red  失败 / 错误
+ *   dim     只给元信息（耗时、计数、折叠体、提示行、状态行次要字段）
+ *   inverse 选择态（终端里最标准的表达，不依赖色相，16 色下同样醒目）
+ * 正文（助手回复、工具结果）一律用默认前景——旧实现把正文压成 dim，恰好压暗了要读的内容。
  */
 
 import type { Styler } from './ansi.js';
-import { pad, truncate, wrap } from './ansi.js';
+import { displayWidth, pad, truncate, wrap } from './ansi.js';
 import { scrollEditor } from './editor.js';
-import type { TranscriptEntry, TuiState } from './state.js';
+import type { NoticeLevel, TranscriptEntry, TuiState } from './state.js';
+import { formatDuration, renderToolDetail, summarizeToolCall, toolTone, type ToolCallView } from './tool-view.js';
 
 export interface ViewOptions {
   width: number;
   height: number;
   styler: Styler;
+  /** 当前时间，仅用于运行中指示的「已耗时」；测试可注入固定值。 */
+  now?: number;
 }
 
 export interface LiveView {
@@ -28,58 +43,183 @@ export interface LiveView {
   cursor: { row: number; col: number } | null;
 }
 
+const SPINNER = ['|', '/', '-', '\\'];
+const SEPARATOR = ' | ';
+/** 该优先级及以上的段不参与降级丢弃：实时指示必须始终可见。 */
+const PINNED = 9;
+
+/** 正文行数上限：单工具块留得下细节，多工具块只留预览，失败项多留几行。 */
+const DETAIL_SINGLE = 8;
+const DETAIL_MULTI_OK = 2;
+const DETAIL_MULTI_FAIL = 6;
+
 export function formatTokens(count: number): string {
   if (count < 1000) return String(count);
   if (count < 1_000_000) return `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k`;
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
-/** 活动区渲染：浮层（若有）+ 输入行 + 提示行 + 状态行。 */
+/** 占用条：纯 ASCII（`#`/`-`）。块字符 U+2588 属歧义宽度，不能用。 */
+export function progressBar(ratio: number, width: number): string {
+  const limit = Math.max(3, Math.floor(width));
+  const clamped = ratio < 0 ? 0 : ratio > 1 ? 1 : ratio;
+  // 非零占用至少点亮一格：否则 0.5% 的上下文压力看起来和「没调用过模型」一样。
+  const filled = clamped === 0 ? 0 : Math.max(1, Math.round(clamped * limit));
+  return `[${'#'.repeat(filled)}${'-'.repeat(limit - filled)}]`;
+}
+
+// ---------------------------------------------------------------- 状态行
+
+interface Segment {
+  text: string;
+  paint: (text: string) => string;
+  /** 数字越大越先保留。 */
+  priority: number;
+}
+
+/**
+ * 分段合成单行：超出宽度时按优先级丢段，而不是截断。
+ * 截断会把带色文本结尾的复位序列切掉、让颜色泄漏；丢段则完全避开这个问题——
+ * 每一段都是「纯文本 + 单一着色函数」，永远不会被切。窄终端下自然退化成只留关键字段。
+ */
+function composeSegments(segments: readonly Segment[], width: number, styler: Styler): string {
+  let kept = segments.filter((segment) => segment.text !== '');
+  const measure = (list: readonly Segment[]): number =>
+    list.reduce((total, segment) => total + displayWidth(segment.text), 0) +
+    Math.max(0, list.length - 1) * SEPARATOR.length;
+
+  while (measure(kept) > width) {
+    let worstIndex = -1;
+    let worstPriority = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < kept.length; i++) {
+      if (kept[i].priority >= PINNED) continue;
+      // <= 让同优先级里最靠右的先被丢掉
+      if (kept[i].priority <= worstPriority) {
+        worstPriority = kept[i].priority;
+        worstIndex = i;
+      }
+    }
+    if (worstIndex < 0) break;
+    kept.splice(worstIndex, 1);
+  }
+  if (kept.length === 0) return '';
+
+  // 只剩固定段仍超宽（极窄终端）：只截断最后一段的纯文本。
+  if (measure(kept) > width) {
+    const last = kept[kept.length - 1];
+    const budget = width - (measure(kept) - displayWidth(last.text));
+    kept = [...kept.slice(0, -1), { ...last, text: truncate(last.text, Math.max(0, budget)) }];
+  }
+  return kept.map((segment) => segment.paint(segment.text)).join(styler.dim(SEPARATOR));
+}
+
+function approvalTone(mode: string, styler: Styler): (text: string) => string {
+  if (mode === 'yolo') return (text) => styler.red(text); // 全部放行，属危险态
+  if (mode === 'auto') return (text) => styler.cyan(text);
+  return (text) => styler.yellow(text); // ask：迟早会来问你
+}
+
+function sandboxTone(mode: string, styler: Styler): (text: string) => string {
+  return mode === 'off' ? (text) => styler.red(text) : (text) => styler.cyan(text);
+}
+
+function pressureTone(ratio: number, styler: Styler): (text: string) => string {
+  if (ratio >= 0.9) return (text) => styler.red(text);
+  if (ratio >= 0.7) return (text) => styler.yellow(text);
+  return (text) => styler.cyan(text);
+}
+
+function statusSegments(state: TuiState, styler: Styler, now: number): Segment[] {
+  const segments: Segment[] = [];
+  if (state.phase === 'running') {
+    const frame = SPINNER[state.spinner % SPINNER.length];
+    const active = state.activeTool;
+    if (active) {
+      const elapsed = Math.max(0, now - active.startedAt);
+      const position = active.total > 1 ? `[${active.index}/${active.total}] ` : '';
+      const suffix = elapsed >= 1000 ? ` ${formatDuration(elapsed)}` : '';
+      segments.push({
+        text: `${frame} ${position}${active.name}${suffix}`,
+        paint: (text) => styler.cyan(text),
+        priority: PINNED,
+      });
+    } else {
+      segments.push({ text: frame, paint: (text) => styler.cyan(text), priority: PINNED });
+    }
+  }
+  segments.push({ text: state.model, paint: (text) => styler.bold(text), priority: 8 });
+  if (state.planMode) segments.push({ text: 'PLAN', paint: (text) => styler.magenta(text), priority: 7 });
+  segments.push({ text: `审批 ${state.approvalMode}`, paint: approvalTone(state.approvalMode, styler), priority: 7 });
+  segments.push({ text: `沙箱 ${state.sandboxMode}`, paint: sandboxTone(state.sandboxMode, styler), priority: 6 });
+  if (state.usage.lastPrompt > 0 && state.contextWindow > 0) {
+    const ratio = state.usage.lastPrompt / state.contextWindow;
+    segments.push({
+      text: `上下文 ${progressBar(ratio, 8)} ${Math.round(ratio * 100)}%`,
+      paint: pressureTone(ratio, styler),
+      priority: 5,
+    });
+  }
+  segments.push({
+    text: `+${formatTokens(state.usage.prompt)}/-${formatTokens(state.usage.completion)}`,
+    paint: (text) => styler.dim(text),
+    priority: 4,
+  });
+  if (state.todo.total > 0) {
+    const allDone = state.todo.done === state.todo.total;
+    segments.push({
+      text: `todo ${state.todo.done}/${state.todo.total}`,
+      paint: allDone ? (text) => styler.green(text) : (text) => styler.cyan(text),
+      priority: 3,
+    });
+  }
+  if (state.jobs > 0) {
+    segments.push({ text: `jobs ${state.jobs}`, paint: (text) => styler.yellow(text), priority: 2 });
+  }
+  return segments;
+}
+
+// ---------------------------------------------------------------- 活动区
+
+/** 活动区渲染：浮层（若有）+ 输入行 + 提示行 + notice + 状态行。 */
 export function renderLive(state: TuiState, options: ViewOptions): LiveView {
   const { width, styler } = options;
+  const now = options.now ?? Date.now();
   const budget = Math.max(4, Math.min(12, options.height - 7));
   const lines: string[] = [];
   let cursor: { row: number; col: number } | null = null;
-  const push = (line: string): void => {
-    lines.push(pad(line, width));
-  };
 
   const prompt = state.prompt;
   if (prompt?.kind === 'approval') {
-    for (const line of approvalPanel(prompt.request, prompt.note, width, styler)) push(line);
+    lines.push(...approvalPanel(prompt.request, prompt.note, width, styler));
   } else if (prompt?.kind === 'ask') {
-    for (const line of askPanel(prompt.question, width, styler)) push(line);
-    const row = lines.length;
+    lines.push(...askPanel(prompt.question, width, styler));
     const input = inputLine(prompt.editor, width, styler);
-    push(input.line);
-    cursor = { row, col: input.column };
+    cursor = { row: lines.length, col: input.column };
+    lines.push(input.line);
   } else if (prompt?.kind === 'plan') {
-    for (const line of planPanel(prompt.plan, width, budget, styler)) push(line);
-    const row = lines.length;
+    lines.push(...planPanel(prompt.plan, width, budget, styler));
     const input = inputLine(prompt.editor, width, styler);
-    push(input.line);
-    cursor = { row, col: input.column };
+    cursor = { row: lines.length, col: input.column };
+    lines.push(input.line);
   } else if (state.phase === 'menu' && state.menu) {
-    for (const line of menuPanel(state.menu, width, budget, styler)) push(line);
-    const row = lines.length;
+    lines.push(...menuPanel(state.menu, width, budget, styler));
     const input = inputLine(state.editor, width, styler);
-    push(input.line);
-    cursor = { row, col: input.column };
+    cursor = { row: lines.length, col: input.column };
+    lines.push(input.line);
   } else if (state.phase === 'status') {
-    for (const line of statusPanel(state, width, styler)) push(line);
+    lines.push(...statusPanel(state, width, styler));
   } else {
-    const row = lines.length;
     const input = inputLine(state.editor, width, styler);
-    push(input.line);
-    cursor = { row, col: input.column };
+    cursor = { row: lines.length, col: input.column };
+    lines.push(input.line);
   }
 
   const hint = hintLine(state);
-  if (hint) push(styler.dim(pad(hint, width)));
-  if (state.notice) push(styler.dim(pad(`· ${state.notice}`, width)));
-  push(statusLine(state, width, styler));
+  if (hint) lines.push(styler.dim(truncate(hint, width, '')));
+  if (state.notice) lines.push(noticeLine(state.notice, width, styler));
+  lines.push(composeSegments(statusSegments(state, styler, now), width, styler));
 
-  // 硬上限：活动区绝不能高过终端，否则重绘时「上移 N 行」会吃掉已经提交的滚动内容。
+  // 硬上限：活动区绝不能高过终端，否则重绘时「上移 N 行」会吃掉已提交的滚动内容。
   const maxRows = Math.max(3, options.height - 1);
   if (lines.length > maxRows) {
     const drop = lines.length - maxRows;
@@ -87,6 +227,24 @@ export function renderLive(state: TuiState, options: ViewOptions): LiveView {
     cursor = cursor && cursor.row - drop >= 0 ? { row: cursor.row - drop, col: cursor.col } : null;
   }
   return { lines, cursor };
+}
+
+function noticeMark(level: NoticeLevel): string {
+  if (level === 'error') return '[x]';
+  if (level === 'warn') return '[!]';
+  if (level === 'success') return '[+]';
+  return '[-]';
+}
+
+function noticePaint(level: NoticeLevel, styler: Styler): (text: string) => string {
+  if (level === 'error') return (text) => styler.red(text);
+  if (level === 'warn') return (text) => styler.yellow(text);
+  if (level === 'success') return (text) => styler.green(text);
+  return (text) => styler.dim(text);
+}
+
+function noticeLine(notice: NonNullable<TuiState['notice']>, width: number, styler: Styler): string {
+  return noticePaint(notice.level, styler)(truncate(`${noticeMark(notice.level)} ${notice.text}`, width, ''));
 }
 
 function inputLine(editor: TuiState['editor'], width: number, styler: Styler): { line: string; column: number } {
@@ -97,30 +255,28 @@ function inputLine(editor: TuiState['editor'], width: number, styler: Styler): {
 
 function hintLine(state: TuiState): string | undefined {
   if (state.prompt) return undefined;
-  if (state.phase === 'menu') return '↑↓ 选择 · Enter 执行 · Esc 取消';
+  if (state.phase === 'menu') return '上下键 选择 | Enter 执行 | Esc 取消';
   if (state.phase === 'status') return '任意键返回';
-  if (state.phase === 'running') return '运行中 · Esc 中断本轮 · Ctrl+C 退出';
-  return 'Enter 发送 · / 命令菜单 · Ctrl+K 全部操作 · Ctrl+C 退出';
+  if (state.phase === 'running') return '运行中 | Esc 中断本轮 | Ctrl+C 退出';
+  return 'Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | Ctrl+C 退出';
 }
 
-/** 常驻状态行。先截断纯文本再着色，避免截掉结尾复位序列。 */
-function statusLine(state: TuiState, width: number, styler: Styler): string {
-  const parts: string[] = [];
-  if (state.phase === 'running') parts.push(SPINNER[state.spinner % SPINNER.length]);
-  parts.push(state.model);
-  parts.push(`审批 ${state.approvalMode}`);
-  parts.push(`沙箱 ${state.sandboxMode}`);
-  parts.push(`↑${formatTokens(state.usage.prompt)} ↓${formatTokens(state.usage.completion)}`);
-  if (state.todo.total > 0) parts.push(`todo ${state.todo.done}/${state.todo.total}`);
-  if (state.jobs > 0) parts.push(`jobs ${state.jobs}`);
-  if (state.planMode) parts.push('PLAN');
-  return styler.dim(truncate(parts.join(' · '), width, '~'));
+function overlayTitle(mark: string, title: string, width: number, styler: Styler): string {
+  return truncate(styler.yellow(`${mark} ${title}`), width, '');
 }
 
-const SPINNER = ['|', '/', '-', '\\'];
+function keysLine(text: string, width: number, styler: Styler): string {
+  return styler.dim(truncate(`  ${text}`, width, ''));
+}
 
-/** 滚动区里工具输出最多展示的行数，超出部分折叠成一行提示。 */
-const COLLAPSED_TOOL_LINES = 8;
+function detailLines(
+  text: string,
+  width: number,
+  paint?: (text: string) => string,
+): string[] {
+  if (text === '') return [];
+  return wrap(text, Math.max(8, width - 2)).map((line) => (paint ? paint(`  ${line}`) : `  ${line}`));
+}
 
 function approvalPanel(
   request: { tool: string; command?: string; path?: string },
@@ -128,30 +284,27 @@ function approvalPanel(
   width: number,
   styler: Styler,
 ): string[] {
-  const out = [truncate(`${styler.yellow('需要审批')} · ${request.tool}`, width, '~')];
-  const detail = request.command ?? request.path ?? '';
-  for (const line of wrap(detail, Math.max(8, width - 2))) out.push(`  ${styler.dim(line)}`);
-  if (note) {
-    for (const line of wrap(note, Math.max(8, width - 2))) out.push(`  ${styler.dim(line)}`);
-  }
-  out.push(styler.dim(truncate('[y] 允许 · [n] 拒绝 · [a] 本会话允许该工具 · Esc 拒绝', width, '~')));
+  const out = [overlayTitle('[!]', `需要审批 | ${request.tool}`, width, styler)];
+  out.push(...detailLines(request.command ?? request.path ?? '', width));
+  if (note) out.push(...detailLines(note, width, (text) => styler.dim(text)));
+  out.push(keysLine('[y] 允许 | [n] 拒绝 | [a] 本会话总是允许 | [Esc] 拒绝', width, styler));
   return out;
 }
 
 function askPanel(question: string, width: number, styler: Styler): string[] {
-  const out = [truncate(styler.cyan('模型提问'), width, '~')];
-  for (const line of wrap(question, Math.max(8, width - 2))) out.push(`  ${line}`);
-  out.push(styler.dim(truncate('Enter 回答 · Esc 取消（模型会收到「未回答」）', width, '~')));
+  const out = [overlayTitle('[?]', '模型提问', width, styler)];
+  out.push(...detailLines(question, width));
+  out.push(keysLine('[Enter] 回答 | [Esc] 取消（模型会收到「未回答」）', width, styler));
   return out;
 }
 
 function planPanel(plan: string, width: number, budget: number, styler: Styler): string[] {
-  const out = [truncate(styler.magenta('计划待审批'), width, '~')];
+  const out = [overlayTitle('[!]', '计划待审批', width, styler)];
   const body = wrap(plan, Math.max(8, width - 2));
   const shown = body.slice(0, budget);
   for (const line of shown) out.push(`  ${line}`);
   if (body.length > shown.length) out.push(styler.dim(`  ... 其余 ${body.length - shown.length} 行`));
-  out.push(styler.dim(truncate('[y] 批准并执行 · 输入意见后 Enter 驳回 · Esc 驳回', width, '~')));
+  out.push(keysLine('[y] 批准并执行 | 输入意见后 [Enter] 驳回 | [Esc] 驳回', width, styler));
   return out;
 }
 
@@ -159,108 +312,176 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
   if (!menu) return [];
   const rows = Math.max(1, Math.min(budget, menu.items.length));
   const start = Math.max(0, Math.min(menu.index - Math.floor(rows / 2), menu.items.length - rows));
-  const header = menu.filter ? `${menu.title} · 过滤「${menu.filter}」` : menu.title;
-  const out = [truncate(styler.bold(header), width, '~')];
+  const header = menu.filter ? `命令 | 过滤「${menu.filter}」` : '命令';
+  const out = [truncate(styler.bold(styler.cyan(header)), width, '')];
   if (menu.items.length === 0) {
     out.push(styler.dim('  （无匹配命令）'));
     return out;
   }
   for (let i = start; i < start + rows; i++) {
     const item = menu.items[i];
-    const marker = i === menu.index ? '> ' : '  ';
-    const label = pad(item.label, 16);
-    const line = `${marker}${label}${item.hint}`;
-    out.push(i === menu.index ? truncate(styler.cyan(line), width, '') : truncate(line, width, '~'));
+    const label = `  ${pad(item.label, 18)}`;
+    const hint = truncate(item.hint, Math.max(0, width - displayWidth(label)), '');
+    if (i === menu.index) {
+      // 反显整行：纯文本先补齐到整宽再着色，形成连续的选中条，且不会被截断。
+      out.push(styler.inverse(pad(`${label}${hint}`, width)));
+    } else {
+      out.push(`${label}${styler.dim(hint)}`);
+    }
   }
   if (menu.items.length > rows) out.push(styler.dim(`  (${menu.index + 1}/${menu.items.length})`));
   return out;
 }
 
 function statusPanel(state: TuiState, width: number, styler: Styler): string[] {
-  const rows: Array<[string, string]> = [
-    ['会话', state.sessionId],
-    ['工作区', state.workspaceRoot],
-    ['模型', `${state.model} (${state.api}${state.effort ? `, ${state.effort}` : ''})`],
-    ['审批', state.approvalMode],
-    ['沙箱', `${state.sandboxMode} · ${state.sandboxEnforcement}`],
-    ['上下文', `最近一轮输入 ${formatTokens(state.usage.lastPrompt)} / ${formatTokens(state.contextWindow)} tokens`],
-    ['用量', `↑${formatTokens(state.usage.prompt)} ↓${formatTokens(state.usage.completion)}`],
-    ['TODO', state.todo.total === 0 ? '（空）' : `${state.todo.done}/${state.todo.total}${state.todo.current ? ` · ${state.todo.current}` : ''}`],
-    ['后台', `${state.jobs} 个任务`],
-    ['MCP', `${state.mcpServers} 个服务 · ${state.mcpTools} 个工具`],
-    ['计划模式', state.planMode ? 'on' : 'off'],
+  const pressure = state.contextWindow > 0 ? state.usage.lastPrompt / state.contextWindow : 0;
+  const rows: Array<[string, string, (text: string) => string]> = [
+    ['会话', state.sessionId, (text) => text],
+    ['工作区', state.workspaceRoot, (text) => styler.dim(text)],
+    ['模型', `${state.model} (${state.api}${state.effort ? `, ${state.effort}` : ''})`, (text) => styler.bold(text)],
+    ['审批', state.approvalMode, approvalTone(state.approvalMode, styler)],
+    ['沙箱', `${state.sandboxMode} (${state.sandboxEnforcement})`, sandboxTone(state.sandboxMode, styler)],
+    [
+      '上下文',
+      state.usage.lastPrompt > 0
+        ? `${progressBar(pressure, 16)} ${Math.round(pressure * 100)}% (${formatTokens(state.usage.lastPrompt)} / ${formatTokens(state.contextWindow)})`
+        : '（本轮还没调用模型）',
+      pressureTone(pressure, styler),
+    ],
+    ['用量', `+${formatTokens(state.usage.prompt)} / -${formatTokens(state.usage.completion)}`, (text) => styler.dim(text)],
+    [
+      'TODO',
+      state.todo.total === 0
+        ? '（空）'
+        : `${state.todo.done}/${state.todo.total}${state.todo.current ? ` | ${state.todo.current}` : ''}`,
+      state.todo.total > 0 && state.todo.done < state.todo.total
+        ? (text) => styler.cyan(text)
+        : (text) => styler.dim(text),
+    ],
+    [
+      '后台',
+      state.jobs === 0 ? '无' : `${state.jobs} 个运行中`,
+      state.jobs > 0 ? (text) => styler.yellow(text) : (text) => styler.dim(text),
+    ],
+    ['MCP', `${state.mcpServers} 个服务 | ${state.mcpTools} 个工具`, (text) => styler.dim(text)],
+    ['计划模式', state.planMode ? 'on' : 'off', state.planMode ? (text) => styler.magenta(text) : (text) => styler.dim(text)],
   ];
-  const out = [styler.bold(truncate('状态', width, '~'))];
-  for (const [label, value] of rows) {
-    const prefix = `  ${pad(label, 10)}`;
-    out.push(truncate(`${prefix}${value}`, width, '~'));
+  const out = [styler.bold(styler.cyan('状态'))];
+  const budget = Math.max(8, width - 12);
+  for (const [label, value, paint] of rows) {
+    out.push(`${styler.dim(`  ${pad(label, 10)}`)}${paint(truncate(value, budget, ''))}`);
   }
   return out;
 }
 
-/** 已提交条目 → 滚动区行。写进终端历史后就不再变，因此可以放心着色与截断。 */
+// ---------------------------------------------------------------- 滚动区
+
+/** 工具块：多工具时先给块头（数量 / 失败数 / 总耗时），再逐个「摘要 + 正文」。 */
+export function renderToolBlock(items: readonly ToolCallView[], options: ViewOptions): string[] {
+  if (items.length === 0) return [];
+  const { width, styler } = options;
+  const out: string[] = [];
+  const multiple = items.length > 1;
+  if (multiple) {
+    const total = items.reduce((sum, item) => sum + (item.durationMs ?? 0), 0);
+    const failed = items.filter((item) => item.ok === false).length;
+    const parts = [`${items.length} 个工具调用`];
+    if (failed > 0) parts.push(`${failed} 个失败`);
+    if (total > 0) parts.push(formatDuration(total));
+    out.push(styler.dim(parts.join(SEPARATOR)));
+  }
+  for (const item of items) {
+    out.push(toolSummaryLine(item, width, styler));
+    const maxLines = !multiple ? DETAIL_SINGLE : item.ok === false ? DETAIL_MULTI_FAIL : DETAIL_MULTI_OK;
+    out.push(...renderToolDetail(item, { width, indent: 4, maxLines, styler }));
+  }
+  return out;
+}
+
+/** 摘要行：工具名（按成败着色）+ 摘要左对齐，耗时右对齐成一列。 */
+function toolSummaryLine(item: ToolCallView, width: number, styler: Styler): string {
+  const indent = 2;
+  const duration = formatDuration(item.durationMs);
+  const durationWidth = duration === '' ? 0 : duration.length + 2;
+  const budget = Math.max(8, width - indent - durationWidth);
+  const nameWidth = displayWidth(item.name);
+  const summaryBudget = budget - nameWidth - 1;
+  const head = summaryBudget >= 6
+    ? `${item.name} ${truncate(summarizeToolCall(item), summaryBudget, '')}`
+    : truncate(item.name, budget, '');
+  const filler = duration === '' ? 0 : Math.max(1, width - indent - displayWidth(head) - duration.length);
+  const tail = duration === '' ? '' : `${' '.repeat(filler)}${styler.dim(duration)}`;
+  return `${' '.repeat(indent)}${toolTone(item.ok, styler)(head)}${tail}`;
+}
+
+/** 已提交条目 → 滚动区行。写进终端历史后就不再变，因此可以放心着色。 */
 export function renderEntry(entry: TranscriptEntry, options: ViewOptions): string[] {
   const { width, styler } = options;
   switch (entry.kind) {
     case 'user':
       return prefixed('> ', entry.text, width, (text) => styler.cyan(text));
     case 'assistant':
-      return wrap(entry.text, width).map((line) => pad(line, width));
+      return wrap(entry.text, width);
     case 'thinking': {
       if (!entry.text) return [];
       const body = wrap(entry.text, Math.max(8, width - 2));
-      if (entry.collapsed !== false) {
-        const head = body[0] ?? '';
-        const extra = body.length > 1 ? ` …（共 ${body.length} 行）` : '';
-        return [styler.dim(pad(`[思考] ${head}${extra}`, width))];
+      if (body.length === 0) return [];
+      const head = `${body[0]}${body.length > 1 ? ` ...（共 ${body.length} 行）` : ''}`;
+      const lines = [styler.dim(`[思考] ${truncate(head, Math.max(8, width - 6), '')}`)];
+      if (entry.collapsed === false) {
+        for (const line of body.slice(1)) lines.push(styler.dim(`  ${line}`));
       }
-      return body.map((line) => styler.dim(pad(`  ${line}`, width)));
+      return lines;
     }
-    case 'tool': {
-      const label = entry.label ?? 'tool';
-      const tone = entry.ok === undefined ? styler.dim.bind(styler) : entry.ok ? styler.green.bind(styler) : styler.red.bind(styler);
-      const out = [tone(pad(truncate(`[${label}]`, width, '~'), width))];
-      const body = wrap(entry.text, Math.max(8, width - 2));
-      const shown = body.slice(0, COLLAPSED_TOOL_LINES);
-      for (const line of shown) out.push(styler.dim(pad(`  ${line}`, width)));
-      if (body.length > shown.length) {
-        out.push(styler.dim(pad(`  ... 其余 ${body.length - shown.length} 行`, width)));
-      }
-      return out;
-    }
+    case 'tool':
+      return renderToolBlock([toolCallOf(entry)], options);
     case 'notice':
-      return [styler.dim(pad(truncate(`· ${entry.text}`, width, '~'), width))];
+      return wrap(entry.text, Math.max(8, width - 4)).map((line, index) =>
+        noticePaint(entry.level ?? 'info', styler)(`${index === 0 ? `${noticeMark(entry.level ?? 'info')} ` : '  '}${line}`),
+      );
     case 'error':
-      return wrap(entry.text, Math.max(8, width - 2)).map((line, i) =>
-        i === 0 ? styler.red(pad(truncate(`! ${line}`, width, '~'), width)) : styler.red(pad(`  ${line}`, width)),
+      return wrap(entry.text, Math.max(8, width - 4)).map((line, index) =>
+        styler.red(`${index === 0 ? '[!] ' : '  '}${line}`),
       );
   }
 }
 
-function prefixed(
-  prefix: string,
-  text: string,
-  width: number,
-  paint: (text: string) => string,
-): string[] {
-  const body = wrap(text, Math.max(8, width - prefix.length));
-  const out: string[] = [];
-  body.forEach((line, index) => {
-    if (index === 0) out.push(`${paint(prefix)}${line}`);
-    else out.push(`${' '.repeat(prefix.length)}${line}`);
-  });
-  return out.map((line) => pad(line, width));
+/** 条目 → 工具块入参：回放路径与实时路径复用同一套摘要/正文渲染。 */
+function toolCallOf(entry: TranscriptEntry): ToolCallView {
+  return {
+    id: entry.id ?? '',
+    name: entry.label ?? 'tool',
+    args: entry.args ?? {},
+    detail: entry.detail ?? '',
+    ok: entry.ok,
+    durationMs: entry.durationMs,
+  };
 }
 
-/** 首屏横幅：告诉用户当前落在哪个模型/工作区，以及从哪里开始。 */
+function prefixed(prefix: string, text: string, width: number, paint: (text: string) => string): string[] {
+  const body = wrap(text, Math.max(8, width - prefix.length));
+  if (body.length === 0) return [];
+  return body.map((line, index) => (index === 0 ? `${paint(prefix)}${line}` : `${' '.repeat(prefix.length)}${line}`));
+}
+
+// ---------------------------------------------------------------- 首屏横幅
+
 export function renderBanner(state: TuiState, options: ViewOptions): string[] {
   const { width, styler } = options;
-  const lines = [
-    styler.bold('Spring Harness · 交互模式'),
-    `模型 ${state.model} · 审批 ${state.approvalMode} · 沙箱 ${state.sandboxMode}`,
-    `工作区 ${state.workspaceRoot}`,
+  return [
+    `${styler.bold('Spring Harness')}${styler.dim(SEPARATOR)}${styler.cyan('交互模式')}`,
+    composeSegments(
+      [
+        { text: state.model, paint: (text) => styler.bold(text), priority: 4 },
+        { text: state.api, paint: (text) => styler.dim(text), priority: 3 },
+        { text: `审批 ${state.approvalMode}`, paint: approvalTone(state.approvalMode, styler), priority: 2 },
+        { text: `沙箱 ${state.sandboxMode}`, paint: sandboxTone(state.sandboxMode, styler), priority: 1 },
+      ],
+      width,
+      styler,
+    ),
+    styler.dim(`工作区 ${truncate(state.workspaceRoot, Math.max(8, width - 4), '')}`),
     '',
-    'Enter 发送 · 输入 / 打开命令菜单 · Ctrl+K 全部操作 · /status 查看状态 · /quit 退出',
+    styler.dim(truncate('Enter 发送 | / 命令菜单 | Ctrl+K 全部操作 | /status 状态 | /help 帮助', width, '')),
   ];
-  return lines.map((line) => pad(truncate(line, width, '~'), width));
 }

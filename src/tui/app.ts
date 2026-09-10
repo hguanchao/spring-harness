@@ -35,9 +35,10 @@ import {
   moveEnd, moveHome, moveLeft, moveRight, setText, type EditorState,
 } from './editor.js';
 import { KeyParser, type Key } from './keys.js';
-import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type TuiState } from './state.js';
+import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TuiState } from './state.js';
 import { InputQueue, Terminal } from './terminal.js';
-import { renderBanner, renderEntry, renderLive, type ViewOptions } from './view.js';
+import { renderBanner, renderEntry, renderLive, renderToolBlock, type ViewOptions } from './view.js';
+import type { ToolCallView } from './tool-view.js';
 
 export interface TuiDeps {
   workspaceRoot: string;
@@ -82,13 +83,18 @@ const HELP_LINES = [
   ...COMMAND_ITEMS.map((item) => `  ${item.label.padEnd(16)}${item.hint}`),
   '  /switch <id>    切换到指定会话（支持 id 前缀）',
   '',
-  '快捷键：Enter 发送 · / 打开命令菜单 · Ctrl+K 全部操作 · ↑↓ 历史 · Ctrl+L 清屏',
-  '        Esc 中断本轮 / 取消浮层 · Ctrl+C 运行中中断、空闲时退出',
+  '快捷键：Enter 发送 | / 打开命令菜单 | Ctrl+K 全部操作 | 上下键 历史 | Ctrl+L 清屏',
+  '        Esc 中断本轮 / 取消浮层 | Ctrl+C 运行中中断、空闲时退出',
+  '',
+  '界面符号只用 ASCII：东亚歧义宽度字符（中点、省略号、箭头）在部分终端按 2 列渲染，',
+  '会让底部活动区的宽度计算失真并吃掉一行已提交内容，因此一律不用。',
 ];
 
 /** /sessions 回放与首屏最多写多少条，避免一次刷屏几十屏。 */
 const REPLAY_LIMIT = 40;
 const HISTORY_LIMIT = 200;
+/** info/success 级提示的存活时间；warn/error 留到用户下一次操作。 */
+const NOTICE_TTL_MS = 4000;
 
 export async function runTui(deps: TuiDeps): Promise<void> {
   await new TuiApp(deps).run();
@@ -114,7 +120,15 @@ class TuiApp {
 
   private rawBuffer = '';
   private atLineStart = true;
+  /** 上一行是否为空行 / 滚动区是否已有内容：决定「块前留白」要不要补。 */
+  private lastBlank = true;
+  private committed = false;
+  /** 本步攒下的工具调用，等这一步结束一次性渲染成块。 */
+  private pendingTools: ToolCallView[] = [];
+  private readonly toolStartedAt = new Map<string, number>();
+  private stepToolCount = 0;
   private spinnerTimer?: NodeJS.Timeout;
+  private noticeTimer?: NodeJS.Timeout;
   private escTimer?: NodeJS.Timeout;
   private menuKind: 'commands' | 'sessions' = 'commands';
   private sessions: SessionInfo[] = [];
@@ -354,7 +368,7 @@ class TuiApp {
     return this.sessions.map((info) => ({
       id: info.id,
       label: info.id.slice(0, 24),
-      hint: `消息 ${info.messages} · ${info.preview || '(空会话)'}`,
+      hint: `消息 ${info.messages} | ${info.preview || '(空会话)'}`,
     }));
   }
 
@@ -391,7 +405,7 @@ class TuiApp {
       this.executeCommand(parsed.name, parsed.args, true);
       return;
     }
-    this.state.notice = typed === '' ? '没有可执行的命令' : `未知命令：${typed}`;
+    this.notify(typed === '' ? '没有可执行的命令' : `未知命令：${typed}`, 'warn');
     this.render();
   }
 
@@ -400,7 +414,7 @@ class TuiApp {
   private submitSlash(text: string): void {
     const parsed = parseSlashInput(text);
     if (!parsed || !COMMAND_NAMES.has(parsed.name)) {
-      this.state.notice = `未知命令：${text}（输入 / 查看全部命令）`;
+      this.notify(`未知命令：${text}（输入 / 查看全部命令）`, 'warn');
       this.render();
       return;
     }
@@ -408,9 +422,36 @@ class TuiApp {
     this.executeCommand(parsed.name, parsed.args, true);
   }
 
+  /**
+   * 一次性提示：按级别着色，info/success 到时自动消失，warn/error 留到用户下一次操作。
+   * 超时只在「没被后续提示覆盖」时生效，避免把新提示提前清掉。
+   */
+  private notify(text: string, level: NoticeLevel = 'info'): void {
+    if (this.noticeTimer) {
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = undefined;
+    }
+    this.state.notice = { text, level };
+    if (level === 'info' || level === 'success') {
+      this.noticeTimer = setTimeout(() => {
+        this.noticeTimer = undefined;
+        this.state.notice = undefined;
+        this.render();
+      }, NOTICE_TTL_MS);
+    }
+  }
+
+  private clearNotice(): void {
+    if (this.noticeTimer) {
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = undefined;
+    }
+    this.state.notice = undefined;
+  }
+
   private executeCommand(name: string, args: string, clearInput: boolean): void {
     if (clearInput) this.state.editor = emptyEditor();
-    this.state.notice = undefined;
+    this.clearNotice();
     switch (name) {
       case 'help':
         this.commitLines(HELP_LINES);
@@ -418,7 +459,7 @@ class TuiApp {
       case 'new':
         this.session = createSession(this.deps.sessionDir, this.deps.workspaceRoot);
         this.state.sessionId = this.session.id;
-        this.commitLines([`—— 新会话 ${this.session.id} ——`]);
+        this.commitLines([`== 新会话 ${this.session.id} ==`]);
         break;
       case 'sessions':
         void this.openSessionsMenu();
@@ -431,10 +472,10 @@ class TuiApp {
         break;
       case 'plan':
         this.setPlan(!this.planMode);
-        this.state.notice = `计划模式：${this.planMode ? 'on（仅只读工具，计划经你审批后才执行）' : 'off'}`;
+        this.notify(`计划模式：${this.planMode ? 'on（仅只读工具，计划经你审批后才执行）' : 'off'}`);
         break;
       case 'model':
-        if (args.trim() === '') this.state.notice = `当前模型：${this.model} · 用法：/model <name>`;
+        if (args.trim() === '') this.notify(`当前模型：${this.model} | 用法：/model <name>`);
         else this.setModel(args.trim());
         break;
       case 'effort':
@@ -460,7 +501,7 @@ class TuiApp {
         this.quit();
         return;
       default:
-        this.state.notice = `未知命令：/${name}`;
+        this.notify(`未知命令：/${name}`, 'warn');
         break;
     }
     this.render();
@@ -470,12 +511,12 @@ class TuiApp {
     try {
       this.sessions = await listSessions(this.deps.sessionDir);
     } catch (error) {
-      this.state.notice = `读取会话失败：${message(error)}`;
+      this.notify(`读取会话失败：${message(error)}`, 'error');
       this.render();
       return;
     }
     if (this.sessions.length === 0) {
-      this.state.notice = '当前工作区还没有历史会话';
+      this.notify('当前工作区还没有历史会话');
       this.render();
       return;
     }
@@ -486,7 +527,7 @@ class TuiApp {
   private switchSession(id: string): void {
     const file = join(this.deps.sessionDir, `${id}.jsonl`);
     if (!existsSync(file)) {
-      this.state.notice = `会话文件不存在：${id}`;
+      this.notify(`会话文件不存在：${id}`, 'error');
       this.render();
       return;
     }
@@ -496,7 +537,7 @@ class TuiApp {
     const entries = transcriptFromMessages(this.session.readMessages());
     const shown = entries.slice(-REPLAY_LIMIT);
     const options = this.viewOptions();
-    const head = `—— 已切换到会话 ${id}（历史 ${entries.length} 条${shown.length < entries.length ? `，仅显示最近 ${shown.length} 条` : ''}）——`;
+    const head = `== 已切换到会话 ${id} | 历史 ${entries.length} 条${shown.length < entries.length ? `，仅显示最近 ${shown.length} 条` : ''} ==`;
     this.commitLines([head, ...shown.flatMap((entry) => renderEntry(entry, options))]);
     this.render();
   }
@@ -504,7 +545,7 @@ class TuiApp {
   /** `/switch <id 前缀>`：会话列表可能还没加载过，先按需取一次。 */
   private async switchTo(prefix: string): Promise<void> {
     if (prefix === '') {
-      this.state.notice = '用法：/switch <会话 id 前缀>（或用 /sessions 选择）';
+      this.notify('用法：/switch <会话 id 前缀>（或用 /sessions 选择）');
       this.render();
       return;
     }
@@ -512,14 +553,14 @@ class TuiApp {
       try {
         this.sessions = await listSessions(this.deps.sessionDir);
       } catch (error) {
-        this.state.notice = `读取会话失败：${message(error)}`;
+        this.notify(`读取会话失败：${message(error)}`, 'error');
         this.render();
         return;
       }
     }
     const hit = this.sessions.find((info) => info.id === prefix) ?? this.sessions.find((info) => info.id.startsWith(prefix));
     if (!hit) {
-      this.state.notice = `未找到会话：${prefix}（试试 /sessions）`;
+      this.notify(`未找到会话：${prefix}（试试 /sessions）`, 'warn');
       this.render();
       return;
     }
@@ -530,36 +571,36 @@ class TuiApp {
     this.model = name;
     this.client = this.deps.makeClient({ model: this.model, api: this.api, effort: this.effort });
     this.state.model = name;
-    this.state.notice = `模型已切换：${name}`;
+    this.notify(`模型已切换：${name}`, 'success');
   }
 
   private setEffort(level: string): void {
     if (level === '') {
-      this.state.notice = `当前推理档位：${this.effort ?? 'off（未设置）'} · 可选：${REASONING_EFFORTS.join(' | ')}`;
+      this.notify(`当前推理档位：${this.effort ?? 'off（未设置）'} | 可选：${REASONING_EFFORTS.join(' | ')}`);
       return;
     }
     if (!(REASONING_EFFORTS as readonly string[]).includes(level)) {
-      this.state.notice = `无效档位：${level} · 可选：${REASONING_EFFORTS.join(' | ')}`;
+      this.notify(`无效档位：${level} | 可选：${REASONING_EFFORTS.join(' | ')}`, 'warn');
       return;
     }
     this.effort = level as ReasoningEffort;
     this.client = this.deps.makeClient({ model: this.model, api: this.api, effort: this.effort });
     this.state.effort = this.effort;
-    this.state.notice = `推理档位：${this.effort}`;
+    this.notify(`推理档位：${this.effort}`, 'success');
   }
 
   private setApprovalMode(mode: string): void {
     if (mode === '') {
-      this.state.notice = `当前审批模式：${this.approvalModeValue} · 可选：ask | auto | yolo`;
+      this.notify(`当前审批模式：${this.approvalModeValue} | 可选：ask | auto | yolo`);
       return;
     }
     if (mode !== 'ask' && mode !== 'auto' && mode !== 'yolo') {
-      this.state.notice = `无效审批模式：${mode} · 可选：ask | auto | yolo`;
+      this.notify(`无效审批模式：${mode} | 可选：ask | auto | yolo`, 'warn');
       return;
     }
     this.approvalModeValue = mode;
     this.state.approvalMode = mode;
-    this.state.notice = `审批模式：${mode}`;
+    this.notify(`审批模式：${mode}`, 'success');
   }
 
   private setPlan(enabled: boolean): void {
@@ -572,9 +613,9 @@ class TuiApp {
     const file = join(this.deps.sessionDir, `${this.session.id}.${kind}`);
     try {
       writeFileSync(file, kind === 'json' ? exportJson(this.session) : exportMarkdown(this.session), 'utf8');
-      this.state.notice = `已导出：${file}`;
+      this.notify(`已导出：${file}`, 'success');
     } catch (error) {
-      this.state.notice = `导出失败：${message(error)}`;
+      this.notify(`导出失败：${message(error)}`, 'error');
     }
   }
 
@@ -600,9 +641,9 @@ class TuiApp {
     if (this.running) return;
     this.rememberHistory(prompt);
     this.state.editor = emptyEditor();
-    this.state.notice = undefined;
+    this.clearNotice();
     this.state.phase = 'running';
-    this.commitLines(renderEntry({ kind: 'user', text: prompt }, this.viewOptions()));
+    this.commitLines(renderEntry({ kind: 'user', text: prompt }, this.viewOptions()), { blankBefore: true });
     void this.executeTurn(prompt);
   }
 
@@ -664,11 +705,14 @@ class TuiApp {
       });
     } catch (error) {
       const options = this.viewOptions();
-      if (controller.signal.aborted) this.commitLines([...renderEntry({ kind: 'notice', text: '本轮已中断' }, options)]);
-      else this.commitLines([...renderEntry({ kind: 'error', text: message(error) }, options)]);
+      if (controller.signal.aborted) this.commitLines(renderEntry({ kind: 'notice', text: '本轮已中断', level: 'warn' }, options), { blankBefore: true });
+      else this.commitLines(renderEntry({ kind: 'error', text: message(error) }, options), { blankBefore: true });
     } finally {
+      // 中断 / 报错时工具块可能还挂在缓冲区里，兜底落盘，否则这一轮的调用记录会凭空消失。
+      this.flushToolBlock();
       this.running = false;
       this.abort = undefined;
+      this.state.activeTool = undefined;
       this.stopSpinner();
       // 轮次异常结束（中断/报错）时浮层可能还在等输入：兜底回绝，避免 agent 侧挂死。
       if (this.state.prompt) {
@@ -684,6 +728,13 @@ class TuiApp {
     }
   }
 
+  /**
+   * agent 事件 → 滚动区 / 活动区。
+   *
+   * 工具调用不逐条落盘，而是先攒进 pendingTools，等这一步的 LLM 调用结束（下一次
+   * thinking_start 或轮次结束）再一次性渲染成「工具块」——一屏里 user/assistant/tool
+   * 混着刷是最难读的形态。运行中的实时反馈交给活动区的指示器，不靠滚动区刷屏。
+   */
   private readonly listener: AgentListener = (event) => {
     if (event.type === 'text') {
       applyAgentEvent(this.state, event);
@@ -693,23 +744,82 @@ class TuiApp {
     const thinkingIndex = this.state.thinkingIndex;
     applyAgentEvent(this.state, event);
     const options = this.viewOptions();
-    if (event.type === 'thinking_end') {
-      // thinking_end 不新增条目而是回填既有条目，因此要单独取出来渲染。
-      const entry = thinkingIndex === undefined ? undefined : this.state.entries[thinkingIndex];
-      if (entry) this.commitLines(renderEntry(entry, options));
-    } else if (event.type === 'status' || event.type === 'tool_start' || event.type === 'tool_end' || event.type === 'error') {
-      // 取末尾条目而不是按下标切片：条目上限触发丢头时下标会整体左移。
-      const entry = this.state.entries[this.state.entries.length - 1];
-      if (entry) this.commitLines(renderEntry(entry, options));
+    const now = Date.now();
+
+    switch (event.type) {
+      case 'thinking_start':
+        // 新的 LLM 调用 = 新的一步，上一步的工具调用到此落成块。
+        this.flushToolBlock();
+        this.stepToolCount = 0;
+        break;
+      case 'thinking_end': {
+        const entry = thinkingIndex === undefined ? undefined : this.state.entries[thinkingIndex];
+        if (entry) this.commitLines(renderEntry(entry, options));
+        break;
+      }
+      case 'tool_start': {
+        this.pendingTools.push({ id: event.id, name: event.name, args: event.args, detail: '' });
+        this.toolStartedAt.set(event.id, now);
+        this.stepToolCount++;
+        this.state.activeTool = {
+          name: event.name,
+          index: this.stepToolCount,
+          total: this.stepToolCount,
+          startedAt: now,
+        };
+        break;
+      }
+      case 'tool_end': {
+        const item = this.pendingTools.find((pending) => pending.id === event.id);
+        const startedAt = this.toolStartedAt.get(event.id);
+        if (item) {
+          item.ok = event.ok;
+          item.detail = event.content;
+          item.durationMs = startedAt === undefined ? undefined : Math.max(0, now - startedAt);
+        }
+        this.toolStartedAt.delete(event.id);
+        // 并行调用里可能还有别的在跑：指示器指向最后一个未完成的，而不是直接清空。
+        const stillRunning = this.pendingTools.filter((pending) => pending.ok === undefined);
+        const last = stillRunning[stillRunning.length - 1];
+        this.state.activeTool = last
+          ? { name: last.name, index: this.stepToolCount, total: this.stepToolCount, startedAt: this.toolStartedAt.get(last.id) ?? now }
+          : undefined;
+        this.refreshCounters();
+        break;
+      }
+      case 'status': {
+        const entry = this.state.entries[this.state.entries.length - 1];
+        if (entry) this.commitLines(renderEntry(entry, options), { blankBefore: true });
+        break;
+      }
+      case 'error': {
+        this.flushToolBlock();
+        const entry = this.state.entries[this.state.entries.length - 1];
+        if (entry) this.commitLines(renderEntry(entry, options), { blankBefore: true });
+        break;
+      }
+      case 'done':
+        this.flushToolBlock();
+        break;
+      default:
+        break;
     }
-    if (event.type === 'tool_end') this.refreshCounters();
     this.render();
   };
+
+  /** 把攒下的工具调用渲染成一个块写进滚动区。 */
+  private flushToolBlock(): void {
+    if (this.pendingTools.length === 0) return;
+    const options = this.viewOptions();
+    const block = this.pendingTools;
+    this.pendingTools = [];
+    this.commitLines(renderToolBlock(block, options), { blankBefore: true });
+  }
 
   private abortTurn(): void {
     if (!this.running) return;
     this.abort?.abort();
-    this.state.notice = '正在中断本轮…';
+    this.notify('正在中断本轮...', 'warn');
     this.render();
   }
 
@@ -732,14 +842,24 @@ class TuiApp {
     this.terminal.clearLive();
     this.terminal.write(text);
     this.atLineStart = text.endsWith('\n');
+    this.lastBlank = text.trim() === '';
+    this.committed = true;
   }
 
-  private commitLines(lines: readonly string[]): void {
+  /**
+   * 写滚动区。blankBefore 用于给「块」留呼吸空间：只在已经有内容、且上一行不是空行时补，
+   * 因此不会出现连续两个空行。
+   */
+  private commitLines(lines: readonly string[], options?: { blankBefore?: boolean }): void {
     if (lines.length === 0) return;
     this.flushRaw();
     this.terminal.clearLive();
-    this.terminal.write(`${this.atLineStart ? '' : '\n'}${lines.join('\n')}\n`);
+    const wantBlank = options?.blankBefore === true && this.committed && !this.lastBlank;
+    const lead = this.atLineStart ? (wantBlank ? '\n' : '') : '\n';
+    this.terminal.write(`${lead}${lines.join('\n')}\n`);
     this.atLineStart = true;
+    this.lastBlank = false;
+    this.committed = true;
   }
 
   private render(): void {
