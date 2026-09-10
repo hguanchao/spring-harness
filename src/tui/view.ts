@@ -26,6 +26,7 @@
 import type { Styler } from './ansi.js';
 import { displayWidth, pad, truncate, wrap } from './ansi.js';
 import { scrollEditor } from './editor.js';
+import { renderMarkdown } from './markdown.js';
 import type { NoticeLevel, TranscriptEntry, TuiState } from './state.js';
 import { cacheHitRate } from './state.js';
 import { formatDuration, renderToolDetail, summarizeToolCall, toolTone, type ToolCallView } from './tool-view.js';
@@ -543,9 +544,11 @@ export function renderEntry(entry: TranscriptEntry, options: ViewOptions): strin
   const { width, styler } = options;
   switch (entry.kind) {
     case 'user':
-      return prefixed('> ', entry.text, width, (text) => styler.cyan(text));
+      // 用户输入不做 markdown 重排：用户打 `*` 往往就是想要个星号，把 `#` 变标题、
+      // `- ` 变圆点会让他怀疑输入被改写了。只把 @提及 标出来（参考实现两端也是这个选择）。
+      return prefixed('> ', entry.text, width, (t) => styler.cyan(t), (t) => highlightMentions(t, styler));
     case 'assistant':
-      return wrap(entry.text, width);
+      return renderMarkdown(entry.text, { width, styler });
     case 'thinking': {
       if (!entry.text) return [];
       const body = wrap(entry.text, Math.max(8, width - 2));
@@ -582,10 +585,32 @@ function toolCallOf(entry: TranscriptEntry): ToolCallView {
   };
 }
 
-function prefixed(prefix: string, text: string, width: number, paint: (text: string) => string): string[] {
+function prefixed(
+  prefix: string,
+  text: string,
+  width: number,
+  paintPrefix: (text: string) => string,
+  paintBody?: (text: string) => string,
+): string[] {
   const body = wrap(text, Math.max(8, width - prefix.length));
   if (body.length === 0) return [];
-  return body.map((line, index) => (index === 0 ? `${paint(prefix)}${line}` : `${' '.repeat(prefix.length)}${line}`));
+  return body.map((line, index) => {
+    const head = index === 0 ? paintPrefix(prefix) : ' '.repeat(prefix.length);
+    return `${head}${paintBody ? paintBody(line) : line}`;
+  });
+}
+
+/**
+ * 用户输入里的 @提及 高亮。
+ *
+ * 只插入 SGR、不增删字符，因此不会影响宽度计算。刻意写得保守：要求 @ 前面是行首或
+ * 空白/左括号，避免把邮箱（a@b.com）里的 @ 也点亮。
+ */
+function highlightMentions(text: string, styler: Styler): string {
+  return text.replace(
+    /(^|[\s(（[【])@([^\s，。；、,;()（）[\]【】]+)/g,
+    (_all, lead: string, name: string) => `${lead}${styler.cyan(`@${name}`)}`,
+  );
 }
 
 // ---------------------------------------------------------------- 首屏横幅

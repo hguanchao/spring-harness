@@ -205,6 +205,21 @@ Visual conventions:
   only, green/red = success/failure, `dim` = metadata only (durations, counts,
   folded bodies, hints), inverse = the selected menu row. Body text — replies and
   tool output — keeps the default foreground.
+- Assistant replies are rendered as **Markdown**; your own input is not. Supported:
+  headings (levels distinguished by bold, `h1` also underlined — no extra colour is
+  spent on hierarchy, so it still works in a monochrome terminal), paragraphs,
+  ordered / unordered / task lists with nesting, fenced code blocks (language label,
+  content clipped rather than wrapped so it stays copyable), blockquotes, horizontal
+  rules, tables (`|` grid with `:---:` alignment) and inline **bold** / *italic* /
+  ~~strike~~ / `code` / [links](https://example.com). A link's target is not printed
+  inline; `/status` and `/export` keep the raw text.
+  Not supported, and shown as literal syntax rather than guessed: inline HTML,
+  reference-style link definitions, setext headings, indented code blocks. A single
+  newline is a hard break (models emit line-oriented output — ASCII diagrams,
+  unmarked lists — far too often to re-flow it).
+- Your input stays literal except that `@mentions` are highlighted; rewriting a
+  user's `*` into emphasis or their `#` into a heading makes them think their input
+  was altered.
 - Tool calls belonging to one model step are collected and printed as a single
   block once that step ends, with a header (`3 个工具调用 | 1 个失败 | 1.2s`).
   While they run, the live indicator in the status line shows the tool and its

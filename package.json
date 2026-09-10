@@ -19,7 +19,8 @@
     "sph": "tsx src/cli/index.ts",
     "verify:sandbox": "tsx scripts/sandbox-outside-write.ts",
     "verify:tui": "tsx test/verify-tui.ts",
-    "dogfood": "tsx scripts/dogfood-restful.ts first && tsx scripts/dogfood-restful.ts resume"
+    "dogfood": "tsx scripts/dogfood-restful.ts first && tsx scripts/dogfood-restful.ts resume",
+    "verify:markdown": "tsx test/verify-markdown.ts"
   },
   "dependencies": {
     "koffi": "^2.12.1",

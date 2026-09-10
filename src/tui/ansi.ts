@@ -263,6 +263,12 @@ export interface Styler {
   inverse(text: string): string;
   /** 搜索命中：加粗黄，比单独一个色相更容易在一行里被看见。 */
   highlight(text: string): string;
+  /** 斜体。部分终端没有斜体字形会退化成常规体，因此不能作为唯一的信息载体。 */
+  italic(text: string): string;
+  /** 下划线。用于链接正文。 */
+  underline(text: string): string;
+  /** 删除线。 */
+  strike(text: string): string;
 }
 
 /** 着色器：关闭时所有方法退化为恒等函数，调用方无需到处判断是否支持彩色。 */
@@ -280,6 +286,9 @@ export function createStyler(enabled: boolean): Styler {
     inverse: code('7'),
     // 组合 SGR 而不是嵌套调用：嵌套会让内层的 reset 提前终止外层样式。
     highlight: code('1;33'),
+    italic: code('3'),
+    underline: code('4'),
+    strike: code('9'),
   };
 }
 
