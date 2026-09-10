@@ -25,6 +25,22 @@ import { clusters, displayWidth, sanitize, type Styler } from './ansi.js';
 
 // ---------------------------------------------------------------- 类型
 
+/** 渲染期色调：决定一个 span 归到哪一类颜色。语法高亮的 token 也走这一条通路。 */
+export type Tone =
+  | 'plain'
+  | 'accent'
+  | 'muted'
+  | 'comment'
+  | 'string'
+  | 'number'
+  | 'keyword'
+  | 'type'
+  | 'function'
+  | 'operator'
+  | 'added'
+  | 'removed'
+  | 'meta';
+
 /** 行内样式：一组标记位，渲染时逐项叠加成 SGR。 */
 export interface Span {
   text: string;
@@ -37,7 +53,7 @@ export interface Span {
   /** 链接目标（非空）。正文加下划线，并另行展示目标。 */
   link?: string;
   /** 渲染期色调，不参与解析。 */
-  tone?: 'plain' | 'accent' | 'muted';
+  tone?: Tone;
 }
 
 export type SpanStyle = Omit<Span, 'text'>;
@@ -513,8 +529,37 @@ export function paintSpans(spans: readonly Span[], styler: Styler): string {
 
 function paintSpan(s: Span, styler: Styler): string {
   let text = s.text;
-  if (s.code || s.link !== undefined || s.tone === 'accent') text = styler.cyan(text);
-  else if (s.tone === 'muted') text = styler.dim(text);
+  if (s.code || s.link !== undefined) {
+    text = styler.cyan(text);
+  } else {
+    // 色调 → 颜色集中在这一张表里：换配色只改这里，不用翻遍渲染代码。
+    switch (s.tone ?? 'plain') {
+      case 'accent':
+      case 'keyword':
+      case 'type':
+      case 'function':
+      case 'meta':
+        text = styler.cyan(text);
+        break;
+      case 'muted':
+      case 'comment':
+      case 'operator':
+        text = styler.dim(text);
+        break;
+      case 'string':
+      case 'added':
+        text = styler.green(text);
+        break;
+      case 'number':
+        text = styler.yellow(text);
+        break;
+      case 'removed':
+        text = styler.red(text);
+        break;
+      default:
+        break;
+    }
+  }
   if (s.underline || s.link !== undefined) text = styler.underline(text);
   if (s.bold) text = styler.bold(text);
   if (s.italic) text = styler.italic(text);

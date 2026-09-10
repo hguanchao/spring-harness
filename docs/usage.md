@@ -209,7 +209,9 @@ Visual conventions:
   headings (levels distinguished by bold, `h1` also underlined — no extra colour is
   spent on hierarchy, so it still works in a monochrome terminal), paragraphs,
   ordered / unordered / task lists with nesting, fenced code blocks (language label,
-  content clipped rather than wrapped so it stays copyable), blockquotes, horizontal
+  content clipped rather than wrapped so it stays copyable, with syntax highlighting
+  for TypeScript/JavaScript, JSON, Python, shell and diff — an unknown language
+  renders as plain text rather than guessing), blockquotes, horizontal
   rules, tables (`|` grid with `:---:` alignment) and inline **bold** / *italic* /
   ~~strike~~ / `code` / [links](https://example.com). A link's target is not printed
   inline; `/status` and `/export` keep the raw text.
@@ -220,6 +222,11 @@ Visual conventions:
 - Your input stays literal except that `@mentions` are highlighted; rewriting a
   user's `*` into emphasis or their `#` into a heading makes them think their input
   was altered.
+- Syntax highlighting is a hand-written stateful line scanner, not tree-sitter:
+  multi-line comments and template/triple-quoted strings carry state across lines,
+  and the state belongs to one code block so it cannot leak into the next. Colouring
+  only inserts SGR — it never adds or removes a visible character, so the width
+  invariant is unaffected.
 - Tool calls belonging to one model step are collected and printed as a single
   block once that step ends, with a header (`3 个工具调用 | 1 个失败 | 1.2s`).
   While they run, the live indicator in the status line shows the tool and its

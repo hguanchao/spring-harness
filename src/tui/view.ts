@@ -26,6 +26,7 @@
 import type { Styler } from './ansi.js';
 import { displayWidth, pad, truncate, wrap } from './ansi.js';
 import { scrollEditor } from './editor.js';
+import { createHighlighter } from './highlight.js';
 import { renderMarkdown } from './markdown.js';
 import type { NoticeLevel, TranscriptEntry, TuiState } from './state.js';
 import { cacheHitRate } from './state.js';
@@ -548,7 +549,7 @@ export function renderEntry(entry: TranscriptEntry, options: ViewOptions): strin
       // `- ` 变圆点会让他怀疑输入被改写了。只把 @提及 标出来（参考实现两端也是这个选择）。
       return prefixed('> ', entry.text, width, (t) => styler.cyan(t), (t) => highlightMentions(t, styler));
     case 'assistant':
-      return renderMarkdown(entry.text, { width, styler });
+      return renderMarkdown(entry.text, { width, styler, highlighter: createHighlighter });
     case 'thinking': {
       if (!entry.text) return [];
       const body = wrap(entry.text, Math.max(8, width - 2));
