@@ -19,6 +19,8 @@ export interface SseClientOptions {
   reasoningEffort?: ReasoningEffort;
   maxTokens?: number;
   maxRetries?: number;
+  /** 追加点静态请求头（如网关要求客户端标识）；与协议默认头同名时以它为准。 */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -29,7 +31,15 @@ export interface SseClientOptions {
  */
 export function createSseClient(adapter: ProtocolAdapter, options: SseClientOptions): LlmClient {
   const url = `${options.baseUrl.replace(/\/$/, '')}${adapter.path}`;
-  const headers = adapter.headers(options.apiKey);
+  const headers: Record<string, string> = { ...adapter.headers(options.apiKey), ...options.headers };
+  // key 为空且由自定义头补位时是显式的免鉴权约定；此时任何形式的鉴权头都必须去掉，
+  // 否则网关会走「校验这把空/无效 key」的路径，免鉴权会话永远到不了。
+  if (!options.apiKey) {
+    for (const name of Object.keys(headers)) {
+      const lower = name.toLowerCase();
+      if (lower === 'authorization' || lower === 'x-api-key') delete headers[name];
+    }
+  }
 
   return {
     async complete(

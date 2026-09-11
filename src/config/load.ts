@@ -35,6 +35,8 @@ export interface SphConfig {
   reviewModel?: string;
   /** 工具结果超过这个字符数就落盘，上下文只留预览与路径；0 表示关闭。 */
   spillThreshold: number;
+  /** 附加到每个 LLM 请求的静态头；api_key 为空时由它承担免鉴权会话标识。 */
+  httpHeaders: Record<string, string>;
 }
 
 export const CONFIG_EXAMPLE = `base_url = "https://api.example.com/v1"
@@ -49,6 +51,9 @@ sandbox = "workspace"
 # compact_model = ""            # 压缩摘要用的便宜模型；留空用主模型
 # review_model = ""             # auto 审批审查器用的模型；留空用主模型
 # spill_threshold = 8192        # 工具结果超过该字符数就落盘，0 关闭
+# [http_headers]                # 附加到每个 LLM 请求的静态头；api_key = ""（显式空）时免鉴权
+# "User-Agent" = "opencode/1.4.3"
+# "X-Opencode-Session" = "some-session-id"
 # [[mcp_servers]]
 # name = "demo"
 # command = "npx"
@@ -76,6 +81,15 @@ function asString(value: unknown, key: string): string | undefined {
   return value.trim();
 }
 
+/** 鉴权 key 可选：普通中转站必须配 key；免鉴权网关（靠 http_headers 里的客户端标识识别会话）
+ * 用显式 `api_key = ""` 表达「不发 Authorization」。undefined、空串、纯空白同义于空。
+ */
+function asOptionalKey(value: unknown, key: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new ConfigError(`${key} must be a string`);
+  return value.trim();
+}
+
 /** 缺 base_url / model / key 时拒绝启动，避免绑死供应商或空跑。 */
 export function loadConfig(options?: {
   configPath?: string;
@@ -95,9 +109,10 @@ export function loadConfig(options?: {
 
   const baseUrl = asString(file.base_url, 'base_url');
   const model = asString(file.model, 'model');
-  const fileKey = asString(file.api_key, 'api_key');
+  // key 三态：env 显式配置 > 文件普通值；文件里显式 `""` 表示不发鉴权头（由 http_headers 承担会话识别）。
+  const fileKey = asOptionalKey(file.api_key, 'api_key');
   const envKey = env.SPH_API_KEY?.trim();
-  const apiKey = envKey || fileKey;
+  const apiKey = envKey || fileKey || '';
   const contextRaw = file.context_window;
   let contextWindow = 256_000;
   if (contextRaw !== undefined) {
@@ -118,9 +133,11 @@ export function loadConfig(options?: {
     maxTokens = maxTokensRaw;
   }
 
-  if (!baseUrl || !model || !apiKey) {
+  const httpHeaders = parseHttpHeaders(file.http_headers);
+
+  if (!baseUrl || !model || (!apiKey && !httpHeaders)) {
     throw new ConfigError(
-      `missing base_url, model, or API key.\nWrite ${path}:\n\n${CONFIG_EXAMPLE}\nSet SPH_API_KEY or api_key. SPH_API_KEY wins.`,
+      `missing base_url, model, or API key.\nWrite ${path}:\n\n${CONFIG_EXAMPLE}\nSet SPH_API_KEY or api_key ("" + [http_headers] for keyless gateways). SPH_API_KEY wins.`,
     );
   }
 
@@ -134,7 +151,7 @@ export function loadConfig(options?: {
   const spillThreshold = parseSpillThreshold(file.spill_threshold);
   return {
     baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
-    compactModel, reviewModel, spillThreshold,
+    compactModel, reviewModel, spillThreshold, httpHeaders,
   };
 }
 
@@ -178,6 +195,22 @@ export function parseApiProtocol(value: unknown): ApiProtocol {
     throw new ConfigError(`api must be one of: ${API_PROTOCOLS.join(' | ')}`);
   }
   return value as ApiProtocol;
+}
+
+/** 自定义静态请求头可选：全表每项都必须是字符串，格式不对整体拒绝启动。 */
+function parseHttpHeaders(value: unknown): Record<string, string> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('http_headers must be a table of string values');
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!name.trim() || typeof raw !== 'string' || raw.trim() === '') {
+      throw new ConfigError(`http_headers[${name}] must be a non-empty string`);
+    }
+    headers[name.trim()] = raw.trim();
+  }
+  return headers;
 }
 
 /** 推理档位可选；未配置时保持 undefined（请求不带 reasoning_effort，走服务端默认）。 */

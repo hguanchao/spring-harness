@@ -47,14 +47,16 @@ export interface ClientOptions {
   api: ApiProtocol;
   reasoningEffort?: ReasoningEffort;
   maxTokens?: number;
+  /** 附加静态请求头：穿透到 createSseClient，与协议默认头同名时以它为准。 */
+  headers?: Record<string, string>;
 }
 
 /** 按上游协议构造 client；三种协议共享同一 LlmClient 面，loop 无感知。 */
 export function createClient(options: ClientOptions): LlmClient {
-  const { api, ...conn } = options;
-  if (api === 'anthropic-messages') return createSseClient(anthropicAdapter, conn);
-  if (api === 'responses') return createSseClient(responsesAdapter, conn);
-  return createSseClient(openaiAdapter, conn);
+  const { api, headers, ...conn } = options;
+  if (api === 'anthropic-messages') return createSseClient(anthropicAdapter, { ...conn, headers });
+  if (api === 'responses') return createSseClient(responsesAdapter, { ...conn, headers });
+  return createSseClient(openaiAdapter, { ...conn, headers });
 }
 
 export interface BootstrapOptions {
@@ -216,6 +218,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         api: overrides.api,
         reasoningEffort: overrides.effort,
         maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
+        headers: config.httpHeaders,
       });
     },
     cleanup,
