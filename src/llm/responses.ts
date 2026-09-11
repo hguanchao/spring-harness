@@ -1,3 +1,4 @@
+import { llmError } from './errors.js';
 import type { ChatMessage, ReasoningEffort } from './openai.js';
 import { llmErrorMessage, flattenToolSpec, type SseAcc } from './openai.js';
 import type { ProtocolAdapter } from './stream-client.js';
@@ -63,7 +64,7 @@ export function buildResponsesRequest(options: {
 }
 
 /** Responses SSE 事件流 → 与 chat.completions 共享的 SseAcc 累积结构。 */
-export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?: string } {
+export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
   const event: unknown = JSON.parse(payload);
   if (event === null || typeof event !== 'object') return {};
   const data = event as {
@@ -91,10 +92,16 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       return {};
     // 推理模型的思考链：reasoning_text.delta 是完整思考增量；summary 事件（摘要）在其自己的 summary 字段里。
     case 'response.reasoning_text.delta':
-      if (data.delta) acc.thinking += data.delta;
+      if (data.delta) {
+        acc.thinking += data.delta;
+        return { thinkingDelta: data.delta };
+      }
       return {};
     case 'response.reasoning_summary_text.delta':
-      if (data.summary) acc.thinking += data.summary;
+      if (data.summary) {
+        acc.thinking += data.summary;
+        return { thinkingDelta: data.summary };
+      }
       return {};
     case 'response.output_item.added':
       if (data.item?.type === 'function_call') {
@@ -125,13 +132,13 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       return {};
     }
     case 'response.failed':
-      throw new Error(`Responses stream failed: ${llmErrorMessage(data.response?.error)}`);
+      throw llmError('Responses stream failed', llmErrorMessage(data.response?.error));
     case 'error':
-      throw new Error(`Responses stream error: ${llmErrorMessage((data as { error?: unknown }).error)}`);
+      throw llmError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
     default:
       // 部分端点把 error 塞在非 failed 事件里。
       if ((data as { error?: unknown }).error) {
-        throw new Error(`Responses stream error: ${llmErrorMessage((data as { error?: unknown }).error)}`);
+        throw llmError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
       }
       return {};
   }

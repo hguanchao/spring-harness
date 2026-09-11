@@ -16,6 +16,7 @@ import { openaiAdapter, type ReasoningEffort } from '../llm/openai.js';
 import type { LlmClient } from '../llm/openai.js';
 import { responsesAdapter } from '../llm/responses.js';
 import { createSseClient } from '../llm/stream-client.js';
+import { readModelMeta } from '../llm/model-cache.js';
 import { McpHub } from '../mcp/hub.js';
 import { JobBoard } from '../runtime/jobs.js';
 import { PersistentShell } from '../runtime/persistent-shell.js';
@@ -104,6 +105,19 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   } catch (error) {
     if (error instanceof ConfigError) throw new CliError(error.message, 2);
     throw error;
+  }
+
+  // `--model` 切到一个配置里没记过的模型时，用本地沉淀的容量参数补上 context_window /
+  // max_tokens——否则每换一次模型都要手改配置，忘了就把窗口算错。显式 CLI 参数仍然优先。
+  if (options.model !== undefined && options.model !== config.model) {
+    const meta = readModelMeta(config.baseUrl, options.model);
+    if (meta) {
+      config = {
+        ...config,
+        contextWindow: meta.contextWindow ?? config.contextWindow,
+        maxTokens: meta.maxTokens ?? config.maxTokens,
+      };
+    }
   }
 
   if (options.trust) rememberTrustedWorkspace(options.workspaceRoot);

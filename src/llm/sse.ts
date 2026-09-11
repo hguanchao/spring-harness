@@ -1,3 +1,4 @@
+import { llmError } from './errors.js';
 import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
 
 export interface SseStreamParams {
@@ -36,7 +37,8 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
         retryAfterMs(response.headers.get('retry-after')),
       );
     }
-    throw new Error(`LLM HTTP ${response.status}: ${detail}`);
+    // 400/413 里可能是「上下文超窗」——那一种压缩后重试就能成功，必须让 loop 认得出来。
+    throw llmError(`LLM HTTP ${response.status}`, detail);
   }
   if (!response.body) throw new Error('LLM response missing body');
 

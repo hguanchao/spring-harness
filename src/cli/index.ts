@@ -7,10 +7,14 @@ import { HeadlessApprover, type ApprovalMode } from '../approval/policy.js';
 import { createLlmClassifier } from '../approval/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
+import { sphModelsPath, sphSpillRoot } from '../home.js';
+import { SpillStore } from '../runtime/spill.js';
+import type { TokenUsage } from '../llm/openai.js';
 import { runTui } from '../tui/app.js';
 import { confirmWorkspaceTrust } from '../tui/trust.js';
 import { sessionDirFor } from '../session/path.js';
 import { lastAssistantMessage, messagesOf } from '../session/query.js';
+import { foldSessionState } from '../session/fold.js';
 import { exportJson, exportMarkdown } from '../session/export.js';
 import { JsonlSession, listSessions, type SessionInfo } from '../session/store.js';
 import type { SessionRecord } from '../session/types.js';
@@ -157,6 +161,14 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       maxTokens: args.maxTokens ?? runtime.config.maxTokens,
       makeClient: (overrides) => runtime.makeClient(overrides),
       fetchModels: () => listAvailableModels(runtime.config.baseUrl, runtime.config.apiKey),
+      // 模型目录缓存放用户主目录：/model 靠它在启动时直接命中，不必现等上游一个 RTT。
+      modelCachePath: sphModelsPath(),
+      // --model 是本次进程的显式选择，不该被会话里记录的模型覆盖；切换会话时仍然尊重会话记录。
+      modelPinned: args.model !== undefined,
+      compactModel: runtime.config.compactModel,
+      reviewModel: runtime.config.reviewModel,
+      spillRoot: sphSpillRoot(),
+      spillThreshold: runtime.config.spillThreshold,
     });
   } finally {
     runtime.cleanup();
@@ -183,6 +195,16 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       api: args.api ?? config.api,
       effort: args.effort ?? config.reasoningEffort,
     });
+    // 辅助调用（压缩摘要 / auto 审查器）可以走更便宜的模型；未配置时复用主 client。
+    const aux = (model: string | undefined) =>
+      model === undefined
+        ? undefined
+        : runtime.makeClient({ model, api: args.api ?? config.api, effort: config.reasoningEffort });
+    const compactClient = aux(config.compactModel);
+    const reviewClient = aux(config.reviewModel);
+    const recordAuxUsage = (usage: TokenUsage, purpose: string): void => {
+      session.append({ type: 'event', ts: new Date().toISOString(), kind: 'usage', data: { ...usage, purpose } });
+    };
     const started = Date.now();
     const listener: AgentListener = (event) => {
       if (args.output === 'stream-json') {
@@ -208,19 +230,31 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
           break;
       }
     };
+    // 恢复的会话带着跨轮次状态：任务目标与上次失败要进提示词，否则「继续」时模型是失忆的。
+    const folded = foldSessionState(session.readAll());
     await runTurn({
       prompt: finalPrompt,
       workspaceRoot,
       client,
       session,
       sandbox,
-      approver: new HeadlessApprover(approvalMode, approvalMode === 'auto' ? createLlmClassifier(client) : undefined),
+      approver: new HeadlessApprover(
+        approvalMode,
+        approvalMode === 'auto'
+          ? createLlmClassifier(reviewClient ?? client, { onUsage: (usage) => recordAuxUsage(usage, 'review') })
+          : undefined,
+      ),
       contextWindow: config.contextWindow,
       listener,
       mcp,
       todos,
       jobs,
       persistent,
+      goal: folded.goal,
+      lastFailure: folded.failures.at(-1),
+      compactClient,
+      onAuxUsage: recordAuxUsage,
+      spill: new SpillStore(join(sphSpillRoot(), session.id), config.spillThreshold),
     });
     if (args.output === 'text') {
       process.stdout.write('\n');

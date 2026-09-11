@@ -18,3 +18,13 @@ export function sphSessionsRoot(): string {
 export function sphTrustedPath(): string {
   return join(sphHome(), 'trusted.json');
 }
+
+/** 上游模型目录缓存（按 base URL 分桶）。纯缓存，删掉只会让下次 /model 慢一拍。 */
+export function sphModelsPath(): string {
+  return join(sphHome(), 'models.json');
+}
+
+/** 超长工具结果的落盘根目录（按会话再分一层）。删掉只会让模型读不回旧结果。 */
+export function sphSpillRoot(): string {
+  return join(sphHome(), 'spill');
+}

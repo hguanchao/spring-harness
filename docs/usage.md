@@ -12,6 +12,9 @@ model = "example-model"
 context_window = 256000
 # max_tokens = 8192          # 单次输出上限（正整数，可选）
 sandbox = "workspace"
+# compact_model = ""         # 压缩摘要用的便宜模型；留空用主模型
+# review_model = ""          # auto 审批审查器用的模型；留空用主模型
+# spill_threshold = 8192     # 工具结果超过该字符数就落盘，0 关闭
 ```
 
 
@@ -22,7 +25,10 @@ Keys are never written to logs or session JSONL.
 
 
 `--model <name>` overrides the configured model for one process;
-`--max-tokens <n>` overrides `max_tokens` the same way.
+`--max-tokens <n>` overrides `max_tokens` the same way. When `--model` names a model
+whose context window was recorded before (by the `/model` wizard), that window and
+its output cap are used automatically — switching models no longer means hand-editing
+`context_window`.
 
 
 
@@ -170,7 +176,7 @@ Keys:
   Typing filters it (`Ctrl+K` opens the full list, `/` opens it already prefixed).
 - Commands that take a value drill down instead of running: `Enter` on `/approval`
   opens a second-level list (`ask` / `auto` / `yolo`) with the current value marked
-  `（当前）` and pre-selected; `Enter` applies it, `Esc` or `Backspace` on an empty
+  `(current)` and pre-selected; `Enter` applies it, `Esc` or `Backspace` on an empty
   filter goes back to the command list, a second `Esc` closes. Same for `/effort`,
   `/export` and the `/sessions` · `/switch` session picker. Typical flow:
   `/` → `approval` → `Enter` → Down → `Enter`.
@@ -207,20 +213,32 @@ Keys:
   (`/export` still gets the whole thing).
 - **`Ctrl+C` — abort the running turn; press it twice to exit.** A single `Ctrl+C`
   aborts the running turn (or, when idle, clears the input) and shows
-  `再按一次 Ctrl+C 退出`; a second press within one second quits. Exiting is
+  `Press Ctrl+C again to quit`; a second press within one second quits. Exiting is
   therefore never one keystroke away from "just stop this step" — the terminal
   convention that `Ctrl+C` means *interrupt* is preserved. `Ctrl+D` on an empty
   input is the one-key exit.
 - `Esc` — abort the running turn, close an overlay, or clear the input.
 
 Commands: `/help` `/new` `/sessions` (pick from a menu of past sessions)
-`/switch <id>` `/status` `/plan` `/model` `/effort <level>`
+`/switch <id>` `/status` `/plan` `/goal` `/model` `/effort <level>`
 `/approval <mode>` `/todo` `/jobs` `/export [md|json]` `/clear` `/quit`.
+
+`/goal <text>` sets a task objective that survives turns, compaction and restarts:
+it is written to the session log and injected into every request's system prompt.
+`/goal` alone shows it, `/goal clear` removes it. Use it to pin the one thing the
+run must not lose sight of — it is not a second todo list.
+
+`/plan` is persisted with the session: a session left in plan mode resumes in plan
+mode, and the restore is announced on startup (`/plan` exits). This is deliberately
+visible rather than silent — plan mode narrows the tool set, and a silent restore
+would look like broken tools.
 
 `/model` fetches the upstream model list from the configured `base_url` with the
 configured API key, then guides you through model selection, context window,
 maximum output tokens, and a final confirmation. Model IDs cannot be typed into
-this command directly.
+this command directly. The window and output cap you confirm are remembered per
+model (in the same local cache as the model list), so picking that model again —
+or passing it to `--model` — pre-fills them.
 
 Persistence: `/model`, `/effort` and `/approval` write your choice back to
 `~/.sph/config.toml`, so it survives a restart — the notice says which file was
@@ -232,9 +250,9 @@ key keeps its trailing comment, a commented-out template line such as
 hint stays), and an unknown key is appended. Comments, key order and unrelated
 keys are never touched.
 
-`/plan` is deliberately *not* persisted: plan mode is a per-task decision, and
-remembering it across restarts would silently reduce the tools available on the
-next launch.
+`/model` additionally records the choice in the session itself, so resuming that
+session uses the model it was actually using rather than whatever the config says
+today (unless `--model` was passed explicitly).
 
 `/status` opens a panel with the session id, workspace, sandbox, MCP servers
 and tools, token usage against `context_window`, todo progress and background
@@ -247,10 +265,12 @@ escalates to you rather than failing closed silently.
 
 Visual conventions:
 
-- Every line is measured with CJK-aware width and wrapped by us, and skeleton
-  glyphs are ASCII only: middle dots, ellipses, arrows and box-drawing characters
-  are East-Asian-ambiguous width and render as 2 cells in some terminals, which
-  would wrap a line and shift the whole frame up by one row. As a last line of
+- Every line is measured with CJK-aware width and wrapped by us. Skeleton glyphs
+  (middle dots, ellipses, arrows) stay ASCII: they are East-Asian-ambiguous width
+  and render as 2 cells in some terminals, which would wrap a line and shift the
+  whole frame up by one row. Table borders are the one deliberate exception — they
+  use box-drawing characters for a cleaner grid, and `SPH_TABLE_BORDER=ascii` falls
+  back to `+--+` if your terminal renders those double-width. As a last line of
   defence the painter clips each row to the terminal width before writing it.
 - Colors are 16-color SGR on purpose — they resolve through the terminal's own
   palette, so a light and a dark theme both stay readable, with no hardcoded
@@ -266,7 +286,9 @@ Visual conventions:
   content clipped rather than wrapped so it stays copyable, with syntax highlighting
   for TypeScript/JavaScript, JSON, Python, shell and diff — an unknown language
   renders as plain text rather than guessing), blockquotes, horizontal
-  rules, tables (`|` grid with `:---:` alignment) and inline **bold** / *italic* /
+  rules, tables (`|` grid with `:---:` alignment; cells wrap rather than truncate,
+  and column widths keep whole words whenever the budget allows) and inline
+  **bold** / *italic* /
   ~~strike~~ / `code` / [links](https://example.com). A link's target is not printed
   inline; `/status` and `/export` keep the raw text.
   Not supported, and shown as literal syntax rather than guessed: inline HTML,
@@ -281,11 +303,21 @@ Visual conventions:
   and the state belongs to one code block so it cannot leak into the next. Colouring
   only inserts SGR — it never adds or removes a visible character, so the width
   invariant is unaffected.
-- Tool calls belonging to one model step are collected and printed as a single
-  block once that step ends, with a header (`3 个工具调用 | 1 个失败 | 1.2s`).
-  While they run, the live indicator in the status line shows the tool and its
-  elapsed time (`shell 1.4s`).
-- Summaries are per tool: `read_file src/a.ts:1-40 (40 行)`, `grep "foo" -> 7 处`,
+- Tool calls belonging to one model step are collected into a single, **three-level**
+  block, together with that step's reasoning. Collapsed it is one line built from
+  verb buckets — `Read 2 files, Searched 1 pattern, Ran 1 command | 1 failed | 8.9s`
+  (buckets count *distinct* things: reading the same file twice is `Read 1 file`).
+  Double-clicking it lists one row per line — the thought plus every call
+  (`read_file src/a.ts:1-40 (40 lines)`, `$ npm test -> exit 0`) — and double-clicking
+  a row shows its body. A block that contains a failure starts at the second level,
+  so the failing call is visible without expanding anything.
+- **Reasoning** is shown while it streams (`Thinking…` plus the last 3 lines — the
+  tail is what tells you it is still moving) and collapses to `Thought for 2.1s`
+  once the step ends. Expanding that row shows the full text. Reasoning never counts
+  towards the tool buckets. Nothing appears at all for models that return no
+  reasoning (`redacted_thinking` is dropped too). While tools run, the live indicator
+  in the status line shows the tool and its elapsed time (`shell 1.4s`).
+- Summaries are per tool: `read_file src/a.ts:1-40 (40 lines)`, `grep "foo" -> 7 matches`,
   `write src/a.ts +12`, `search_replace src/a.ts -2/+1 x3`,
   `shell $ npm test -> exit 0`. Long output folds to 8 lines for a lone call, to
   2 lines per call inside a multi-call block (6 for failures).
@@ -296,7 +328,7 @@ Visual conventions:
   omitted entirely — no branch outside a git repository, no cache row when the
   endpoint never reports cached tokens (which is not the same as 0% hits).
   While a turn runs, the tool being executed is prefixed as `grep 1.4s`.
-  `PLAN` and `沙箱 off` are appended when relevant — they change what tools may
+  `PLAN` and `sandbox off` are appended when relevant — they change what tools may
   run, so they are never dropped for width.
 - On narrow terminals the status line sheds its least important fields instead of
   truncating them; project, model and permission mode survive longest (permission
@@ -310,8 +342,9 @@ Notes:
 - The TUI holds the workspace session lock for as long as it runs, so a second
   `sph` in the same workspace exits with `session already in use by pid ...`.
 - Colors are dropped when `NO_COLOR` is set or the output is not a TTY.
-- Mouse support is limited to the **wheel**, and only for scrolling the
-  conversation view. There is no click, drag, in-app selection or context menu.
+- Mouse support is the **wheel** (scrolling the conversation view) plus the
+  in-app selection described above (left-drag to select, right-click to copy).
+  There is no click-to-activate, no context menu, and no scrollbar to grab.
 - The wheel needs SGR mouse reporting (`?1006h`). Terminals that speak only the
   old X10 format send wheel events in a shape the app deliberately discards — so
   they can never leak into the input line, but the wheel is inert there and
@@ -351,12 +384,52 @@ durable `[compacted earlier context]` block。Summaries are stored as
 part of the history each time. If the summarizer call fails, compaction falls
 back to a zero-cost mechanical projection.
 
+The token estimate is the provider's own `usage` from the previous request plus
+an estimate of everything appended since — so a large tool result that arrives
+after the last call still counts towards the water line.
+
+The provider has the final word: if a request comes back with a
+context-window-exceeded error (the wording of OpenAI, Anthropic, DeepSeek and
+common gateways is recognised), sph compacts hard — stubbing, then summarising,
+then dropping whole oldest turns — and retries that request once. Nothing is
+dropped mid-turn in a way that would orphan a tool result. If the retry fails
+too, the original error is surfaced rather than looping.
+
+`compact_model` in `config.toml` routes summarization to a cheaper model. Its
+usage is recorded in the session (`purpose: "compaction"`) but never counts
+towards the context water line — that bar tracks the main request only.
+
+## Spill
+
+A tool result longer than `spill_threshold` characters (default 8192, `0`
+disables) is written to `~/.sph/spill/<session>/` and replaced in the context by
+a head/tail preview plus the absolute path. The model can page the full text back
+with `read_file <absolute path>` (`offset`/`limit` work there too); every other
+path outside the workspace stays refused. This is what keeps one verbose
+subagent report or a 20k-line test log from eating the window. If writing fails,
+the original result is kept — spilling is an optimisation, never a way to lose
+output.
+
+## Auxiliary models
+
+`compact_model` and `review_model` let summarization and the `auto` approval
+reviewer run on a cheaper model than the main one. Both default to the main
+model when unset; both reuse `base_url`/`api_key`/`api`. Reviewer calls are
+recorded as `usage` events with `purpose: "review"`.
+
 
 
 ## Images
 
 - `read_file` on `png/jpg/jpeg/gif/webp` (≤8MB）attaches the image to the
   model context.
+
+## Reading large files
+
+`read_file` never assumes the first 100KB is the whole file. Text is read in
+windows of at most 100KB, and `offset` (1-based line) / `limit` page through it —
+`offset` far past the head works, and an offset beyond the end says so instead of
+returning an empty body that looks like an empty file.
 
 
 
@@ -384,6 +457,13 @@ session.
 Sessions are JSONL, one per conversation, under `~/.sph/sessions/<workspace>/`.
 `sph sessions` lists them with a preview; `--search` greps message bodies;
 `sph export` renders Markdown (tool output collapsed) or raw JSON.
+
+The log is append-only and everything the UI restores is folded back out of it:
+the todo list, plan mode, the goal, the model last selected, and the most recent
+tool failure (which is also put in front of the model, so a resumed session does
+not blindly repeat the call that just failed). Recovery is a pure fold over
+events — there is no second state file to drift out of sync, and sessions written
+before these events existed simply restore as empty state.
 
 
 

@@ -8,7 +8,8 @@ export interface ProtocolAdapter {
   path: string;
   headers(apiKey: string): Record<string, string>;
   buildBody(input: RequestBodyOptions): string;
-  apply(payload: string, acc: SseAcc): { textDelta?: string };
+  /** textDelta = 正文增量；thinkingDelta = 思考链增量（推理模型/扩展思考）。 */
+  apply(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string };
 }
 
 export interface SseClientOptions {
@@ -35,7 +36,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
       messages: ChatMessage[],
       tools: unknown[],
       signal?: AbortSignal,
-      onDelta?: (delta: { text: string }) => void,
+      onDelta?: (delta: { text?: string; thinking?: string }) => void,
     ): Promise<StreamDelta> {
       const body = adapter.buildBody({
         model: options.model,
@@ -46,7 +47,8 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
       });
       let streamed = false;
       const wrapped = onDelta
-        ? (delta: { text: string }) => {
+        ? (delta: { text?: string; thinking?: string }) => {
+            // 思考链也算「已经给用户看过的东西」：此时再重试会让他看到重复的推理过程。
             streamed = true;
             onDelta(delta);
           }
@@ -60,8 +62,8 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           body,
           signal,
           onData: (payload) => {
-            const { textDelta } = adapter.apply(payload, acc);
-            if (textDelta) wrapped?.({ text: textDelta });
+            const { textDelta, thinkingDelta } = adapter.apply(payload, acc);
+            if (textDelta || thinkingDelta) wrapped?.({ text: textDelta, thinking: thinkingDelta });
           },
         });
         return finishStream(acc);

@@ -102,6 +102,10 @@ export interface MarkdownOptions {
   highlighter?: (lang: string) => LineHighlighter | undefined;
   /** 是否在链接正文后展示目标（默认关：窄终端下容易挤掉正文）。 */
   showLinks?: boolean;
+  /** 表格放不下时：wrap（默认，折行不丢内容）或 truncate（一行一行，超出打 `...`）。 */
+  tableOverflow?: 'wrap' | 'truncate';
+  /** 表格边框：ascii（默认 `+--+`）或 box（Unicode 制表符）。 */
+  tableBorder?: 'ascii' | 'box';
 }
 
 // ---------------------------------------------------------------- 行内解析
@@ -414,18 +418,30 @@ export function parseBlocks(text: string): Block[] {
 
 // ---------------------------------------------------------------- 排版
 
+/**
+ * 把一个超宽 token 切成多行。
+ *
+ * 优先在「软断点」后断开：`/ - _ .` 这些字符后面本来就是天然的视觉边界，
+ * `src/agent/compact.ts` 断成 `src/agent/` + `compact.ts` 远比 `src/agen` + `t/compact` 可读。
+ * 找不到软断点（base64、长数字串）才按宽度硬切。
+ */
 function hardSplit(text: string, limit: number): string[] {
   const out: string[] = [];
   let cur = '';
   let width = 0;
+  let breakAt = -1;
   for (const c of clusters(text)) {
     if (width + c.width > limit && cur !== '') {
-      out.push(cur);
-      cur = '';
-      width = 0;
+      // 断点字符归属于上一行（`src/agent/` 而不是 `src/agent` + `/compact`）。
+      const cut = breakAt > 0 && breakAt < cur.length ? breakAt : cur.length;
+      out.push(cur.slice(0, cut));
+      cur = cur.slice(cut);
+      width = displayWidth(cur);
+      breakAt = -1;
     }
     cur += c.ch;
     width += c.width;
+    if ('/-_.'.includes(c.ch)) breakAt = cur.length;
   }
   if (cur !== '') out.push(cur);
   return out.length === 0 ? [''] : out;
@@ -567,59 +583,193 @@ function paintSpan(s: Span, styler: Styler): string {
   return text;
 }
 
-/** 列宽分配：够用就按自然宽，不够就保留最小列宽后按内容比例收缩。 */
-function allocate(natural: readonly number[], budget: number): number[] {
-  const total = natural.reduce((a, b) => a + b, 0);
-  if (total <= budget) return [...natural];
-  const min = 3;
-  if (min * natural.length >= budget) {
-    const each = Math.max(1, Math.floor(budget / natural.length));
-    return natural.map(() => each);
+/** 列宽下限：低于它就只剩「一格里塞两三个字符」，读起来比折行更糟。 */
+const MIN_COL = 3;
+/** 「够用宽度」上限：超过这个宽度的列再宽也只是少折几行，不值得从别列抢预算。 */
+const USEFUL_CAP = 32;
+
+/** 一列里最长的不可断词（按空白切分）的显示宽度——列宽至少给到它，词才不会被劈开。 */
+function longestWord(cells: readonly Span[][]): number {
+  let width = 0;
+  for (const cell of cells) {
+    for (const span of cell) {
+      for (const token of span.text.split(/\s+/)) {
+        width = Math.max(width, displayWidth(token));
+      }
+    }
   }
-  const spare = budget - min * natural.length;
-  const extra = natural.map((n) => Math.max(0, n - min));
-  const extraTotal = extra.reduce((a, b) => a + b, 0);
-  return natural.map((_, i) => (extraTotal === 0 ? min : min + Math.floor(((extra[i] ?? 0) / extraTotal) * spare)));
+  return width;
 }
 
-function renderTable(block: TableBlock, width: number, lead: string, styler: Styler): string[] {
+/**
+ * 列宽分配。
+ *
+ * 旧实现只按「自然宽比例」收缩，结果 `Lines` / `Risk` / `Owner` 这类短列被压到 3~5 列，
+ * 单词被硬切成 `Line/s`、`Ris/k`——表格里最难读的形态。现在分两步：
+ *
+ * 1. 先满足每列的「够用宽度」= min(最长词, 自然宽, USEFUL_CAP)。短列到此就不再抢预算，
+ *    词能整放；长文本列照常折行。
+ * 2. 剩余预算按「离自然宽还差多少」的比例补回去，仍然优先补内容多的列。
+ *
+ * 连够用宽度都放不下（列太多 / 窗口太窄）时才退回按比例收缩，并保证总宽不超预算。
+ */
+function allocate(natural: readonly number[], useful: readonly number[], budget: number): number[] {
+  const columns = natural.length;
+  if (columns === 0) return [];
+  const target = natural.map((value, i) =>
+    Math.min(value, Math.max(MIN_COL, Math.min(useful[i] ?? MIN_COL, USEFUL_CAP))),
+  );
+  const targetTotal = target.reduce((a, b) => a + b, 0);
+  if (targetTotal <= budget) {
+    const spare = budget - targetTotal;
+    const headroom = natural.map((value, i) => Math.max(0, value - (target[i] ?? 0)));
+    const headroomTotal = headroom.reduce((a, b) => a + b, 0);
+    if (headroomTotal === 0) return [...target];
+    return natural.map((value, i) =>
+      Math.min(value, (target[i] ?? 0) + Math.floor(((headroom[i] ?? 0) / headroomTotal) * spare)),
+    );
+  }
+
+  const total = natural.reduce((a, b) => a + b, 0);
+  if (total <= budget) return [...natural];
+  return fitToBudget(waterFill(natural, budget), budget);
+}
+
+/**
+ * 水位法：按「自然宽从小到大」依次满足，每列拿到「剩余预算 ÷ 剩余列数」与自身需求中较小的那个。
+ *
+ * 挤不下「够用宽度」时（列多 / 窗口窄），按内容比例收缩会让短列只剩 2~3 列，
+ * 而长文本列独占十几列——`Risk` 被切成 `Ris/k`、`Owner` 切成 `Owne/r`。
+ * 水位法保证每列先拿到均分份额，短列能整词放下，剩余预算再给内容多的列。
+ */
+function waterFill(natural: readonly number[], budget: number): number[] {
+  const order = natural.map((value, index) => ({ value, index })).sort((a, b) => a.value - b.value);
+  const widths = new Array<number>(natural.length).fill(0);
+  let remaining = budget;
+  let taken = 0;
+  for (const { value, index } of order) {
+    const share = Math.floor(remaining / Math.max(1, natural.length - taken));
+    const give = Math.max(1, Math.min(value, share));
+    widths[index] = give;
+    remaining -= give;
+    taken++;
+  }
+  return widths;
+}
+
+/** 最后一道防线：总宽绝不超过预算。超了就从最宽的列往下削，否则整行会被调用方裁掉一截。 */
+function fitToBudget(widths: readonly number[], budget: number): number[] {
+  const out = [...widths];
+  let total = out.reduce((a, b) => a + b, 0);
+  while (total > budget) {
+    let widest = 0;
+    for (let i = 1; i < out.length; i++) {
+      if ((out[i] ?? 0) > (out[widest] ?? 0)) widest = i;
+    }
+    if ((out[widest] ?? 0) <= 1) break;
+    out[widest] = (out[widest] ?? 0) - 1;
+    total--;
+  }
+  return out;
+}
+
+/** 一行原始单元格 → 「a | b | c」的 span 流（降级渲染用）。 */
+function joinRow(cells: readonly Span[][], columns: number): Span[] {
+  const out: Span[] = [];
+  for (let c = 0; c < columns; c++) {
+    if (c > 0) out.push({ text: ' | ', tone: 'muted' });
+    out.push(...(cells[c] ?? []));
+  }
+  return out;
+}
+
+function renderTable(
+  block: TableBlock,
+  width: number,
+  lead: string,
+  styler: Styler,
+  overflow: 'wrap' | 'truncate',
+  border: 'ascii' | 'box',
+): string[] {
   const columns = Math.max(block.header.length, ...block.rows.map((r) => r.length), 1);
   const cellOf = (row: readonly Span[][] | undefined, c: number): Span[] => row?.[c] ?? [];
 
   // 边框与内边距的固定开销：`| a | b |` = 列数 * 3 + 1。
-  const budget = Math.max(columns * 2, width - displayWidth(lead) - (columns * 3 + 1));
-  const natural: number[] = [];
-  for (let c = 0; c < columns; c++) {
-    let w = spanWidth(cellOf(block.header, c));
-    for (const row of block.rows) w = Math.max(w, spanWidth(cellOf(row, c)));
-    natural.push(Math.max(1, Math.min(w, 40)));
-  }
-  const widths = allocate(natural, budget);
+  const inner = Math.max(1, width - displayWidth(lead));
+  const fixed = columns * 3 + 1;
 
-  const sep = `${lead}${styler.dim(`+${widths.map((w) => '-'.repeat(w + 2)).join('+')}+`)}`;
-  const rowLine = (cells: readonly Span[][], header: boolean): string => {
-    const parts: string[] = [];
-    for (let c = 0; c < columns; c++) {
-      const limit = widths[c] ?? 1;
-      const align = block.aligns[c] ?? 'left';
-      // 预留 1 列给截断标记，避免「截断标记本身把行撑破」。
-      const raw = cellOf(cells, c);
-      const room = spanWidth(raw) > limit ? Math.max(0, limit - 1) : limit;
-      const cut = clipSpans(raw, room);
-      const text = paintSpans(header ? cut.spans.map((s) => ({ ...s, bold: true })) : cut.spans, styler);
-      const gap = Math.max(0, limit - spanWidth(cut.spans));
-      const mark = cut.clipped ? styler.dim('~') : ' '.repeat(gap);
-      const filled = cut.clipped ? mark + ' '.repeat(Math.max(0, gap - 1)) : mark;
-      const left = align === 'right' ? filled : align === 'center' ? ' '.repeat(Math.floor(gap / 2)) : '';
-      const right = align === 'left' ? '' : align === 'center' ? ' '.repeat(gap - Math.floor(gap / 2)) : '';
-      parts.push(`${left} ${text}${align === 'left' ? filled : ''}${right} `);
+  // 窄到「每列连一个字符都放不下」时，网格只会被裁掉右半边。这时按行折行输出，
+  // 牺牲表格外观、保住全部内容——与「单元格折行不截断」是同一个取舍。
+  if (inner < fixed + columns) {
+    const lines: string[] = [];
+    for (const row of [block.header, ...block.rows]) {
+      const flat = joinRow(row, columns);
+      if (flat.length === 0) continue;
+      lines.push(...wrapSpans(flat, inner).map((spans) => `${lead}${paintSpans(spans, styler)}`));
     }
-    return `${lead}${styler.dim('|')}${parts.join(styler.dim('|'))}${styler.dim('|')}`;
+    return lines;
+  }
+
+  const budget = inner - fixed;
+  const natural: number[] = [];
+  const useful: number[] = [];
+  for (let c = 0; c < columns; c++) {
+    const cells = [cellOf(block.header, c), ...block.rows.map((row) => cellOf(row, c))];
+    let w = 0;
+    for (const cell of cells) w = Math.max(w, spanWidth(cell));
+    natural.push(Math.max(1, w));
+    useful.push(longestWord(cells));
+  }
+  const widths = allocate(natural, useful, budget);
+
+  // 边框字符集。box 更接近现代终端工具的观感，但制表符是东亚歧义宽度字符，
+  // 在部分终端按 2 列渲染会撑破整行——所以默认仍是 ASCII（见文件头与 view.ts 的宽度不变量）。
+  const chars = border === 'box'
+    ? { v: '│', h: '─', tl: '┌', tm: '┬', tr: '┐', ml: '├', mm: '┼', mr: '┤', bl: '└', bm: '┴', br: '┘' }
+    : { v: '|', h: '-', tl: '+', tm: '+', tr: '+', ml: '+', mm: '+', mr: '+', bl: '+', bm: '+', br: '+' };
+  const rule = (left: string, mid: string, right: string): string =>
+    `${lead}${styler.dim(`${left}${widths.map((w) => chars.h.repeat(w + 2)).join(mid)}${right}`)}`;
+
+  /**
+   * 一行表格 → 若干屏幕行。**单元格折行，绝不截断**。
+   *
+   * 原来这里是「裁到列宽 + 打一个 `~`」：终端里表格一窄就把内容吃掉半截，而表格恰恰常用来
+   * 罗列长清单（工具名、参数、状态），被裁掉的那半往往才是信息。模型输出什么就显示什么 ——
+   * 宽度不够时让这一行长高，而不是丢内容；对话流本来就支持任意高度。
+   *
+   * 行高取该行各单元格折行数的最大值，矮的单元格补空格对齐，网格仍然规整。
+   */
+  const rowLines = (cells: readonly Span[][], header: boolean): string[] => {
+    const decorated = (raw: Span[]): Span[] => (header ? raw.map((s) => ({ ...s, bold: true })) : raw);
+    const wrapped = widths.map((w, c) => wrapSpans(decorated(cellOf(cells, c)), w));
+    const height = overflow === 'truncate' ? 1 : Math.max(1, ...wrapped.map((lines) => lines.length));
+    const out: string[] = [];
+    for (let i = 0; i < height; i++) {
+      const parts: string[] = [];
+      for (let c = 0; c < columns; c++) {
+        const limit = widths[c] ?? 1;
+        const align = block.aligns[c] ?? 'left';
+        let line = wrapped[c]?.[i] ?? [];
+        let ellipsis = false;
+        if (overflow === 'truncate' && (wrapped[c]?.length ?? 0) > 1) {
+          line = clipSpans(line, Math.max(0, limit - 3)).spans;
+          ellipsis = true;
+        }
+        const text = paintSpans(line, styler) + (ellipsis ? styler.dim('...') : '');
+        const gap = Math.max(0, limit - spanWidth(line) - (ellipsis ? 3 : 0));
+        const left = align === 'right' ? ' '.repeat(gap) : align === 'center' ? ' '.repeat(Math.floor(gap / 2)) : '';
+        const right = align === 'center' ? ' '.repeat(gap - Math.floor(gap / 2)) : '';
+        parts.push(`${left} ${text}${align === 'left' ? ' '.repeat(gap) : right} `);
+      }
+      out.push(`${lead}${styler.dim(chars.v)}${parts.join(styler.dim(chars.v))}${styler.dim(chars.v)}`);
+    }
+    return out;
   };
 
-  const out = [sep, rowLine(block.header, true), sep];
-  for (const row of block.rows) out.push(rowLine(row, false));
-  out.push(sep);
+  const out = [rule(chars.tl, chars.tm, chars.tr), ...rowLines(block.header, true), rule(chars.ml, chars.mm, chars.mr)];
+  for (const row of block.rows) out.push(...rowLines(row, false));
+  // 没有数据行时不再补一条底线：否则表头下面会出现两条一模一样的 `+---+`。
+  if (block.rows.length > 0) out.push(rule(chars.bl, chars.bm, chars.br));
   return out;
 }
 
@@ -729,7 +879,14 @@ export function renderMarkdown(text: string, options: MarkdownOptions): string[]
 
       case 'table': {
         gap();
-        out.push(...renderTable(block, width, lead, styler));
+        out.push(...renderTable(
+          block,
+          width,
+          lead,
+          styler,
+          options.tableOverflow ?? 'wrap',
+          options.tableBorder ?? 'ascii',
+        ));
         break;
       }
     }

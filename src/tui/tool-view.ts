@@ -24,6 +24,8 @@ export interface ToolCallView {
   detail: string;
   ok?: boolean;
   durationMs?: number;
+  /** 二级展开：这一条的结果正文是否可见（块自身展开后才看得到摘要行）。 */
+  expanded?: boolean;
 }
 
 export interface DetailOptions {
@@ -55,7 +57,8 @@ export function summarizeToolCall(call: ToolCallView): string {
     case 'read_file': {
       const path = str(args, 'path') ?? '?';
       const range = hasDetail ? readFileRange(detail) : undefined;
-      return range ? `${path}:${range.first}-${range.last} (${range.count} 行)` : path;
+      if (!range) return path;
+      return `${path}:${range.first}-${range.last} (${range.count} ${range.count === 1 ? 'line' : 'lines'})`;
     }
     case 'write': {
       const path = str(args, 'path') ?? '?';
@@ -75,12 +78,12 @@ export function summarizeToolCall(call: ToolCallView): string {
       const where = str(args, 'path');
       if (!hasDetail) return `"${pattern}"${where ? ` ${where}` : ''}`;
       const hits = detail === 'no matches' ? 0 : detail.split('\n').filter((line) => line.trim() !== '').length;
-      return `"${pattern}"${where ? ` ${where}` : ''} -> ${hits} 处`;
+      return `"${pattern}"${where ? ` ${where}` : ''} -> ${hits} matches`;
     }
     case 'list_dir': {
       const path = str(args, 'path') ?? '?';
       if (!hasDetail) return path;
-      return `${path} (${countListEntries(detail)} 项)`;
+      return `${path} (${countListEntries(detail)} entries)`;
     }
     case 'shell': {
       const command = (str(args, 'command') ?? '').replace(/\s+/g, ' ').slice(0, 72);
@@ -106,6 +109,101 @@ export function summarizeArgs(args: Record<string, unknown>): string {
 }
 
 /**
+ * 一个工具在汇总标签里占的「桶」。
+ *
+ * key 是去重用的：grok 数的是「读了几个文件」而不是「调了几次 read_file」——
+ * 同一个文件读三遍显示 `Read 1 file` 才是读者关心的量。文件/命令/模式这类参数就是天然的身份。
+ */
+interface VerbBucket {
+  /** 完成时态，用于已经跑完的一步。 */
+  verb: string;
+  /** 进行时态，用于还在跑的一步（grok 的 running 标签用现在分词）。 */
+  running: string;
+  noun: string;
+  key: string;
+}
+
+function argKey(call: ToolCallView, field: string): string {
+  const value = call.args[field];
+  return typeof value === 'string' && value !== '' ? value : call.id;
+}
+
+function verbOf(call: ToolCallView): Omit<VerbBucket, 'key'> & { key: string } {
+  switch (call.name) {
+    case 'read_file':
+      return { verb: 'Read', running: 'Reading', noun: 'file', key: argKey(call, 'path') };
+    case 'write':
+      return { verb: 'Wrote', running: 'Writing', noun: 'file', key: argKey(call, 'path') };
+    case 'search_replace':
+      return { verb: 'Edited', running: 'Editing', noun: 'file', key: argKey(call, 'path') };
+    case 'grep':
+      return { verb: 'Searched', running: 'Searching', noun: 'pattern', key: argKey(call, 'pattern') };
+    case 'list_dir':
+      return { verb: 'Listed', running: 'Listing', noun: 'dir', key: argKey(call, 'path') };
+    case 'shell':
+      return { verb: 'Ran', running: 'Running', noun: 'command', key: argKey(call, 'command') };
+    case 'web_fetch':
+      return { verb: 'Fetched', running: 'Fetching', noun: 'URL', key: argKey(call, 'url') };
+    case 'subagent':
+      return { verb: 'Ran', running: 'Running', noun: 'subagent', key: argKey(call, 'prompt') };
+    case 'skill':
+      return { verb: 'Loaded', running: 'Loading', noun: 'skill', key: argKey(call, 'name') };
+    case 'mcp':
+      return { verb: 'Called', running: 'Calling', noun: 'MCP tool', key: `${argKey(call, 'server')}/${argKey(call, 'tool')}` };
+    case 'todo':
+      return { verb: 'Updated', running: 'Updating', noun: 'to-do list', key: 'todo' };
+    case 'jobs':
+      return { verb: 'Checked', running: 'Checking', noun: 'job', key: argKey(call, 'id') };
+    case 'ask_user':
+      return { verb: 'Asked', running: 'Asking', noun: 'question', key: call.id };
+    case 'exit_plan_mode':
+      return { verb: 'Proposed', running: 'Proposing', noun: 'plan', key: call.id };
+    default:
+      return { verb: 'Called', running: 'Calling', noun: 'tool', key: call.id };
+  }
+}
+
+const PLURAL_OVERRIDES: Record<string, string> = {
+  'MCP tool': 'MCP tools',
+};
+
+function pluralize(noun: string, count: number): string {
+  if (count === 1) return noun;
+  return PLURAL_OVERRIDES[noun] ?? `${noun}s`;
+}
+
+/**
+ * 工具调用 → 一行聚合标签（照 grok-build 的写法）。
+ *
+ * `Read 2 files, Searched 1 pattern, Ran 3 commands`：按动词分桶、桶内去重、用 `, ` 连接。
+ * 有任何一个还在跑时全部用进行时（`Reading 2 files`），与之一致。
+ * 思考链刻意不参与这个标签——它按 grok 的做法单列一行，不进工具统计。
+ */
+export function summarizeToolRun(items: readonly ToolCallView[]): { label: string; running: boolean } {
+  const order: string[] = [];
+  const buckets = new Map<string, { verb: string; running: string; noun: string; keys: Set<string> }>();
+  let running = false;
+  for (const item of items) {
+    const { verb, running: verbRunning, noun, key } = verbOf(item);
+    if (item.ok === undefined) running = true;
+    const id = `${verb} ${noun}`;
+    let bucket = buckets.get(id);
+    if (!bucket) {
+      bucket = { verb, running: verbRunning, noun, keys: new Set() };
+      buckets.set(id, bucket);
+      order.push(id);
+    }
+    bucket.keys.add(key);
+  }
+  const label = order
+    .map((id) => buckets.get(id))
+    .filter((bucket): bucket is NonNullable<typeof bucket> => bucket !== undefined)
+    .map((bucket) => `${running ? bucket.running : bucket.verb} ${bucket.keys.size} ${pluralize(bucket.noun, bucket.keys.size)}`)
+    .join(', ');
+  return { label, running };
+}
+
+/**
  * 结果正文行（已缩进，未补齐到整宽）。
  * 每行都保证 displayWidth <= width 由调用方折行负责，这里只做「已量宽的文本 + 着色」。
  */
@@ -118,7 +216,7 @@ export function renderToolDetail(call: ToolCallView, options: DetailOptions): st
   const shown = wrapped.slice(0, maxLines);
   const out = shown.map((line) => pad0 + styleDetailLine(call, line, styler));
   const hidden = wrapped.length - shown.length;
-  if (hidden > 0) out.push(styler.dim(`${pad0}... 其余 ${hidden} 行`));
+  if (hidden > 0) out.push(styler.dim(`${pad0}... ${hidden} more lines`));
   return out;
 }
 

@@ -25,13 +25,13 @@
 
 import type { Styler } from './ansi.js';
 import { displayWidth, inverseRange, pad, truncate, visibleSlice, wrap } from './ansi.js';
-import { type EditorLine, layoutLines, lineIndexOf, offsetIn } from './editor.js';
+import { cursorColumn, type EditorLine, layoutLines, lineIndexOf, offsetIn } from './editor.js';
 import { createHighlighter } from './highlight.js';
 import { renderMarkdown } from './markdown.js';
-import { renderDialog, type DialogChoice, type DialogLine } from './dialog.js';
-import type { ApprovalPrompt, NoticeLevel, Selection, TranscriptEntry, TuiState } from './state.js';
+import { CHOICE_GAP, renderDialog, type DialogChoice, type DialogLine } from './dialog.js';
+import type { ApprovalPrompt, FormPrompt, NoticeLevel, Selection, TranscriptEntry, TuiState } from './state.js';
 import { cacheHitRate } from './state.js';
-import { formatDuration, renderToolDetail, summarizeToolCall, toolTone, type ToolCallView } from './tool-view.js';
+import { formatDuration, renderToolDetail, summarizeToolCall, summarizeToolRun, toolTone, type ToolCallView } from './tool-view.js';
 
 export interface ViewOptions {
   width: number;
@@ -211,7 +211,7 @@ function statusSegments(state: TuiState, styler: Styler, now: number): Segment[]
   // 唯一破例的两个附加格：计划模式会改可用工具、沙箱 off 等于没有隔离，都属于
   // 「不说出来就可能误判」的状态，不能因为窄终端被静默丢掉（沙箱也仍在 /status 与横幅里）。
   if (state.planMode) segments.push({ text: 'PLAN', paint: (v) => styler.magenta(v), priority: 7 });
-  if (state.sandboxMode === 'off') segments.push({ text: '沙箱 off', paint: (v) => styler.red(v), priority: 7 });
+  if (state.sandboxMode === 'off') segments.push({ text: 'sandbox off', paint: (v) => styler.red(v), priority: 7 });
 
   if (state.todo.total > 0) {
     const allDone = state.todo.done === state.todo.total;
@@ -424,6 +424,12 @@ export function renderLive(state: TuiState, options: ViewOptions): LiveView {
     const panel = planPanel(prompt.plan, width, budget, styler);
     lines.push(...panel);
     pushBelowPanel(prompt.editor, panel.length);
+  } else if (prompt?.kind === 'form') {
+    // 表单自带输入区，不再挂主输入行：两个输入框叠在同一个输入框之上，光标该落哪就说不清了。
+    const panel = formPanel(prompt, width, styler);
+    const base = lines.length;
+    lines.push(...panel.lines);
+    if (panel.cursor) cursor = { row: base + panel.cursor.row, col: panel.cursor.col };
   } else if (state.phase === 'menu' && state.menu) {
     const panel = menuPanel(state.menu, width, budget, styler);
     lines.push(...panel);
@@ -483,6 +489,18 @@ export interface FramePlan {
 export interface BodyRegion {
   top: number;
   rows: number;
+  /**
+   * 正文**内容**第一行落在屏幕的哪一行（跳过头栏、吸顶的用户消息、顶部补白）。
+   *
+   * 与 top/rows 是两个不同的区间，刻意不合并：top/rows 是「滚轮可以作用的范围」，含正文前后的
+   * 补白（悬在补白上也该能滚）；contentTop/contentRows 是「真的画着正文的哪几行」，
+   * 鼠标选区只认后者——点在补白上不该选中任何东西。
+   */
+  contentTop: number;
+  /** 正文第一行在 body 数组里的下标，配合 contentTop 把屏幕行换算成内容坐标。 */
+  contentIndex: number;
+  /** 正文内容可见的行数。 */
+  contentRows: number;
 }
 
 /** 对话流中可双击展开的工具块逻辑区间。 */
@@ -651,9 +669,13 @@ export function composeFrame(
   // 这正是我们想要的——浮层盖住的那几行不该再响应滚轮。
   const bodyTop = Math.min(plan.header, height);
   const bodyRows = Math.max(0, height - bodyTop - activity.length);
+  // 正文内容的真实屏幕区间：头栏之后、吸顶用户消息与顶部补白之后的第一行正文，
+  // 连续 visibleRows 行。droppedTop 是最后那道顶部夹紧，会让整体上移。
+  const contentTop = Math.max(0, plan.header + stickyRows + blank - droppedTop);
+  const bodyContentRows = Math.max(0, Math.min(visibleRows, height - contentTop));
   // 选区高亮放在**最后**：此时行已经定稿（补空、夹紧都做完了），行号就是屏幕行号，
-  // 与 state.selection 存的屏幕坐标一一对应。
-  applySelection(lines, state.selection);
+  // 于是「内容坐标 → 屏幕行」的换算可以直接用上面这份映射。
+  applySelection(lines, state.selection, contentTop, start, bodyContentRows);
   const toolRegions = toolRegionsBeforeClamp.flatMap((region): ScreenToolBlockRegion[] => {
     const top = region.top - droppedTop;
     const bottom = region.bottom - droppedTop;
@@ -667,6 +689,9 @@ export function composeFrame(
     body: {
       top: bodyTop,
       rows: bodyRows,
+      contentTop,
+      contentIndex: start,
+      contentRows,
     },
     toolBlocks: toolRegions,
   };
@@ -677,19 +702,30 @@ export function composeFrame(
  *
  * 区间是「闭」的（两端字符都算选中），这是所有终端选区的惯例：拖到第 5 列松手，
  * 第 5 列那个字符应该被选中。因此末行的结束列要 +1 才对得上。
+ *
+ * 选区存的是**内容坐标**，这里只做一次换算：屏幕行 = `contentTop + (内容行 - contentIndex)`。
+ * 落在可见区间之外的内容行直接跳过——它会随着滚动进入/离开视口，不需要额外记账。
  */
-function applySelection(lines: string[], selection: Selection | undefined): void {
+function applySelection(
+  lines: string[],
+  selection: Selection | undefined,
+  contentTop: number,
+  contentIndex: number,
+  contentRows: number,
+): void {
   if (!selection) return;
   const { anchor, head } = selection;
   const reversed = anchor.row > head.row || (anchor.row === head.row && anchor.col > head.col);
   const first = reversed ? head : anchor;
   const last = reversed ? anchor : head;
   for (let row = first.row; row <= last.row; row++) {
-    if (row < 0 || row >= lines.length) continue;
+    const screenRow = contentTop + (row - contentIndex);
+    if (row < contentIndex || row >= contentIndex + contentRows) continue;
+    if (screenRow < 0 || screenRow >= lines.length) continue;
     const startCol = row === first.row ? first.col : 0;
     // 中间行整行选中：给一个足够大的上界，inverseRange 自己会在行尾停下。
     const endCol = row === last.row ? last.col + 1 : Number.MAX_SAFE_INTEGER;
-    lines[row] = inverseRange(lines[row], startCol, endCol);
+    lines[screenRow] = inverseRange(lines[screenRow], startCol, endCol);
   }
 }
 
@@ -768,23 +804,23 @@ function approvalPanel(
 ): string[] {
   const { request } = prompt;
   const choices: ReadonlyArray<DialogChoice> = [
-    { label: '允许执行一次', selected: prompt.choice === 'allow' },
-    { label: `允许本会话继续使用 ${request.tool}`, selected: prompt.choice === 'allow-session' },
-    { label: '拒绝', selected: prompt.choice === 'deny' },
+    { label: 'Allow once', selected: prompt.choice === 'allow' },
+    { label: `Allow ${request.tool} for this session`, selected: prompt.choice === 'allow-session' },
+    { label: 'Reject', selected: prompt.choice === 'deny' },
   ];
   const lines: DialogLine[] = [
-    { text: `允许 ${request.tool} 执行吗？`, paint: styler.bold },
+    { text: `Allow ${request.tool} to run?`, paint: styler.bold },
     ...detailLines(request.command ?? request.path ?? '', width),
   ];
   if (prompt.note) lines.push(...detailLines(prompt.note, width, styler.dim));
   return renderDialog({
     width,
-    title: '确认工具调用',
+    title: 'Tool approval',
     marker: '[!]',
     titlePaint: styler.yellow,
     lines,
     choices,
-    footer: '[上下键] 选择 | [Enter] 确认 | [y/n/a] 快捷操作 | [Esc] 拒绝',
+    footer: '[Up/Down] select | [Enter] confirm | [y/n/a] shortcuts | [Esc] reject',
     styler,
   });
 }
@@ -792,47 +828,157 @@ function approvalPanel(
 function askPanel(question: string, width: number, styler: Styler): string[] {
   return renderDialog({
     width,
-    title: '模型提问',
+    title: 'Question from the model',
     marker: '[?]',
     titlePaint: styler.cyan,
     lines: detailLines(question, width),
-    footer: '[Enter] 回答 | [Esc] 取消（模型会收到「未回答」）',
+    footer: '[Enter] answer | [Esc] cancel (the model is told you did not answer)',
     styler,
   });
+}
+
+/** 输入框的可见宽度上限：够放 6 位数加单位，再宽也只是把边框拉长。 */
+const FORM_INPUT_MAX = 28;
+const FORM_INPUT_MIN = 10;
+
+/**
+ * 多字段表单浮层：一屏填完多个值，一次提交。
+ *
+ * 焦点用**反显**表达（与菜单选中项同一套语汇）：聚焦字段反显它的输入区，聚焦按钮反显整个
+ * 按钮块。光标交给终端（返回值里的 cursor），不用 `>` 之类的假光标——字段可能不止一个，
+ * 假光标会在每行都出现，反而看不出焦点在哪。
+ *
+ * 返回值里的 cursor.row 是**相对本面板**的行号，调用方要加上面板在活动区里的起始行。
+ */
+function formPanel(
+  prompt: FormPrompt,
+  width: number,
+  styler: Styler,
+): { lines: string[]; cursor: { row: number; col: number } | null } {
+  const labelWidth = prompt.fields.reduce((max, field) => Math.max(max, displayWidth(field.label)), 0);
+  const inputWidth = Math.max(
+    FORM_INPUT_MIN,
+    Math.min(FORM_INPUT_MAX, width - 4 - labelWidth - CHOICE_GAP),
+  );
+
+  const lines: DialogLine[] = [];
+  lines.push(...detailLines(prompt.note ?? '', width, styler.dim));
+  lines.push({ text: '' });
+
+  // 字段行在 lines 里的起点。renderDialog 会在内容前再插「上边框 + 标题」两行，
+  // 所以光标行号最后要整体 +2。
+  const fieldStart = lines.length;
+  let caretInFocus = 0;
+  for (const [index, field] of prompt.fields.entries()) {
+    const focused = prompt.focus === index;
+    const row = formFieldRow(field, focused, labelWidth, inputWidth, styler);
+    if (focused) caretInFocus = row.caret;
+    lines.push({ text: row.text });
+  }
+
+  const cursor = prompt.focus >= prompt.fields.length
+    ? null
+    : {
+      row: 2 + fieldStart + prompt.focus,
+      // renderDialogLine 已经给内容行加了 2 列缩进，这里只补「标签列 + 间隔 + 输入区内的偏移」。
+      col: 2 + labelWidth + CHOICE_GAP + caretInFocus,
+    };
+
+  if (prompt.error !== undefined && prompt.error !== '') {
+    lines.push({ text: '' });
+    lines.push(...detailLines(prompt.error, width, styler.red));
+  }
+
+  // 刻意不渲染确认/取消按钮行：Enter 就是确认、Esc 就是取消，页脚已经写明，
+  // 按钮行只会把弹窗撑高一截，还要多养一套「焦点落在按钮上」的按键语义。
+  return {
+    lines: renderDialog({
+      width,
+      title: prompt.title,
+      titlePaint: styler.cyan,
+      lines,
+      footer: prompt.fields.length === 0
+        ? '[Enter] confirm | [Esc] cancel'
+        : '[Tab/Up/Down] switch field | [Enter] submit | [Esc] cancel',
+      styler,
+    }),
+    cursor,
+  };
+}
+
+/**
+ * 单个字段行：`标签列 + 间隔 + 输入区`。
+ *
+ * 输入区宽度固定，所以空字段显示的是 placeholder（压成 dim，与真值区分）；文本超出时向左
+ * 滚动（保留光标附近的尾部），这是单行输入框的通用行为，而不是硬截断——否则用户敲到第 29
+ * 个字符时看不到自己正在敲什么。
+ */
+function formFieldRow(
+  field: FormPrompt['fields'][number],
+  focused: boolean,
+  labelWidth: number,
+  inputWidth: number,
+  styler: Styler,
+): { text: string; caret: number } {
+  // 不加自己的缩进：内容和说明行都走 renderDialogLine，那一层统一加 2 列，
+  // 自己再加一次就会比说明行多缩进 2 列，光标列也跟着偏。
+  const label = `${pad(field.label, labelWidth)}${' '.repeat(CHOICE_GAP)}`;
+  const empty = field.editor.text === '';
+  const caretCol = empty ? 0 : cursorColumn(field.editor);
+  // 输入区留 1 格左内边距：内容不再紧贴标签间隔，光标也有落点（缩进 1 格）。
+  const inner = Math.max(1, inputWidth - 1);
+  const start = Math.max(0, caretCol + 1 - inner);
+  const content = empty ? field.placeholder : field.editor.text;
+  const shown = pad(` ${visibleSlice(content, start, start + inner)}`, inputWidth);
+  const body = empty ? styler.dim(shown) : shown;
+  return {
+    // 反显整块输入区（含尾部空白）才像「一个选中的输入框」；只反显文字会像随手高亮。
+    text: `${label}${focused ? styler.inverse(body) : body}`,
+    caret: caretCol - start + 1,
+  };
 }
 
 function planPanel(plan: string, width: number, budget: number, styler: Styler): string[] {
   const body = wrap(plan, Math.max(8, width - 2));
   const shown = body.slice(0, budget);
   const lines: DialogLine[] = shown.map((line) => ({ text: line }));
-  if (body.length > shown.length) lines.push({ text: `... 其余 ${body.length - shown.length} 行`, paint: styler.dim });
+  if (body.length > shown.length) lines.push({ text: `... ${body.length - shown.length} more lines`, paint: styler.dim });
   return renderDialog({
     width,
-    title: '计划待审批',
+    title: 'Plan awaiting review',
     marker: '[!]',
     titlePaint: styler.yellow,
     lines,
-    footer: '[y] 批准并执行 | 输入意见后 [Enter] 驳回 | [Esc] 驳回',
+    footer: '[y] approve and run | type feedback then [Enter] to refuse | [Esc] refuse',
     styler,
   });
 }
+
+/** 菜单项提示列至少要留出的列数，保证窄终端下提示仍可读。 */
+const HINT_MIN_COLUMNS = 12;
 
 function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler: Styler): string[] {
   if (!menu) return [];
   const rows = Math.max(1, Math.min(budget, menu.items.length));
   const start = Math.max(0, Math.min(menu.index - Math.floor(rows / 2), menu.items.length - rows));
-  const header = menu.filter ? `${menu.title} | 过滤「${menu.filter}」` : menu.title;
+  const header = menu.filter ? `${menu.title} | filter “${menu.filter}”` : menu.title;
   const lines: DialogLine[] = [];
   const choices: DialogChoice[] = [];
   if (menu.items.length === 0) {
-    lines.push({ text: '（无匹配命令）', paint: styler.dim });
+    lines.push({ text: 'No matching commands', paint: styler.dim });
   } else {
+    const visible = menu.items.slice(start, start + rows);
+    // 标签列宽按可见项动态取：命令名（/model，6 列）和模型 ID（DeepSeek-V4-Pro-08，18 列）
+    // 长度差一倍，写死一个列宽必然在长标签上失效。上限给提示列留 HINT_MIN_COLUMNS 列，
+    // 窄终端下宁可截提示，也不让标签把提示整列挤没。
+    const widest = visible.reduce((max, item) => Math.max(max, displayWidth(item.label)), 0);
+    const labelWidth = Math.max(0, Math.min(widest, width - CHOICE_GAP - HINT_MIN_COLUMNS));
     for (let i = start; i < start + rows; i++) {
       const item = menu.items[i];
       choices.push({
         label: item.label,
         hint: item.hint,
-        labelWidth: 18,
+        labelWidth,
         selected: i === menu.index,
       });
     }
@@ -844,7 +990,7 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
     titlePaint: styler.cyan,
     lines,
     choices,
-    footer: menu.nested ? '[上下键] 选择 | [Enter] 确认 | [Esc] 返回' : '[上下键] 选择 | [Enter] 执行 | [Esc] 取消',
+    footer: menu.nested ? '[Up/Down] select | [Enter] confirm | [Esc] back' : '[Up/Down] select | [Enter] run | [Esc] cancel',
     styler,
   });
 }
@@ -852,44 +998,44 @@ function menuPanel(menu: TuiState['menu'], width: number, budget: number, styler
 function statusPanel(state: TuiState, width: number, styler: Styler): string[] {
   const pressure = state.contextWindow > 0 ? state.usage.lastPrompt / state.contextWindow : 0;
   const rows: Array<[string, string, (text: string) => string]> = [
-    ['会话', state.sessionId, (text) => text],
-    ['工作区', state.workspaceRoot, (text) => styler.dim(text)],
-    ['模型', `${state.model} (${state.api}${state.effort ? `, ${state.effort}` : ''})`, (text) => styler.bold(text)],
-    ['审批', state.approvalMode, approvalTone(state.approvalMode, styler)],
-    ['沙箱', `${state.sandboxMode} (${state.sandboxEnforcement})`, sandboxTone(state.sandboxMode, styler)],
+    ['Session', state.sessionId, (text) => text],
+    ['Workspace', state.workspaceRoot, (text) => styler.dim(text)],
+    ['Model', `${state.model} (${state.api}${state.effort ? `, ${state.effort}` : ''})`, (text) => styler.bold(text)],
+    ['Approval', state.approvalMode, approvalTone(state.approvalMode, styler)],
+    ['Sandbox', `${state.sandboxMode} (${state.sandboxEnforcement})`, sandboxTone(state.sandboxMode, styler)],
     [
-      '上下文',
+      'Context',
       state.usage.lastPrompt > 0
         ? `${progressBar(pressure, 16)} ${Math.round(pressure * 100)}% (${formatTokens(state.usage.lastPrompt)} / ${formatTokens(state.contextWindow)})`
-        : '（本轮还没调用模型）',
+        : 'No model call in this turn yet',
       pressureTone(pressure, styler),
     ],
-    ['用量', `+${formatTokens(state.usage.prompt)} / -${formatTokens(state.usage.completion)}`, (text) => styler.dim(text)],
+    ['Usage', `+${formatTokens(state.usage.prompt)} / -${formatTokens(state.usage.completion)}`, (text) => styler.dim(text)],
     [
-      '缓存',
+      'Cache hit',
       (() => {
         const hit = cacheHitRate(state.usage);
-        if (hit === undefined) return '（端点未上报缓存用量）';
+        if (hit === undefined) return 'Endpoint reports no cache usage';
         return `${Math.round(hit * 100)}% (${formatTokens(state.usage.cached)} / ${formatTokens(state.usage.prompt)})`;
       })(),
       (text) => styler.dim(text),
     ],
     [
-      'TODO',
+      'To-dos',
       state.todo.total === 0
-        ? '（空）'
+        ? '(none)'
         : `${state.todo.done}/${state.todo.total}${state.todo.current ? ` | ${state.todo.current}` : ''}`,
       state.todo.total > 0 && state.todo.done < state.todo.total
         ? (text) => styler.cyan(text)
         : (text) => styler.dim(text),
     ],
     [
-      '后台',
-      state.jobs === 0 ? '无' : `${state.jobs} 个运行中`,
+      'Jobs',
+      state.jobs === 0 ? 'none' : `${state.jobs} running`,
       state.jobs > 0 ? (text) => styler.yellow(text) : (text) => styler.dim(text),
     ],
-    ['MCP', `${state.mcpServers} 个服务 | ${state.mcpTools} 个工具`, (text) => styler.dim(text)],
-    ['计划模式', state.planMode ? 'on' : 'off', state.planMode ? (text) => styler.magenta(text) : (text) => styler.dim(text)],
+    ['MCP', `${state.mcpServers} servers | ${state.mcpTools} tools`, (text) => styler.dim(text)],
+    ['Plan mode', state.planMode ? 'on' : 'off', state.planMode ? (text) => styler.magenta(text) : (text) => styler.dim(text)],
   ];
   const budget = Math.max(8, width - 12);
   const lines: DialogLine[] = [];
@@ -901,41 +1047,99 @@ function statusPanel(state: TuiState, width: number, styler: Styler): string[] {
   }
   return renderDialog({
     width,
-    title: '状态',
+    title: 'Status',
     titlePaint: styler.cyan,
     lines,
-    footer: '[任意键] 返回',
+    footer: '[any key] back',
     styler,
   });
 }
 
 // ---------------------------------------------------------------- 滚动区
 
+/** 一步（一次 LLM 调用）里可展开的条目：思考链 + 这次调用发起的各个工具。 */
+export interface StepThinkingView {
+  text: string;
+  /** 思考已经结束（拿到权威全文）。运行中的思考会给末尾几行预览。 */
+  done?: boolean;
+  /** 思考耗时（毫秒），用于 `Thought for 1.2s`。 */
+  ms?: number;
+  /** 二级展开：思考正文是否整篇可见（默认只给一行标签或末尾几行）。 */
+  expanded?: boolean;
+}
+
+/** `onRows` 回传的行区间（相对块首行），供双击命中测试用。 */
+export interface StepBlockRows {
+  thinking?: { start: number; end: number };
+  items: Array<{ start: number; end: number } | undefined>;
+}
+
+/** 运行中的思考只预览末尾几行：开头早就读过了，「刚想到哪」才是实时信息。 */
+const THINKING_TAIL_LINES = 3;
+
+/** 思考行的标签，照 grok-build：运行中 `Thinking…`，结束后 `Thought for 1.2s`。 */
+function thinkingLabel(thinking: StepThinkingView): string {
+  if (thinking.done !== true) return 'Thinking…';
+  const ms = thinking.ms ?? 0;
+  return ms > 0 ? `Thought for ${formatDuration(ms)}` : 'Thought';
+}
+
 /**
- * 工具块：默认只显示聚合信息与每个工具的一行摘要，展开后再显示工具结果正文。
+ * 一步的执行块：三级展开。
  *
- * 工具调用属于模型执行过程，不应和回答正文抢同一层级：块头与摘要统一缩进 2 格，
- * 结果正文再缩进 2 格。这样折叠态足够紧凑，展开态又能保持清晰的父子关系。
+ *   0 折叠   —— 只有块头（`Read 2 files, Ran 1 command | 1 failed | 8.9s`）
+ *   1 展开块 —— 块头 + 思考链一行 + 每个工具一行
+ *   2 展开行 —— 该行自己的正文（思考全文 / 工具结果）
+ *
+ * 汇总标签照 grok-build 的写法：按动词分桶、桶内去重（`Read 2 files` 是「读了两个文件」，
+ * 不是「调了两次 read_file」）；思考链单列一行、**不计入**工具统计。
+ *
+ * `onRows` 回传每行在块内的行区间，供双击命中测试用——行高随折行变化，调用方不能靠数行数猜。
  */
-export function renderToolBlock(
+export function renderStepBlock(
+  thinking: StepThinkingView | undefined,
   items: readonly ToolCallView[],
   options: ViewOptions,
   expanded = false,
+  onRows?: (rows: StepBlockRows) => void,
 ): string[] {
-  if (items.length === 0) return [];
+  const hasThinking = thinking !== undefined && thinking.text.trim() !== '';
+  if (!hasThinking && items.length === 0) return [];
   const { width, styler } = options;
   const out: string[] = [];
   const total = items.reduce((sum, item) => sum + (item.durationMs ?? 0), 0);
   const failed = items.filter((item) => item.ok === false).length;
-  const parts = [`工具调用 ${items.length} 个`];
-  if (failed > 0) parts.push(`${failed} 个失败`);
+  const run = summarizeToolRun(items);
+  const parts: string[] = [];
+  if (run.label !== '') parts.push(run.label);
+  if (failed > 0) parts.push(`${failed} failed`);
   if (total > 0) parts.push(formatDuration(total));
-  parts.push(expanded ? '已展开 | 双击收起' : '已折叠 | 双击展开');
-  out.push(`  ${styler.dim(truncate(parts.join(SEPARATOR), Math.max(1, width - 2), ''))}`);
+  // 只有思考、没有工具的一步：块头就是思考的标签，不然只剩一个光秃秃的耗时。
+  if (parts.length === 0 && thinking) parts.push(thinkingLabel(thinking));
+  // 宽度不够时**先丢键位提示**，再截数据：提示是学一次就记住的东西，
+  // 而汇总标签、失败数、耗时是这一步的实情。
+  const hint = expanded ? 'double-click a line for details' : 'double-click to expand';
+  const data = parts.join(SEPARATOR);
+  const head = displayWidth(`${data}${SEPARATOR}${hint}`) <= width - 2
+    ? `${data}${SEPARATOR}${hint}`
+    : truncate(data, Math.max(1, width - 2), '');
+  out.push(`  ${styler.dim(truncate(head, Math.max(1, width - 2), ''))}`);
 
-  for (const item of items) {
+  const rows: StepBlockRows = { items: [] };
+  if (!expanded) {
+    onRows?.(rows);
+    return out;
+  }
+
+  if (hasThinking && thinking) {
+    const start = out.length;
+    out.push(...thinkingLines(thinking, width, styler));
+    rows.thinking = { start, end: out.length };
+  }
+  items.forEach((item, index) => {
+    const start = out.length;
     out.push(toolSummaryLine(item, width, styler));
-    if (expanded) {
+    if (item.expanded === true) {
       out.push(...renderToolDetail(item, {
         width,
         indent: 4,
@@ -943,8 +1147,31 @@ export function renderToolBlock(
         styler,
       }));
     }
-  }
+    rows.items[index] = { start, end: out.length };
+  });
+  onRows?.(rows);
   return out;
+}
+
+/**
+ * 思考链行，三种形态：
+ *
+ * - 运行中：`Thinking…` + 末尾 3 行——实时反馈只需要「还在动、刚想到哪」；
+ * - 已结束：一行 `Thought for 1.2s`——几十行推理不该在历史里占版面；
+ * - 展开：整篇正文，供真要读推理过程的场合。
+ */
+function thinkingLines(thinking: StepThinkingView, width: number, styler: Styler): string[] {
+  const indent = '  ';
+  const body = wrap(thinking.text, Math.max(8, width - indent.length * 2));
+  const label = `${indent}${styler.dim(thinkingLabel(thinking))}`;
+  if (thinking.expanded === true) {
+    return [label, ...body.map((line) => `${indent}${indent}${styler.dim(line)}`)];
+  }
+  if (thinking.done !== true) {
+    const tail = body.slice(-THINKING_TAIL_LINES);
+    return [label, ...tail.map((line) => `${indent}${indent}${styler.dim(line)}`)];
+  }
+  return [label];
 }
 
 /** 摘要行：工具名（按成败着色）+ 摘要左对齐，耗时右对齐成一列。 */
@@ -963,6 +1190,17 @@ function toolSummaryLine(item: ToolCallView, width: number, styler: Styler): str
   return `${' '.repeat(indent)}${toolTone(item.ok, styler)(head)}${tail}`;
 }
 
+/**
+ * 表格边框字符集。
+ *
+ * 默认 Unicode 制表符（观感接近现代终端工具）。制表符属东亚歧义宽度字符：本项目按 1 列
+ * 计量，若终端把它渲染成 2 列，整帧会向右溢出——设 SPH_TABLE_BORDER=ascii 退回 `+--+` 边框。
+ */
+function tableBorder(): 'ascii' | 'box' {
+  const raw = (process.env.SPH_TABLE_BORDER ?? '').trim().toLowerCase();
+  return raw === 'ascii' || raw === 'plain' ? 'ascii' : 'box';
+}
+
 /** 已提交条目 → 滚动区行。写进终端历史后就不再变，因此可以放心着色。 */
 export function renderEntry(entry: TranscriptEntry, options: ViewOptions): string[] {
   const { width, styler } = options;
@@ -973,20 +1211,27 @@ export function renderEntry(entry: TranscriptEntry, options: ViewOptions): strin
       return prefixed('> ', entry.text, width, (t) => styler.cyan(t), (t) => highlightMentions(t, styler));
     case 'assistant':
       // 给模型输出留出稳定的视觉层级，同时让 markdown 渲染器按缩进后的可用宽度排版。
-      return renderMarkdown(entry.text, { width, indent: 2, styler, highlighter: createHighlighter });
+      return renderMarkdown(entry.text, {
+        width,
+        indent: 2,
+        styler,
+        highlighter: createHighlighter,
+        tableBorder: tableBorder(),
+      });
     case 'thinking': {
       if (!entry.text) return [];
       const body = wrap(entry.text, Math.max(8, width - 2));
       if (body.length === 0) return [];
-      const head = `${body[0]}${body.length > 1 ? ` ...（共 ${body.length} 行）` : ''}`;
-      const lines = [styler.dim(`[思考] ${truncate(head, Math.max(8, width - 6), '')}`)];
+      const head = `${body[0]}${body.length > 1 ? ` ... (${body.length} lines)` : ''}`;
+      const lines = [styler.dim(`[thinking] ${truncate(head, Math.max(8, width - 6), '')}`)];
       if (entry.collapsed === false) {
         for (const line of body.slice(1)) lines.push(styler.dim(`  ${line}`));
       }
       return lines;
     }
     case 'tool':
-      return renderToolBlock([toolCallOf(entry)], options, entry.collapsed === false);
+      // 回放的单条工具条目：没有思考链，也谈不上聚合，直接当作只有一个工具的一步。
+      return renderStepBlock(undefined, [toolCallOf(entry)], options, entry.collapsed === false);
     case 'notice':
       return wrap(entry.text, Math.max(8, width - 4)).map((line, index) =>
         noticePaint(entry.level ?? 'info', styler)(`${index === 0 ? `${noticeMark(entry.level ?? 'info')} ` : '  '}${line}`),
@@ -1085,13 +1330,13 @@ export function renderBanner(state: TuiState, options: ViewOptions): string[] {
       [
         { text: state.model, paint: (text) => styler.bold(text), priority: 4 },
         { text: state.api, paint: (text) => styler.dim(text), priority: 3 },
-        { text: `审批 ${state.approvalMode}`, paint: approvalTone(state.approvalMode, styler), priority: 2 },
-        { text: `沙箱 ${state.sandboxMode}`, paint: sandboxTone(state.sandboxMode, styler), priority: 1 },
+        { text: `approval ${state.approvalMode}`, paint: approvalTone(state.approvalMode, styler), priority: 2 },
+        { text: `sandbox ${state.sandboxMode}`, paint: sandboxTone(state.sandboxMode, styler), priority: 1 },
       ],
       width,
       styler,
     ),
     '',
-    styler.dim(truncate('Enter 发送 | Ctrl+J 换行 | / 命令菜单 | Ctrl+K 全部操作 | /status 状态 | /help 帮助', width, '')),
+    styler.dim(truncate('Enter send | Ctrl+J newline | / commands | Ctrl+K all actions | /status | /help', width, '')),
   ];
 }

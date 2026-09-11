@@ -22,13 +22,16 @@ import { createLlmClassifier } from '../approval/auto.js';
 import { APPROVAL_MODES, type ApprovalMode, type ApprovalRequest } from '../approval/policy.js';
 import { updateConfigFile } from '../config/save.js';
 import type { ApiProtocol } from '../config/load.js';
-import { REASONING_EFFORTS, type LlmClient, type ReasoningEffort } from '../llm/openai.js';
+import { REASONING_EFFORTS, type LlmClient, type ReasoningEffort, type TokenUsage } from '../llm/openai.js';
+import { MODEL_CACHE_TTL_MS, readModelCache, readModelMeta, writeModelCache, writeModelMeta } from '../llm/model-cache.js';
 import type { McpHub } from '../mcp/hub.js';
 import type { JobBoard } from '../runtime/jobs.js';
 import type { PersistentShell } from '../runtime/persistent-shell.js';
+import { SpillStore } from '../runtime/spill.js';
 import type { TodoList } from '../runtime/todos.js';
 import type { SandboxHandle } from '../sandbox/open.js';
 import { exportJson, exportMarkdown } from '../session/export.js';
+import { foldSessionState, sessionEventData, type FoldedSessionState, type SessionFailure } from '../session/fold.js';
 import { createSession, JsonlSession, listSessions, setCurrentSession, type SessionInfo } from '../session/store.js';
 import { colorDepth, colorEnabled, createStyler, truncate, type Styler } from './ansi.js';
 import { InteractiveApprover } from './approver.js';
@@ -38,11 +41,12 @@ import {
 } from './editor.js';
 import { KeyParser, type Key } from './keys.js';
 import { readGitBranch } from './git.js';
-import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type MenuItem, type NoticeLevel, type TranscriptEntry, type TuiState } from './state.js';
+import { applyAgentEvent, createState, todoSummary, transcriptFromMessages, type FormPrompt, type MenuItem, type NoticeLevel, type TranscriptEntry, type TuiState } from './state.js';
 import { InputQueue, Terminal } from './terminal.js';
 import {
-  anchorScroll, composeFrame, maxScroll, renderEntry, renderHeader, renderLive,
-  renderToolBlock, selectionText, toolCallOf, type BodyRegion, type ToolBlockRegion, type UserPromptRegion, type ViewOptions,
+  anchorScroll, composeFrame, maxScroll, renderEntry, renderHeader, renderLive, renderStepBlock,
+  selectionText, toolCallOf, type BodyRegion, type StepBlockRows, type StepThinkingView,
+  type ToolBlockRegion, type UserPromptRegion, type ViewOptions,
 } from './view.js';
 import { writeClipboard } from './clipboard.js';
 import type { Cell, Selection } from './state.js';
@@ -70,22 +74,34 @@ export interface TuiDeps {
   /** /model 与 /effort 改动后按新参数重建 client。 */
   makeClient(options: { model: string; api: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
   fetchModels(): Promise<readonly string[]>;
+  /** 上游模型目录的磁盘缓存路径；省略用 ~/.sph/models.json（测试可注入临时路径避免污染主目录）。 */
+  modelCachePath?: string;
+  /** CLI 显式给了 --model：启动时不被会话里记录的模型覆盖（切换会话仍然尊重会话记录）。 */
+  modelPinned?: boolean;
+  /** 压缩摘要 / auto 审批审查器专用模型（来自配置）；省略都回退主模型。 */
+  compactModel?: string;
+  reviewModel?: string;
+  /** spill 落盘根目录；省略则不做超长结果落盘（测试默认）。 */
+  spillRoot?: string;
+  /** spill 阈值（字符），0 关闭。 */
+  spillThreshold?: number;
 }
 
 const COMMAND_ITEMS: readonly MenuItem[] = [
-  { id: 'help', label: '/help', hint: '列出全部命令与快捷键' },
-  { id: 'new', label: '/new', hint: '新建会话' },
-  { id: 'sessions', label: '/sessions', hint: '浏览并切换历史会话' },
-  { id: 'status', label: '/status', hint: '查看完整状态' },
-  { id: 'plan', label: '/plan', hint: '切换计划模式（只读调研 + 计划审批）' },
-  { id: 'model', label: '/model', hint: '从上游获取模型并写入 config.toml' },
-  { id: 'effort', label: '/effort', hint: '查看 / 设置推理档位（选择写回 config.toml）' },
-  { id: 'approval', label: '/approval', hint: '查看 / 设置审批模式：ask | auto | yolo（写回 config.toml）' },
-  { id: 'todo', label: '/todo', hint: '查看任务清单' },
-  { id: 'jobs', label: '/jobs', hint: '查看后台任务' },
-  { id: 'export', label: '/export', hint: '导出当前会话（md | json）' },
-  { id: 'clear', label: '/clear', hint: '清屏' },
-  { id: 'quit', label: '/quit', hint: '退出' },
+  { id: 'help', label: '/help', hint: 'List all commands and key bindings' },
+  { id: 'new', label: '/new', hint: 'Start a new session' },
+  { id: 'sessions', label: '/sessions', hint: 'Browse and switch sessions' },
+  { id: 'status', label: '/status', hint: 'Show the full status panel' },
+  { id: 'plan', label: '/plan', hint: 'Enter or leave plan mode (read-only research, then plan review)' },
+  { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal for a long-running task' },
+  { id: 'model', label: '/model', hint: 'Fetch models from the upstream and write the choice to config.toml' },
+  { id: 'effort', label: '/effort', hint: 'View or set reasoning effort (written back to config.toml)' },
+  { id: 'approval', label: '/approval', hint: 'View or set the approval mode: ask | auto | yolo (written back to config.toml)' },
+  { id: 'todo', label: '/todo', hint: 'Show the to-do list' },
+  { id: 'jobs', label: '/jobs', hint: 'Show background jobs' },
+  { id: 'export', label: '/export', hint: 'Export this session (md | json)' },
+  { id: 'clear', label: '/clear', hint: 'Clear the conversation view' },
+  { id: 'quit', label: '/quit', hint: 'Quit' },
 ];
 
 /** 命令名集合：由菜单项派生，避免菜单与解析表漂移。 */
@@ -106,7 +122,8 @@ interface OptionEntry {
  * 动态列表（/sessions、/switch 从会话目录读）或多步向导（/model）。
  */
 interface ModelWizardDraft {
-  stage: 'select' | 'context' | 'max-tokens' | 'confirm';
+  /** select = 选模型；context = 表单里填上下文窗口与输出上限；confirm = 等用户敲 y 写盘。 */
+  stage: 'select' | 'context' | 'confirm';
   models: readonly string[];
   model?: string;
   contextWindow?: number;
@@ -114,43 +131,45 @@ interface ModelWizardDraft {
 }
 
 const DEFAULT_CONTEXT_WINDOW = 256_000;
-// 与配置示例及协议默认约定保持一致；用户仍可在第三步覆盖它。
+// 与配置示例及协议默认约定保持一致；用户仍可在第二步的表单里覆盖它。
 const DEFAULT_MAX_TOKENS = 8_192;
 
 const OPTION_TABLE: Readonly<Record<string, readonly OptionEntry[]>> = {
   approval: [
-    { value: 'ask', hint: '每个受审工具都问你' },
-    { value: 'auto', hint: '先过 LLM 审查器，否决时升级到你' },
-    { value: 'yolo', hint: '全部放行，不再询问（危险）' },
+    { value: 'ask', hint: 'Ask you for every reviewed tool' },
+    { value: 'auto', hint: 'LLM reviewer first; escalates to you when it denies' },
+    { value: 'yolo', hint: 'Allow everything without asking (dangerous)' },
   ],
   effort: REASONING_EFFORTS.map((level) => ({
     value: level,
-    hint: level === 'off' ? '不上报推理档位' : `${level} 推理档位`,
+    hint: level === 'off' ? 'Do not send an effort level' : `${level} reasoning effort`,
   })),
   export: [
-    { value: 'md', hint: '导出为 Markdown' },
-    { value: 'json', hint: '导出为原始 JSON' },
+    { value: 'md', hint: 'Export as Markdown' },
+    { value: 'json', hint: 'Export as raw JSON' },
   ],
 };
 
 const HELP_LINES = [
-  '命令',
+  'Commands',
   ...COMMAND_ITEMS.map((item) => `  ${item.label.padEnd(16)}${item.hint}`),
-  '  /switch <id>    切换到指定会话（支持 id 前缀）',
+  '  /switch <id>    Switch to a session (an id prefix works)',
   '',
-  '快捷键：Enter 发送 | / 打开命令菜单 | Ctrl+K 全部操作 | 上下键 历史 | Ctrl+L 清空视图',
-  '        滚轮 / PgUp / PgDn 回看历史（Esc 回到最新） | Esc 中断本轮 / 取消浮层',
-  '        Ctrl+C 中断本轮（空闲时清空输入），连按两次才退出 | Ctrl+D 直接退出',
+  'Keys: Enter send | / command menu | Ctrl+K all actions | Up/Down history | Ctrl+L clear view',
+  '      Wheel / PgUp / PgDn scroll back (Esc returns to the latest) | Esc abort turn / close overlay',
+  '      Ctrl+C abort turn (clears the input when idle), press twice to quit | Ctrl+D quit',
   '',
-  '全屏界面没有终端自身的滚动条，回看用滚轮或 PgUp/PgDn。',
-  // 下面这条已经过时：拖选现在由程序自己实现（按下 → 拖动 → 松开即复制），
-  // Shift 只是「想要终端原生那份」时的附加选项。
-  '鼠标拖选由程序自己实现：按住左键拖动、松开即复制（走 OSC 52，失败则回退系统命令）。',
-  '双击对话流中的工具调用摘要，可展开或收起工具结果。',
-  '想拿回终端原生拖选设 SPH_MOUSE=0（代价是滚轮失效）。',
+  'The full-screen UI has no terminal scrollbar; scroll back with the wheel or PgUp/PgDn.',
+  // 拖选由程序自己实现，手势刻意对齐终端原生：左键拖动选择（松手后高亮仍在），右键复制。
+  // 之所以不在松手时复制：那样一段半成品会瞬间覆盖剪贴板，用户既没机会反悔也不知道覆盖了什么。
+  'Selecting is implemented in the app: drag with the left button, release and the highlight stays,',
+  'then right-click to copy (OSC 52 first, platform command as fallback).',
+  'Click empty space or press any key to clear the selection.',
+  'Double-click a tool block to list its calls, then a single call to show its output.',
+  "Set SPH_MOUSE=0 to get the terminal's own drag-selection back (the wheel stops working).",
   '',
-  '界面符号只用 ASCII：东亚歧义宽度字符（中点、省略号、箭头）在部分终端按 2 列渲染，',
-  '会让底部活动区的宽度计算失真并吃掉一行已提交内容，因此一律不用。',
+  'Lines are measured with CJK-aware width. Table borders use box-drawing characters by default;',
+  'set SPH_TABLE_BORDER=ascii if your terminal renders them double-width and the frame drifts.',
 ];
 
 /** /sessions 回放与首屏最多写多少条，避免一次刷屏几十屏。 */
@@ -174,6 +193,8 @@ const PAGE_OVERLAP = 1;
 const WHEEL_STEP = 3;
 /** 工具块双击展开/收起的时间窗口；与终端常见双击节奏一致。 */
 const DOUBLE_CLICK_MS = 500;
+/** SGR 鼠标的按键码：0 左、1 中、2 右。与 keys.ts 里剥掉修饰位后的 code 对齐。 */
+const RIGHT_BUTTON = 2;
 /**
  * 「连按两次 Ctrl+C 退出」的判定窗口。
  *
@@ -229,8 +250,13 @@ interface BodyBlock {
 
 interface ToolBlockState {
   id: string;
-  items: readonly ToolCallView[];
+  items: ToolCallView[];
+  /** 这一步的思考链（推理模型/扩展思考才有）。 */
+  thinking?: StepThinkingView;
+  /** 一级展开：是否显示思考行与各调用行。 */
   expanded: boolean;
+  /** 上一次渲染时每行占的行区间（相对块首行），双击时用它判命中。 */
+  itemRows?: StepBlockRows;
 }
 
 interface ToolBlockHit extends ToolBlockRegion {
@@ -262,8 +288,14 @@ class TuiApp {
   private maxTokens?: number;
   private api: ApiProtocol;
   private effort?: ReasoningEffort;
+  private readonly compactClient?: LlmClient;
+  private readonly reviewClient?: LlmClient;
   private approvalModeValue: ApprovalMode;
   private planMode = false;
+  /** 跨轮次任务目标（/goal 设置），落盘为 goal 事件。 */
+  private goal?: string;
+  /** 最近一次工具失败（渲染层从 tool_end 事件同步），随下一轮注入提示词。 */
+  private lastFailure?: SessionFailure;
   private running = false;
   private abort?: AbortController;
   /** 本轮发送的用户消息是否仍作为对话流顶部锚点；用户主动翻页后解除。 */
@@ -280,9 +312,13 @@ class TuiApp {
   /** 上一帧历史视口的高度，PgUp/PgDn 按它翻页。 */
   private lastBodyRows = 10;
   /** 上一帧对话流在屏幕上的真实行区间，用于判断滚轮是否落在对话流内。 */
-  private lastBodyRegion: BodyRegion = { top: 0, rows: 0 };
+  private lastBodyRegion: BodyRegion = { top: 0, rows: 0, contentTop: 0, contentIndex: 0, contentRows: 0 };
   /** 上一帧画出的行。选区取文本要用——选区存的是屏幕坐标，只能对着最终帧取。 */
-  private lastFrameLines: readonly string[] = [];
+  /**
+   * 上一帧的正文行。选区存的是**内容坐标**（正文行下标），复制时直接按它取文本，
+   * 不去反查屏幕——这样内容滚出视口也照样能复制到。
+   */
+  private lastBody: readonly string[] = [];
   /** 工具块双击判定只记录屏幕行，同一行短时间再次按下才切换折叠状态。 */
   private lastClick?: { row: number; at: number; id: string };
   /** 上一帧历史的总行数，用于滚动锚定（视口上方内容长高时同步推偏移）。 */
@@ -305,6 +341,13 @@ class TuiApp {
   private escTimer?: NodeJS.Timeout;
   private menuOptions?: { parent: string; entries: readonly OptionEntry[] };
   private modelWizard?: ModelWizardDraft;
+  /**
+   * 上游模型目录（内存缓存）。启动时先用磁盘缓存填上、再后台刷新一次，因此 `/model` 通常
+   * 不需要等网络；`fetchedAt` 用来判断这份列表是不是已经过期、要不要顺手再刷。
+   */
+  private modelCatalog?: { models: readonly string[]; fetchedAt: number };
+  /** 进行中的拉取。并发调用（启动预热 + 用户立刻敲 /model）共用同一次请求。 */
+  private catalogPending?: Promise<readonly string[]>;
   private sessions: SessionInfo[] = [];
   private lastSize = { width: 0, height: 0 };
 
@@ -317,11 +360,22 @@ class TuiApp {
     this.effort = deps.effort;
     this.approvalModeValue = deps.approvalMode;
     this.client = deps.makeClient({ model: deps.model, api: deps.api, effort: deps.effort, maxTokens: deps.maxTokens });
+    // 辅助模型固定一次即可：它们只由配置决定，运行时的 /model 改的是主模型。
+    this.compactClient = deps.compactModel === undefined
+      ? undefined
+      : deps.makeClient({ model: deps.compactModel, api: deps.api, effort: deps.effort, maxTokens: deps.maxTokens });
+    this.reviewClient = deps.reviewModel === undefined
+      ? undefined
+      : deps.makeClient({ model: deps.reviewModel, api: deps.api, effort: deps.effort, maxTokens: deps.maxTokens });
     this.styler = createStyler(colorEnabled(), colorDepth());
     const mouse = mouseEnabled();
     this.terminal = new Terminal((text) => this.feed(text), mouse);
     // 分类器按需构造：/model 换模型后审查器要跟着用新 client，闭包不能固化旧实例。
-    this.approver = new InteractiveApprover(this, (request) => createLlmClassifier(this.client)(request));
+    // 配置了 review_model 时审查器始终用它——这是「便宜模型跑杂活」最直接的落点。
+    this.approver = new InteractiveApprover(this, (request) =>
+      createLlmClassifier(this.reviewClient ?? this.client, {
+        onUsage: (usage) => this.recordAuxUsage(usage, 'review'),
+      })(request));
     this.state = createState({
       model: deps.model,
       api: deps.api,
@@ -336,6 +390,82 @@ class TuiApp {
       mcpTools: deps.mcp.listTools().length,
       mouse,
     });
+    // 恢复上次会话留下的状态（todo / plan / 模型 / 目标）。用 events 折叠而不是另存状态文件：
+    // 会话本来就是 append-only 日志，状态是它的投影，两边不会漂移。
+    const restored = this.restoreSessionState({ overrideModel: deps.modelPinned !== true });
+    if (restored.length > 0) this.notify(`Restored from the session: ${restored.join(', ')}`);
+  }
+
+  /**
+   * 用会话事件折叠出的状态覆盖进程内状态，返回恢复了哪些东西（供提示）。
+   *
+   * plan 模式恢复后**必须可见**：它会削减可用工具，静默恢复等于让用户以为工具“坏了”。
+   * 折叠失败只当没有状态——恢复是增益，不该成为启动的前置条件。
+   */
+  private restoreSessionState(options: { overrideModel: boolean }): string[] {
+    let folded: FoldedSessionState;
+    try {
+      folded = foldSessionState(this.session.readAll());
+    } catch {
+      return [];
+    }
+    // 先清空再按事件重建：切到一个没有 todo 事件的会话时，上一段的清单不该留着。
+    this.clearSessionState();
+    const notes: string[] = [];
+    if (folded.todos.length > 0) {
+      this.deps.todos.replace(folded.todos);
+      notes.push(`${folded.todos.length} to-dos`);
+    }
+    if (folded.planMode) {
+      this.setPlan(true, false);
+      notes.push('plan mode (/plan to leave)');
+    }
+    if (folded.goal) {
+      this.goal = folded.goal;
+      notes.push('goal');
+    }
+    this.lastFailure = folded.failures.at(-1);
+    if (options.overrideModel && folded.model && folded.model !== this.model) {
+      this.model = folded.model;
+      this.contextWindow = folded.contextWindow ?? this.contextWindow;
+      this.maxTokens = folded.maxTokens ?? this.maxTokens;
+      this.client = this.deps.makeClient({
+        model: this.model,
+        api: this.api,
+        effort: this.effort,
+        maxTokens: this.maxTokens,
+      });
+      this.state.model = this.model;
+      this.state.contextWindow = this.contextWindow;
+      notes.push(`model ${this.model}`);
+    }
+    return notes;
+  }
+
+  /** 清空全部会话级状态（新会话、切换会话、折叠前都要走这里）。 */
+  private clearSessionState(): void {
+    this.deps.todos.replace([]);
+    this.goal = undefined;
+    this.lastFailure = undefined;
+    this.setPlan(false, false);
+  }
+
+  /** 事件落盘；失败只影响「下次能不能恢复」，不打断当前交互。 */
+  private appendEvent(kind: string, data: Record<string, unknown>): boolean {
+    try {
+      this.session.append({ type: 'event', ts: new Date().toISOString(), kind, data });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 辅助调用（压缩摘要 / 审批审查）的用量落盘。
+   * 刻意不发给渲染层：状态行的上下文占用必须只反映主请求，否则审查器会把水位推高。
+   */
+  private recordAuxUsage(usage: TokenUsage, purpose: string): void {
+    this.appendEvent('usage', { ...usage, purpose });
   }
 
   // ---------------------------------------------------------------- 生命周期
@@ -347,6 +477,7 @@ class TuiApp {
     try {
       // 首屏不再往对话流里塞横幅：本次会话的参数（模型/协议/审批/沙箱）与键位提示
       // 都已在标题栏与状态栏里，横幅只会白占几行、还得多按几次 PgUp 才能翻过去。
+      this.warmModelCatalog();
       this.render();
       for (;;) {
         const key = await this.input.next();
@@ -378,14 +509,14 @@ class TuiApp {
     }
     if (this.state.phase === 'running') {
       this.abortTurn();
-      this.notify('已中断本轮 · 再按一次 Ctrl+C 退出');
+      this.notify('Turn aborted · press Ctrl+C again to quit');
       this.render();
       return;
     }
     // 空闲：按终端惯例清掉输入行；本来就是空的就只给提示。
     const hadText = this.state.editor.text !== '';
     if (hadText) this.state.editor = emptyEditor();
-    this.notify(hadText ? '已清空输入 · 再按一次 Ctrl+C 退出' : '再按一次 Ctrl+C 退出');
+    this.notify(hadText ? 'Input cleared · press Ctrl+C again to quit' : 'Press Ctrl+C again to quit');
     this.render();
   }
 
@@ -421,7 +552,9 @@ class TuiApp {
     // 鼠标按键：交给应用内选区，绝不能落进文本输入（那会把协议字节写进输入行）。
     if (key.kind === 'mouse') return this.handleMouseKey(key);
     this.lastClick = undefined;
-    this.clearSelection();
+    // 滚动不清选区：选区存的是内容坐标，视口移动不会让它错位（原生终端也保留）。
+    const scrolling = key.kind === 'pageup' || key.kind === 'pagedown' || key.kind === 'wheel';
+    if (!scrolling) this.clearSelection();
     if (this.state.prompt) return this.handlePromptKey(key);
     if (this.state.phase === 'menu') return this.handleMenuKey(key);
     if (this.state.phase === 'status') {
@@ -480,17 +613,26 @@ class TuiApp {
   }
 
   /**
-   * 鼠标按键：按下起选区、拖动改终点、松开即复制（copy-on-select）。
+   * 鼠标按键：左键拖动选择，**右键才复制**（模拟终端原生的拖选手势）。
    *
-   * 与 opencode 一致（它的 `onMouseUp → Selection.copy`）：拖完松手内容就已经在剪贴板里，
-   * 不需要再按 Ctrl+C——终端里 Ctrl+C 是「中断当前任务」的惯例，抢过来做复制会更危险。
+   * 与旧实现的唯一区别是「什么时候复制」：以前是 copy-on-select（松手即入剪贴板），现在松手
+   * 只结束选择、高亮留在屏幕上，右键才是那个明确的「就它了」。好处是选多了还能接着调——
+   * 松手瞬间就把一段半成品塞进剪贴板，用户既没机会反悔也不知道自己覆盖了什么。
+   *
+   * 中键在多数终端是粘贴、右键各家语义不一；这里只把右键定义成复制，中键不参与。
    * 选中期间不做任何别的事：不滚屏、不改输入行、不切 phase。
    */
   private handleMouseKey(key: Extract<Key, { kind: 'mouse' }>): void {
-    // 只认左键：中键在多数终端是粘贴、右键各家语义不一，都不参与选区。
-    if (key.button !== 0) return;
-    const cell: Cell = { row: Math.max(0, key.row - 1), col: Math.max(0, key.col - 1) };
-    const current = this.state.selection;
+    // 右键 = 复制。只在按下沿处理一次（终端还会补一个释放报文，那一个不用管）。
+    if (key.button === RIGHT_BUTTON) {
+      if (key.release || !this.state.selection) return;
+      void this.copySelection(this.state.selection);
+      return;
+    }
+    if (key.button !== 0) return; // 其余按键（中键等）不参与选区
+
+    const row = Math.max(0, key.row - 1);
+    const col = Math.max(0, key.col - 1);
 
     if (!key.release && !key.motion) {
       const now = Date.now();
@@ -498,32 +640,59 @@ class TuiApp {
       if (
         previous !== undefined
         && now - previous.at <= DOUBLE_CLICK_MS
-        && previous.row === cell.row
-        && previous.id === this.toolBlockAtScreenRow(cell.row)
-        && this.toggleToolBlockAt(cell.row)
+        && previous.row === row
+        && previous.id === this.toolBlockAtScreenRow(row)
+        && this.toggleToolBlockAt(row)
       ) {
         this.lastClick = undefined;
         return;
       }
-      const toolBlockId = this.toolBlockAtScreenRow(cell.row);
-      this.lastClick = toolBlockId === undefined ? undefined : { row: cell.row, at: now, id: toolBlockId };
+      const toolBlockId = this.toolBlockAtScreenRow(row);
+      this.lastClick = toolBlockId === undefined ? undefined : { row, at: now, id: toolBlockId };
     }
 
     if (key.release) {
+      const current = this.state.selection;
       if (!current) return;
-      this.state.selection = undefined;
-      // 单击（按下与松开同格）不算选区：既没有可复制的内容，也不该去动剪贴板。
-      const empty = current.anchor.row === current.head.row && current.anchor.col === current.head.col;
-      if (!empty) this.lastClick = undefined;
-      if (empty) this.render();
-      else void this.copySelection(current);
+      const cell = this.cellAt(row, col);
+      // 单击（按下与松开落在同一格）按终端惯例取消选择；拖动之后松手则**保留高亮**等右键。
+      // 松手落在正文区外（拖出去了）不算单击——那明显是一次拖动。
+      const empty = cell !== undefined
+        && current.anchor.row === cell.row
+        && current.anchor.col === cell.col;
+      if (empty) {
+        this.state.selection = undefined;
+        this.render();
+      }
       return;
     }
-    if (key.motion) this.lastClick = undefined;
-    // 只有「拖动中」的报文才延长已有选区；单独一个 motion（起点在屏幕外）没有锚点可用。
-    if (key.motion && !current) return;
-    this.state.selection = key.motion && current ? { ...current, head: cell } : { anchor: cell, head: cell };
+
+    const cell = this.cellAt(row, col);
+    if (cell === undefined) {
+      // 正文之外（标题栏 / 输入区 / 状态栏 / 补白）：不在这里起选区。
+      // 落在这儿的单击顺手取消旧选区，等同终端里「点空白处取消选择」。
+      if (!key.motion) this.clearSelection();
+      return;
+    }
+    if (key.motion && !this.state.selection) return; // 起点在正文外的拖动不做选择
+    this.state.selection = key.motion
+      ? { ...this.state.selection!, head: cell }
+      : { anchor: cell, head: cell };
     this.render();
+  }
+
+  /**
+   * 屏幕坐标 → 正文内容坐标。落在正文内容之外返回 undefined。
+   *
+   * 拖到边缘之外时返回 undefined，调用方因此不会更新 head —— 效果就是「停在最后一行/列」，
+   * 和终端里把鼠标拖出窗口一样。
+   */
+  private cellAt(row: number, col: number): Cell | undefined {
+    const { contentTop, contentIndex, contentRows } = this.lastBodyRegion;
+    const index = contentIndex + (row - contentTop);
+    if (row < contentTop || row >= contentTop + contentRows) return undefined;
+    if (index < 0 || index >= this.lastBody.length) return undefined;
+    return { row: index, col };
   }
 
   /** 查找鼠标所在的工具块；工具块命中区只来自上一帧，和选区一样不跨帧猜测。 */
@@ -531,14 +700,31 @@ class TuiApp {
     return this.lastFrameToolBlocks.find((region) => row >= region.top && row < region.bottom)?.id;
   }
 
-  /** 双击同一工具块时切换显示模式，并保留当前滚动锚点。 */
+  /** 双击：块头切换一级展开，落在某条调用行上则切换那一条的详情。 */
   private toggleToolBlockAt(row: number): boolean {
     const id = this.toolBlockAtScreenRow(row);
     if (id === undefined) return false;
     const hit = this.lastToolBlocks.find((region) => region.id === id);
     if (!hit) return false;
     if (hit.block.toolBlock) {
-      hit.block.toolBlock.expanded = !hit.block.toolBlock.expanded;
+      const state = hit.block.toolBlock;
+      // itemRows 是**内容坐标**（见 bodyLines），屏幕行必须先换算回内容行——
+      // 否则回看一段历史之后，双击会打中错误的那一条。
+      const body = this.lastBodyRegion;
+      const offset = body.contentIndex + (row - body.contentTop) - hit.start;
+      const rows = state.itemRows;
+      const thinkingRow = rows?.thinking;
+      if (state.thinking && thinkingRow && offset >= thinkingRow.start && offset < thinkingRow.end) {
+        state.thinking.expanded = state.thinking.expanded !== true;
+      } else {
+        const index = (rows?.items ?? []).findIndex(
+          (span) => span !== undefined && offset >= span.start && offset < span.end,
+        );
+        const item = index >= 0 ? state.items[index] : undefined;
+        if (item) item.expanded = item.expanded !== true;
+        // 落在块头（或已折叠的块里任意一行）上：切换整块的一级展开。
+        else state.expanded = !state.expanded;
+      }
     } else if (hit.block.entry?.kind === 'tool') {
       hit.block.entry.collapsed = hit.block.entry.collapsed === false;
     } else {
@@ -554,23 +740,33 @@ class TuiApp {
     return true;
   }
 
-  /** 敲键、滚动都会让屏幕内容与选区的屏幕坐标错位，所以一律先清掉。 */
+  /**
+   * 清掉选区。**滚动不调用它**：选区存的是内容坐标，视口上下移动不会让它错位
+   * （原生终端的行为也是「滚了选中的还是那段字」）。敲键时清，是因为敲键通常意味着
+   * 「选完了/改主意了」，而且像 Ctrl+L、提交新消息这类操作会大改正文，留着反而是隐患。
+   */
   private clearSelection(): void {
     if (!this.state.selection) return;
     this.state.selection = undefined;
     this.render();
   }
 
+  /**
+   * 复制选区。文本直接取自**正文行**，不再从上一帧的屏幕上反查——选区本来就是内容坐标，
+   * 这样复制到的内容与视口位置无关（哪怕这段文字已经滚出屏幕）。
+   */
   private async copySelection(selection: Selection): Promise<void> {
-    const text = selectionText(this.lastFrameLines, selection);
-    this.render(); // 先把高亮撤掉，再去做可能耗时的剪贴板写入
+    const text = selectionText(this.lastBody, selection);
+    // 先撤高亮再写剪贴板：写可能要走原生命令（几十毫秒），高亮留着会让人以为还能再复制一次。
+    this.state.selection = undefined;
+    this.render();
     if (text === '') return;
     const result = await writeClipboard(text);
     // 提示要诚实：只有原生命令退出码 0 才算「确定写进去了」；OSC 52 是只写通道，
     // 终端支不支持我们收不到反馈，所以只能报「已发送」而不是「已复制」。
-    if (result === 'native') this.notify('已复制到剪贴板');
-    else if (result === 'osc52') this.notify('已发送复制请求（OSC 52）', 'warn');
-    else this.notify('复制失败：系统剪贴板与 OSC 52 都不可用', 'error');
+    if (result === 'native') this.notify('Copied to clipboard');
+    else if (result === 'osc52') this.notify('Copy request sent (OSC 52)', 'warn');
+    else this.notify('Copy failed: neither the system clipboard nor OSC 52 is available', 'error');
     this.render();
   }
 
@@ -697,6 +893,8 @@ class TuiApp {
       return this.render();
     }
 
+    if (prompt.kind === 'form') return this.handleFormKey(key, prompt);
+
     // plan：空输入时按 y 批准；有输入时 Enter 作为驳回意见。
     if (key.kind === 'text' && key.text.toLowerCase() === 'y' && prompt.editor.text === '') {
       return this.settlePrompt(() => prompt.resolve({ approved: true }));
@@ -710,6 +908,56 @@ class TuiApp {
     if (!next) return;
     prompt.editor = next;
     this.render();
+  }
+
+  /**
+   * 表单浮层按键。
+   *
+   * 没有按钮行：Enter 提交、Esc 取消，Tab / 上下键在字段之间循环，左右键始终是移动文本光标
+   * （输入框的直觉）。纯确认框（无字段）只剩 Enter / Esc 两个动作。
+   */
+  private handleFormKey(key: Key, prompt: FormPrompt): void {
+    const fieldCount = prompt.fields.length;
+
+    if (key.kind === 'escape' || (key.kind === 'ctrl' && key.key === 'c')) {
+      return this.settlePrompt(() => prompt.resolve(undefined));
+    }
+    if (fieldCount === 0) {
+      if (key.kind === 'enter') return this.submitForm(prompt);
+      return;
+    }
+    const slots = fieldCount;
+    const moveFocus = (delta: number): void => {
+      prompt.focus = (prompt.focus + delta + slots) % slots;
+      // 焦点一动就清掉旧报错：用户已经在改了，挂着上一条提示只会误导。
+      prompt.error = undefined;
+      this.render();
+    };
+    if (key.kind === 'tab' || key.kind === 'down') return moveFocus(1);
+    if (key.kind === 'up') return moveFocus(-1);
+    if (key.kind === 'enter') return this.submitForm(prompt);
+
+    const field = prompt.fields[Math.min(Math.max(0, prompt.focus), fieldCount - 1)];
+    const next = applyFieldKey(field.editor, key, this.composerTextWidth());
+    if (!next) return;
+    field.editor = next;
+    prompt.error = undefined;
+    this.render();
+  }
+
+  /**
+   * 提交表单：先收集各字段文本（已 trim）交给 validates 钩子，不通过就只记下错误、保持弹窗
+   * 打开，已填内容一个不丢；通过才 resolve 并关闭。
+   */
+  private submitForm(prompt: FormPrompt): void {
+    const values: Record<string, string> = {};
+    for (const field of prompt.fields) values[field.key] = field.editor.text.trim();
+    const error = prompt.validate?.(values);
+    if (error !== undefined) {
+      prompt.error = error;
+      return this.render();
+    }
+    this.settlePrompt(() => prompt.resolve(values));
   }
 
   /** 浮层收尾：先清掉引用再 resolve，避免回调里再触发一次按键路由。 */
@@ -773,14 +1021,20 @@ class TuiApp {
   /** 一级：命令列表；二级：当前命令的候选值。 */
   private menuItems(): MenuItem[] {
     if (this.modelWizard?.stage === 'select') {
-      return this.modelWizard.models.map((model) => ({ id: model, label: model, hint: '上游模型' }));
+      // 标题已经写明「选择上游模型」，每行再挂一遍同样的说明只是噪声；
+      // 只标出当前生效的模型，其余行留空，列表才能一眼扫完。
+      return this.modelWizard.models.map((model) => ({
+        id: model,
+        label: model,
+        hint: model === this.model ? 'current' : '',
+      }));
     }
     if (!this.menuOptions) return [...COMMAND_ITEMS];
     const current = this.currentOptionValue(this.menuOptions.parent);
     return this.menuOptions.entries.map((entry) => ({
       id: entry.value,
       label: entry.value,
-      hint: entry.value === current ? `${entry.hint}（当前）` : entry.hint,
+      hint: entry.value === current ? `${entry.hint} (current)` : entry.hint,
     }));
   }
 
@@ -788,7 +1042,7 @@ class TuiApp {
   private openCommandMenu(initial: string): void {
     this.menuOptions = undefined;
     this.state.editor = initial === '' ? emptyEditor() : setText(initial);
-    this.state.menu = { title: '命令', items: [], index: 0, filter: '' };
+    this.state.menu = { title: 'Commands', items: [], index: 0, filter: '' };
     this.state.phase = 'menu';
     this.syncMenuFilter();
     this.render();
@@ -801,7 +1055,7 @@ class TuiApp {
   private openOptionsMenu(parent: string, entries: readonly OptionEntry[], current?: string): void {
     this.menuOptions = { parent, entries };
     this.state.editor = emptyEditor();
-    this.state.menu = { title: `命令 | /${parent}`, items: [], index: 0, filter: '', nested: true };
+    this.state.menu = { title: `Commands | /${parent}`, items: [], index: 0, filter: '', nested: true };
     this.state.phase = 'menu';
     this.syncMenuFilter();
     const at = current === undefined ? -1 : entries.findIndex((entry) => entry.value === current);
@@ -836,7 +1090,7 @@ class TuiApp {
 
     if (this.modelWizard?.stage === 'select') {
       if (!item) {
-        this.notify('请从上游返回的模型列表中选择', 'warn');
+        this.notify('Select a model from the upstream list', 'warn');
         this.render();
         return;
       }
@@ -861,7 +1115,7 @@ class TuiApp {
         this.executeCommand(parsed.name, parsed.args, true);
         return;
       }
-      this.notify(typed === '' ? '没有可执行的命令' : `未知命令：${typed}`, 'warn');
+      this.notify(typed === '' ? 'No command to run' : `Unknown command: ${typed}`, 'warn');
       this.render();
       return;
     }
@@ -892,7 +1146,7 @@ class TuiApp {
   private submitSlash(text: string): void {
     const parsed = parseSlashInput(text);
     if (!parsed || !COMMAND_NAMES.has(parsed.name)) {
-      this.notify(`未知命令：${text}（输入 / 查看全部命令）`, 'warn');
+      this.notify(`Unknown command: ${text} (type / to see all commands)`, 'warn');
       this.render();
       return;
     }
@@ -937,7 +1191,8 @@ class TuiApp {
       case 'new':
         this.session = createSession(this.deps.sessionDir, this.deps.workspaceRoot);
         this.state.sessionId = this.session.id;
-        this.commit((width) => [truncate(`== 新会话 ${this.session.id} ==`, width, '')]);
+        this.clearSessionState();
+        this.commit((width) => [truncate(`== New session ${this.session.id} ==`, width, '')]);
         break;
       case 'sessions':
         void this.openSessionsMenu();
@@ -954,11 +1209,14 @@ class TuiApp {
         break;
       case 'plan':
         this.setPlan(!this.planMode);
-        this.notify(`计划模式：${this.planMode ? 'on（仅只读工具，计划经你审批后才执行）' : 'off'}`);
+        this.notify(`Plan mode ${this.planMode ? 'on (read-only tools; the plan runs only after you approve it)' : 'off'} · saved to the session, restored on restart`);
+        break;
+      case 'goal':
+        this.setGoal(args);
         break;
       case 'model':
         if (args.trim() !== '') {
-          this.notify('/model 不接受模型 ID，请直接输入 /model 从上游模型列表选择', 'warn');
+          this.notify('/model does not take a model ID — run /model and pick from the upstream list', 'warn');
           break;
         }
         void this.openModelWizard();
@@ -998,7 +1256,7 @@ class TuiApp {
         this.quit();
         return;
       default:
-        this.notify(`未知命令：/${name}`, 'warn');
+        this.notify(`Unknown command: /${name}`, 'warn');
         break;
     }
     this.render();
@@ -1008,12 +1266,12 @@ class TuiApp {
     try {
       this.sessions = await listSessions(this.deps.sessionDir);
     } catch (error) {
-      this.notify(`读取会话失败：${message(error)}`, 'error');
+      this.notify(`Could not read sessions: ${message(error)}`, 'error');
       this.render();
       return;
     }
     if (this.sessions.length === 0) {
-      this.notify('当前工作区还没有历史会话');
+      this.notify('No sessions yet in this workspace');
       this.render();
       return;
     }
@@ -1021,7 +1279,7 @@ class TuiApp {
       'sessions',
       this.sessions.map((info) => ({
         value: info.id,
-        hint: `消息 ${info.messages} | ${info.preview || '(空会话)'}`,
+        hint: `${info.messages} messages | ${info.preview || '(empty session)'}`,
       })),
       this.state.sessionId,
     );
@@ -1031,16 +1289,18 @@ class TuiApp {
   private switchSession(id: string): void {
     const file = join(this.deps.sessionDir, `${id}.jsonl`);
     if (!existsSync(file)) {
-      this.notify(`会话文件不存在：${id}`, 'error');
+      this.notify(`Session file not found: ${id}`, 'error');
       this.render();
       return;
     }
     setCurrentSession(this.deps.sessionDir, id, this.deps.workspaceRoot);
     this.session = new JsonlSession(this.deps.sessionDir, id);
     this.state.sessionId = id;
+    const restored = this.restoreSessionState({ overrideModel: true });
     const entries = transcriptFromMessages(this.session.readMessages());
     const shown = entries.slice(-REPLAY_LIMIT);
-    const head = `== 已切换到会话 ${id} | 历史 ${entries.length} 条${shown.length < entries.length ? `，仅显示最近 ${shown.length} 条` : ''} ==`;
+    const restoredNote = restored.length > 0 ? ` | restored: ${restored.join(', ')}` : '';
+    const head = `== Switched to session ${id} | ${entries.length} entries${shown.length < entries.length ? `, showing the last ${shown.length}` : ''}${restoredNote} ==`;
     this.commit((width) => [truncate(head, width, '')]);
     for (let index = 0; index < shown.length; index++) {
       const entry = shown[index];
@@ -1062,7 +1322,7 @@ class TuiApp {
   /** `/switch <id 前缀>`：会话列表可能还没加载过，先按需取一次。 */
   private async switchTo(prefix: string): Promise<void> {
     if (prefix === '') {
-      this.notify('用法：/switch <会话 id 前缀>（或用 /sessions 选择）');
+      this.notify('Usage: /switch <session id prefix> (or pick from /sessions)');
       this.render();
       return;
     }
@@ -1070,45 +1330,109 @@ class TuiApp {
       try {
         this.sessions = await listSessions(this.deps.sessionDir);
       } catch (error) {
-        this.notify(`读取会话失败：${message(error)}`, 'error');
+        this.notify(`Could not read sessions: ${message(error)}`, 'error');
         this.render();
         return;
       }
     }
     const hit = this.sessions.find((info) => info.id === prefix) ?? this.sessions.find((info) => info.id.startsWith(prefix));
     if (!hit) {
-      this.notify(`未找到会话：${prefix}（试试 /sessions）`, 'warn');
+      this.notify(`No session matching: ${prefix} (try /sessions)`, 'warn');
       this.render();
       return;
     }
     this.switchSession(hit.id);
   }
 
+  // ---------------------------------------------------------------- 上游模型目录
+
+  /**
+   * 启动时预热模型目录：先吃磁盘缓存，让 `/model` 秒开；再后台刷一次拿最新列表。
+   *
+   * 刻意**不 await**：上游慢或不通时绝不能把启动卡住。刷新失败也静默——用户没在等这个结果，
+   * 真要看错误会去敲 `/model`，那里才给可见提示。
+   */
+  private warmModelCatalog(): void {
+    const cached = readModelCache(this.deps.baseUrl, this.modelCachePath());
+    if (cached) this.modelCatalog = { models: cached.models, fetchedAt: cached.fetchedAt };
+    void this.refreshModels().catch(() => {});
+  }
+
+  private modelCachePath(): string | undefined {
+    return this.deps.modelCachePath;
+  }
+  /** 磁盘缓存是否已过期（过期只是「该刷了」，不代表不能用）。 */
+  private catalogStale(now = Date.now()): boolean {
+    const catalog = this.modelCatalog;
+    return catalog === undefined || now - catalog.fetchedAt > MODEL_CACHE_TTL_MS;
+  }
+
+  /**
+   * 取模型目录：有缓存就直接给，没有才真去拉。
+   *
+   * 这是 `/model` 的快路径——用户第二次敲 `/model`、或本次启动命中磁盘缓存时，这里不发任何
+   * 网络请求，弹窗立刻出现。
+   */
+  private loadModels(): Promise<readonly string[]> {
+    const catalog = this.modelCatalog;
+    return catalog ? Promise.resolve(catalog.models) : this.refreshModels();
+  }
+
+  /** 真去上游拉一次（进行中的请求会被复用），成功后写内存与磁盘。 */
+  private refreshModels(): Promise<readonly string[]> {
+    if (!this.catalogPending) this.catalogPending = this.fetchModelsOnce();
+    return this.catalogPending;
+  }
+
+  private async fetchModelsOnce(): Promise<readonly string[]> {
+    try {
+      const models = await this.deps.fetchModels();
+      if (models.length > 0) {
+        this.modelCatalog = { models, fetchedAt: Date.now() };
+        // 空列表不落盘（writeModelCache 里也再挡一道）：上游偶发返回空不该覆盖好缓存。
+        writeModelCache(this.deps.baseUrl, models, this.modelCachePath());
+      }
+      return models;
+    } finally {
+      // 成功时 modelCatalog 已是快路径，清掉 pending 没有副作用；失败则允许下次重试。
+      this.catalogPending = undefined;
+    }
+  }
+
   private async openModelWizard(): Promise<void> {
     if (this.running) {
-      this.notify('当前回合仍在运行，完成后再配置模型', 'warn');
+      this.notify('A turn is still running — configure the model after it finishes', 'warn');
       this.render();
       return;
     }
-    this.notify('正在根据当前 base URL 获取上游模型...', 'info');
-    this.render();
+
+    const warm = this.modelCatalog !== undefined;
+    if (!warm) {
+      // 只有「本次启动没命中缓存」才需要等；有缓存时连提示都不给，弹窗直接出来。
+      this.notify('Fetching models from the configured base URL…', 'info');
+      this.render();
+    }
     let models: readonly string[];
     try {
-      models = await this.deps.fetchModels();
+      models = await this.loadModels();
     } catch (error) {
-      this.notify(`获取上游模型失败：${message(error)}`, 'error');
+      this.notify(`Could not fetch upstream models: ${message(error)}`, 'error');
       this.render();
       return;
     }
     if (models.length === 0) {
-      this.notify('上游未返回可用模型', 'warn');
+      this.notify('The upstream returned no models', 'warn');
       this.render();
       return;
     }
+    // 列表过期就顺手后台刷一次。刻意不 await、也不在菜单开着时去改 menu.items：
+    // 选项列表在用户眼皮底下跳变（甚至换掉他正要按 Enter 的那一项）比列表旧一会儿糟糕得多。
+    if (this.catalogStale()) void this.refreshModels().catch(() => {});
+
     this.modelWizard = { stage: 'select', models };
     this.menuOptions = undefined;
     this.state.editor = emptyEditor();
-    this.state.menu = { title: '第 1/4 步 | 选择上游模型', items: [], index: 0, filter: '', nested: true };
+    this.state.menu = { title: 'Step 1/3 | Select a model', items: [], index: 0, filter: '', nested: true };
     this.state.phase = 'menu';
     this.syncMenuFilter();
     const current = models.indexOf(this.model);
@@ -1132,56 +1456,57 @@ class TuiApp {
     const model = draft.model;
     if (!model) return this.cancelModelWizard();
 
-    const contextWindow = await this.askModelNumber(
-      `第 2/4 步 | 上下文窗口大小\n模型：${model}\n默认值：${formatTokenAmount(DEFAULT_CONTEXT_WINDOW)}，可填写 256k 或 256000`,
-      DEFAULT_CONTEXT_WINDOW,
-      DEFAULT_CONTEXT_WINDOW,
-      '上下文窗口必须是大于等于 1000 的整数',
-    );
-    if (contextWindow === undefined || this.modelWizard !== draft) return this.cancelModelWizard();
-    draft.contextWindow = contextWindow;
-    draft.stage = 'max-tokens';
+    // 两个数值合成一次表单提交：它们本来就属于同一件事（这次请求能吃多少、能吐多少），
+    // 分两步问会让用户在两个几乎一样的单行输入框之间来回走，还没法回头改上面那个。
+    // 默认值优先取这个模型上次确认过的值——上游 /models 不返回窗口大小，只能靠本地沉淀。
+    const known = readModelMeta(this.deps.baseUrl, model, this.modelCachePath());
+    const values = await this.requestForm({
+      title: 'Step 2/3 | Context window and max output',
+      note: `Model: ${model}${known ? ' (pre-filled from the last time this model was configured)' : ''}\nIntegers only — no k/m suffix (write 256k as 256000). Enter confirms, Esc abandons this configuration`,
+      fields: [
+        {
+          key: 'context_window',
+          label: 'Context window',
+          value: String(known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+          placeholder: 'e.g. 256000',
+        },
+        {
+          key: 'max_tokens',
+          label: 'Max output tokens',
+          value: String(known?.maxTokens ?? this.maxTokens ?? DEFAULT_MAX_TOKENS),
+          placeholder: 'e.g. 8192',
+        },
+      ],
+      validate: validateModelLimits,
+    });
+    // undefined = 用户取消：不写盘、不改内存里的模型配置，向导整体退出。
+    if (values === undefined || this.modelWizard !== draft) return this.cancelModelWizard();
 
-    const maxTokens = await this.askModelNumber(
-      `第 3/4 步 | 最大输出 Token\n模型：${model}\n请输入本次请求允许的最大输出 Token`,
-      this.maxTokens ?? DEFAULT_MAX_TOKENS,
-      1,
-      '最大输出 Token 必须是正整数',
-    );
-    if (maxTokens === undefined || this.modelWizard !== draft) return this.cancelModelWizard();
-    draft.maxTokens = maxTokens;
+    // 能走到这里说明 validateModelLimits 已经放行，两个值必然能解析成整数。
+    draft.contextWindow = parseTokenCount(values.context_window ?? '') ?? DEFAULT_CONTEXT_WINDOW;
+    draft.maxTokens = parseTokenCount(values.max_tokens ?? '') ?? DEFAULT_MAX_TOKENS;
     draft.stage = 'confirm';
 
-    const confirmation = await this.requestAnswer(this.modelWizardSummary(draft));
+    // 第 3 步复用同一个表单浮层，只是不给它字段：回车即确认、Esc 即放弃。
+    // 这样用户不必再记「要敲 y」这种一次性约定，整个向导只有一套确认手势。
+    const confirmed = await this.requestForm({
+      title: 'Step 3/3 | Write to config.toml',
+      note: this.modelWizardSummary(draft),
+      fields: [],
+    });
     if (this.modelWizard !== draft) return;
-    if (!/^(y|yes|确认)$/i.test(confirmation.trim())) return this.cancelModelWizard();
+    if (confirmed === undefined) return this.cancelModelWizard();
     this.applyModelWizard(draft);
   }
 
-  private async askModelNumber(
-    question: string,
-    initial: number,
-    minimum: number,
-    invalidMessage: string,
-  ): Promise<number | undefined> {
-    for (;;) {
-      const answer = await this.requestAnswer(question, formatTokenAmount(initial));
-      if (answer.trim() === '') return undefined;
-      const value = parseTokenAmount(answer);
-      if (value !== undefined && value >= minimum) return value;
-      this.notify(invalidMessage, 'warn');
-    }
-  }
-
+  /** 待写入的值。只列配置项本身，标题与「怎么确认」由浮层统一表达。 */
   private modelWizardSummary(draft: ModelWizardDraft): string {
     return [
-      '第 4/4 步 | 确认写入 config.toml',
-      `base_url：${displayBaseUrl(this.deps.baseUrl)}`,
-      'api_key：已配置（已隐藏）',
-      `model：${draft.model ?? ''}`,
-      `context_window：${formatTokenAmount(draft.contextWindow ?? DEFAULT_CONTEXT_WINDOW)}`,
-      `max_tokens：${formatTokenAmount(draft.maxTokens ?? DEFAULT_MAX_TOKENS)}`,
-      '输入 y 确认写入，其他内容取消',
+      `base_url: ${displayBaseUrl(this.deps.baseUrl)}`,
+      'api_key: configured (hidden)',
+      `model: ${draft.model ?? ''}`,
+      `context_window: ${draft.contextWindow ?? DEFAULT_CONTEXT_WINDOW}`,
+      `max_tokens: ${draft.maxTokens ?? DEFAULT_MAX_TOKENS}`,
     ].join('\n');
   }
 
@@ -1197,8 +1522,12 @@ class TuiApp {
     this.client = this.deps.makeClient({ model, api: this.api, effort: this.effort, maxTokens });
     this.state.model = model;
     this.state.contextWindow = contextWindow;
+    // 记进会话：用同一个会话 resume 时应当回到当时用的模型，而不是当前配置里的模型。
+    this.appendEvent('model_selection', sessionEventData.modelSelection({ model, contextWindow, maxTokens }));
+    // 记进模型目录缓存：下次选中同一个模型（或在向导里 / --model 切回来）直接带出这两个值。
+    writeModelMeta(this.deps.baseUrl, model, { contextWindow, maxTokens }, this.modelCachePath());
     const warning = this.persistConfig({ model, context_window: contextWindow, max_tokens: maxTokens });
-    this.notify(`模型已配置：${model} | 上下文 ${formatTokenAmount(contextWindow)} | 输出 ${formatTokenAmount(maxTokens)}${warning}`, warning === '' ? 'success' : 'warn');
+    this.notify(`Model configured: ${model} | context ${contextWindow} | output ${maxTokens}${warning}`, warning === '' ? 'success' : 'warn');
     this.render();
   }
 
@@ -1208,24 +1537,24 @@ class TuiApp {
     this.menuOptions = undefined;
     this.state.editor = emptyEditor();
     this.state.phase = this.running ? 'running' : 'idle';
-    this.notify('已取消模型配置');
+    this.notify('Model configuration cancelled');
     this.render();
   }
 
   private setEffort(level: string): void {
     if (level === '') {
-      this.notify(`当前推理档位：${this.effort ?? 'off（未设置）'} | 可选：${REASONING_EFFORTS.join(' | ')}`);
+      this.notify(`Reasoning effort: ${this.effort ?? 'off (unset)'} | available: ${REASONING_EFFORTS.join(' | ')}`);
       return;
     }
     if (!(REASONING_EFFORTS as readonly string[]).includes(level)) {
-      this.notify(`无效档位：${level} | 可选：${REASONING_EFFORTS.join(' | ')}`, 'warn');
+      this.notify(`Invalid effort: ${level} | available: ${REASONING_EFFORTS.join(' | ')}`, 'warn');
       return;
     }
     this.effort = level as ReasoningEffort;
     this.client = this.deps.makeClient({ model: this.model, api: this.api, effort: this.effort, maxTokens: this.maxTokens });
     this.state.effort = this.effort;
     const warning = this.persistConfig({ reasoning_effort: this.effort });
-    this.notify(`推理档位：${this.effort}${warning}`, warning === '' ? 'success' : 'warn');
+    this.notify(`Reasoning effort: ${this.effort}${warning}`, warning === '' ? 'success' : 'warn');
   }
 
   /**
@@ -1237,30 +1566,51 @@ class TuiApp {
   private persistConfig(patch: Readonly<Record<string, string | number>>): string {
     try {
       updateConfigFile(this.deps.configPath, patch);
-      return ` | 已写入 ${this.deps.configPath}`;
+      return ` | written to ${this.deps.configPath}`;
     } catch (error) {
-      return ` | 未能写入 ${this.deps.configPath}：${message(error)}`;
+      return ` | could not write ${this.deps.configPath}: ${message(error)}`;
     }
   }
 
   private setApprovalMode(mode: string): void {
     if (mode === '') {
-      this.notify(`当前审批模式：${this.approvalModeValue} | 可选：${APPROVAL_MODES.join(' | ')}`);
+      this.notify(`Approval mode: ${this.approvalModeValue} | available: ${APPROVAL_MODES.join(' | ')}`);
       return;
     }
     if (!(APPROVAL_MODES as readonly string[]).includes(mode)) {
-      this.notify(`无效审批模式：${mode} | 可选：${APPROVAL_MODES.join(' | ')}`, 'warn');
+      this.notify(`Invalid approval mode: ${mode} | available: ${APPROVAL_MODES.join(' | ')}`, 'warn');
       return;
     }
     this.approvalModeValue = mode as ApprovalMode;
     this.state.approvalMode = mode;
     const warning = this.persistConfig({ approval: mode });
-    this.notify(`审批模式：${mode}${warning}`, warning === '' ? 'success' : 'warn');
+    this.notify(`Approval mode: ${mode}${warning}`, warning === '' ? 'success' : 'warn');
   }
 
-  private setPlan(enabled: boolean): void {
+  private setPlan(enabled: boolean, persist = true): void {
     this.planMode = enabled;
     this.state.planMode = enabled;
+    if (persist) this.appendEvent('plan_mode', sessionEventData.planMode(enabled));
+  }
+
+  /** /goal：无参数查看、clear 清除、其余作为目标文本。 */
+  private setGoal(args: string): void {
+    const text = args.trim();
+    if (text === '') {
+      this.commit((width) => [
+        truncate(this.goal ? `Goal: ${this.goal}` : 'No goal set (/goal <text> to set one, /goal clear to remove it)', width, ''),
+      ]);
+      return;
+    }
+    if (text === 'clear' || text === 'off' || text === 'none') {
+      this.goal = undefined;
+      const ok = this.appendEvent('goal', sessionEventData.goal(''));
+      this.notify(`Goal cleared${ok ? '' : ' (the event could not be saved; this process only)'}`, ok ? 'success' : 'warn');
+      return;
+    }
+    this.goal = text;
+    const ok = this.appendEvent('goal', sessionEventData.goal(text));
+    this.notify(`Goal set and injected into every request${ok ? '' : ' (the event could not be saved; it will not survive a restart)'}`, ok ? 'success' : 'warn');
   }
 
   private exportSession(format: string): void {
@@ -1268,24 +1618,24 @@ class TuiApp {
     const file = join(this.deps.sessionDir, `${this.session.id}.${kind}`);
     try {
       writeFileSync(file, kind === 'json' ? exportJson(this.session) : exportMarkdown(this.session), 'utf8');
-      this.notify(`已导出：${file}`, 'success');
+      this.notify(`Exported: ${file}`, 'success');
     } catch (error) {
-      this.notify(`导出失败：${message(error)}`, 'error');
+      this.notify(`Export failed: ${message(error)}`, 'error');
     }
   }
 
   private todoLines(): string[] {
     const items = this.deps.todos.list();
-    if (items.length === 0) return ['任务清单为空（模型还没调用 todo 工具）'];
+    if (items.length === 0) return ['The to-do list is empty (the model has not called the todo tool yet)'];
     const mark = { pending: ' ', in_progress: '>', completed: 'x' } as const;
-    return ['任务清单', ...items.map((item) => `  [${mark[item.status]}] ${item.id} ${item.content}`)];
+    return ['To-dos', ...items.map((item) => `  [${mark[item.status]}] ${item.id} ${item.content}`)];
   }
 
   private jobLines(): string[] {
     const jobs = this.deps.jobs.list();
-    if (jobs.length === 0) return ['没有后台任务'];
+    if (jobs.length === 0) return ['No background jobs'];
     return [
-      '后台任务',
+      'Background jobs',
       ...jobs.map((job) => `  ${job.id}  ${job.status}  ${job.kind}  ${job.command.slice(0, 60)}`),
     ];
   }
@@ -1360,13 +1710,21 @@ class TuiApp {
         jobs: this.deps.jobs,
         persistent: this.deps.persistent,
         planState,
+        goal: this.goal,
+        lastFailure: this.lastFailure,
+        compactClient: this.compactClient,
+        onAuxUsage: (usage, purpose) => this.recordAuxUsage(usage, purpose),
+        // spill 按会话分目录：切会话后旧结果仍留在各自目录里，不会互相覆盖。
+        ...(this.deps.spillRoot === undefined
+          ? {}
+          : { spill: new SpillStore(join(this.deps.spillRoot, this.session.id), this.deps.spillThreshold) }),
       });
     } catch (error) {
-      if (controller.signal.aborted) this.commit((width) => renderEntry({ kind: 'notice', text: '本轮已中断', level: 'warn' }, this.optionsAt(width)), { blank: true });
+      if (controller.signal.aborted) this.commit((width) => renderEntry({ kind: 'notice', text: 'Turn aborted', level: 'warn' }, this.optionsAt(width)), { blank: true });
       else this.commit((width) => renderEntry({ kind: 'error', text: message(error) }, this.optionsAt(width)), { blank: true });
     } finally {
-      // 中断 / 报错时工具块可能还挂在缓冲区里，兜底落盘，否则这一轮的调用记录会凭空消失。
-      this.flushToolBlock();
+      // 中断 / 报错时步骤块可能还开着，兜底定稿，否则这一步的记录会凭空消失。
+      this.closeStepBlock();
       this.running = false;
       this.abort = undefined;
       this.state.activeTool = undefined;
@@ -1377,7 +1735,9 @@ class TuiApp {
         this.state.prompt = undefined;
         if (promptState.kind === 'approval') promptState.resolve(false);
         else if (promptState.kind === 'ask') promptState.resolve('');
-        else promptState.resolve({ approved: false });
+        else if (promptState.kind === 'plan') promptState.resolve({ approved: false });
+        // 表单按「取消」收场：既不写盘也不改内存里的配置，与用户按 Esc 完全同义。
+        else promptState.resolve(undefined);
       }
       this.state.phase = 'idle';
       this.refreshCounters();
@@ -1388,9 +1748,9 @@ class TuiApp {
   /**
    * agent 事件 → 滚动区 / 活动区。
    *
-   * 工具调用不逐条落盘，而是先攒进 pendingTools，等这一步的 LLM 调用结束（下一次
-   * thinking_start 或轮次结束）再一次性渲染成「工具块」——一屏里 user/assistant/tool
-   * 混着刷是最难读的形态。运行中的实时反馈交给活动区的指示器，不靠滚动区刷屏。
+   * 一次 LLM 调用的思考链与它发起的工具调用汇总在**同一个「步骤块」**里：块在 thinking_start
+   * 打开，随思考增量、工具结果就地刷新，在下一步开始或轮次结束时定稿折回一行。这样既不会出现
+   * thinking / tool / assistant 交替刷屏，历史里一行就能代表整步。
    */
   private readonly listener: AgentListener = (event) => {
     if (event.type === 'text') {
@@ -1398,23 +1758,47 @@ class TuiApp {
       this.appendStream();
       return;
     }
-    const thinkingIndex = this.state.thinkingIndex;
     applyAgentEvent(this.state, event);
     const now = Date.now();
 
     switch (event.type) {
       case 'thinking_start':
-        // 新的 LLM 调用 = 新的一步，上一步的工具调用到此落成块。
-        this.flushToolBlock();
+        // 新的 LLM 调用 = 新的一步：上一步的块定稿，新的块开出来。
+        this.closeStepBlock();
         this.stepToolCount = 0;
+        this.thinkingStartedAt = now;
+        this.openStepBlock();
         break;
+      case 'thinking_delta': {
+        const state = this.stepBlock?.toolBlock;
+        if (state) {
+          // 边想边显示：思考是推理模型最长的一段等待，憋到结束再吐出来等于没有反馈。
+          state.thinking = { ...state.thinking, text: `${state.thinking?.text ?? ''}${event.text}` };
+          this.scheduleRender();
+        }
+        break;
+      }
       case 'thinking_end': {
-        const entry = thinkingIndex === undefined ? undefined : this.state.entries[thinkingIndex];
-        if (entry) this.commit((width) => renderEntry(entry, this.optionsAt(width)));
+        const state = this.stepBlock?.toolBlock;
+        if (state) {
+          // content 是权威全文：增量只用于过程中的展示，这里整体替换而不是拼接。
+          const started = this.thinkingStartedAt;
+          state.thinking = {
+            text: event.content,
+            done: true,
+            ...(started === undefined ? {} : { ms: Math.max(0, now - started) }),
+            ...(state.thinking?.expanded === true ? { expanded: true } : {}),
+          };
+          this.thinkingStartedAt = undefined;
+          this.scheduleRender();
+        }
         break;
       }
       case 'tool_start': {
-        this.pendingTools.push({ id: event.id, name: event.name, args: event.args, detail: '' });
+        const state = this.stepBlock?.toolBlock ?? this.openStepBlock();
+        const item: ToolCallView = { id: event.id, name: event.name, args: event.args, detail: '' };
+        state.items.push(item);
+        this.pendingTools.push(item);
         this.toolStartedAt.set(event.id, now);
         this.stepToolCount++;
         this.state.activeTool = {
@@ -1423,6 +1807,7 @@ class TuiApp {
           total: this.stepToolCount,
           startedAt: now,
         };
+        this.scheduleRender();
         break;
       }
       case 'tool_end': {
@@ -1433,6 +1818,8 @@ class TuiApp {
           item.detail = event.content;
           item.durationMs = startedAt === undefined ? undefined : Math.max(0, now - startedAt);
         }
+        // 与 loop 落盘的 tool_result 事件同源：下一轮请求把它注入提示词，压缩或恢复后仍看得见。
+        if (!event.ok) this.lastFailure = { tool: event.name, excerpt: event.content.slice(0, 200), ts: new Date(now).toISOString() };
         this.toolStartedAt.delete(event.id);
         // 并行调用里可能还有别的在跑：指示器指向最后一个未完成的，而不是直接清空。
         const stillRunning = this.pendingTools.filter((pending) => pending.ok === undefined);
@@ -1449,13 +1836,13 @@ class TuiApp {
         break;
       }
       case 'error': {
-        this.flushToolBlock();
+        this.closeStepBlock();
         const entry = this.state.entries[this.state.entries.length - 1];
         if (entry) this.commit((width) => renderEntry(entry, this.optionsAt(width)), { blank: true });
         break;
       }
       case 'done':
-        this.flushToolBlock();
+        this.closeStepBlock();
         break;
       default:
         break;
@@ -1464,28 +1851,77 @@ class TuiApp {
   };
 
   /** 把攒下的工具调用渲染成一个块写进滚动区。 */
-  private flushToolBlock(): void {
-    if (this.pendingTools.length === 0) return;
-    const block = this.pendingTools;
-    this.pendingTools = [];
-    this.commitToolBlock(block, true);
+  /** 当前进行中的步骤块：块在 thinking_start 打开，工具结果就地刷新进它。 */
+  private stepBlock?: BodyBlock;
+  /** 本步思考开始的时刻，用于 `Thought for 1.2s`。 */
+  private thinkingStartedAt?: number;
+
+  /**
+   * 开一个步骤块：一次 LLM 调用的思考链与它发起的工具调用汇总在这里。
+   * 上一块先定稿（不再每帧重排，并折回一级）。
+   */
+  private openStepBlock(): ToolBlockState {
+    this.closeStepBlock();
+    const state: ToolBlockState = {
+      id: `step-block-${this.nextToolBlockId++}`,
+      items: [],
+      expanded: true,
+    };
+    const block: BodyBlock = { lines: [], width: 0, blank: true, live: true, toolBlock: state };
+    block.render = (width) =>
+      renderStepBlock(state.thinking, state.items, this.optionsAt(width), state.expanded, (rows) => {
+        state.itemRows = rows;
+      });
+    this.stepBlock = block;
+    this.body.push(block);
+    return state;
   }
 
-  /** 保存工具块的模型数据，而不是保存一次性文本，保证 resize 与双击展开都能重排。 */
+  /**
+   * 步骤块定稿：折回一级（历史里一行代表整步），空块直接从历史里摘掉——
+   * 留着一个零行的块只会在对话流里多出一个空行。
+   */
+  private closeStepBlock(): void {
+    const block = this.stepBlock;
+    if (!block) return;
+    this.stepBlock = undefined;
+    const state = block.toolBlock;
+    if (state) {
+      state.expanded = false;
+      if (state.thinking) state.thinking.expanded = false;
+      const empty = state.items.length === 0 && (state.thinking?.text.trim() ?? '') === '';
+      if (empty) {
+        const at = this.body.indexOf(block);
+        if (at >= 0) this.body.splice(at, 1);
+        this.pendingTools = [];
+        this.scheduleRender();
+        return;
+      }
+      block.live = false;
+      const width = this.viewOptions().width;
+      if (block.render) {
+        block.lines = block.render(width);
+        block.width = width;
+      }
+    }
+    this.pendingTools = [];
+    this.scheduleRender();
+  }
+
+  /** 历史回放用：把一组工具条目直接落成一个已定稿的块（不经过 live 流程）。 */
   private commitToolBlock(items: readonly ToolCallView[], blank: boolean): void {
     if (items.length === 0) return;
     const toolBlock: ToolBlockState = {
-      id: `tool-block-${this.nextToolBlockId++}`,
+      id: `step-block-${this.nextToolBlockId++}`,
       items: [...items],
-      expanded: false,
+      // 回放时没有 live 阶段，直接停在有失败就看得到失败的层级。
+      expanded: items.some((item) => item.ok === false),
     };
-    const block: BodyBlock = {
-      lines: [],
-      width: 0,
-      blank,
-      toolBlock,
-    };
-    block.render = (width) => renderToolBlock(toolBlock.items, this.optionsAt(width), toolBlock.expanded);
+    const block: BodyBlock = { lines: [], width: 0, blank, toolBlock };
+    block.render = (width) =>
+      renderStepBlock(toolBlock.thinking, toolBlock.items, this.optionsAt(width), toolBlock.expanded, (rows) => {
+        toolBlock.itemRows = rows;
+      });
     this.body.push(block);
     this.scheduleRender();
   }
@@ -1493,7 +1929,7 @@ class TuiApp {
   private abortTurn(): void {
     if (!this.running) return;
     this.abort?.abort();
-    this.notify('正在中断本轮...', 'warn');
+    this.notify('Aborting the turn…', 'warn');
     this.render();
   }
 
@@ -1517,6 +1953,10 @@ class TuiApp {
       const block: BodyBlock = {
         lines: [],
         width: 0,
+        // 模型输出前留一个空行：它紧跟在 `> 用户输入` 后面，不留就只有半行的视觉间隔，
+        // 读起来像同一段话被折行了。与 user / 工具块 / notice 的 blank 语义一致：
+        // 每个「说话的人换了」的块前面留一行（bodyLines 会自己吃掉连续空行，不会叠加）。
+        blank: true,
         live: true,
         entry: last,
         render: (width) => renderEntry(last, this.optionsAt(width)),
@@ -1626,6 +2066,9 @@ class TuiApp {
     this.refreshBranch(Date.now());
     const size = this.terminal.size();
     const options: ViewOptions = { width: liveWidth(size.width), height: size.height, styler: this.styler };
+    // 改宽度会让正文整体重新折行，选区的内容坐标随之失效——这是唯一需要提前清掉它的时机
+    // （滚动、追加内容都不会让下标漂移，所以那些情况下一律保留）。
+    if (size.width !== this.lastSize.width) this.state.selection = undefined;
     this.lastSize = { width: size.width, height: size.height };
     const live = renderLive(this.state, options);
     const snapshot = this.bodyLines(options.width);
@@ -1670,7 +2113,7 @@ class TuiApp {
     this.lastBodyRegion = frame.body;
     this.lastToolBlocks = snapshot.toolBlocks;
     this.lastFrameToolBlocks = frame.toolBlocks;
-    this.lastFrameLines = frame.lines;
+    this.lastBody = body;
     this.terminal.paint(frame.lines, frame.cursor);
   }
 
@@ -1745,6 +2188,32 @@ class TuiApp {
     });
   }
 
+  /**
+   * 多字段表单浮层。确认时回传各字段文本，取消（Esc）回传 undefined —— 注意是
+   * `undefined` 而不是空对象：调用方据此区分「用户取消」与「用户什么都没改就确认」，
+   * 前者不应用任何更改，后者按填写的值应用。
+   */
+  requestForm(spec: FormSpec): Promise<Record<string, string> | undefined> {
+    return new Promise((resolve) => {
+      this.state.prompt = {
+        kind: 'form',
+        title: spec.title,
+        note: spec.note,
+        fields: spec.fields.map((field) => ({
+          key: field.key,
+          label: field.label,
+          editor: field.value === '' ? emptyEditor() : setText(field.value),
+          placeholder: field.placeholder ?? '',
+        })),
+        focus: 0,
+        validate: spec.validate,
+        resolve,
+      };
+      this.state.phase = 'form';
+      this.render();
+    });
+  }
+
   requestPlan(plan: string): Promise<{ approved: boolean; feedback?: string }> {
     return new Promise((resolve) => {
       this.state.prompt = { kind: 'plan', plan, editor: emptyEditor(), resolve };
@@ -1807,24 +2276,86 @@ function applyEditorKey(editor: EditorState, key: Key, width: number): EditorSta
   }
 }
 
+/** 表单浮层的规格：由调用方给出字段与校验，弹窗本身不认识具体业务含义。 */
+interface FormSpec {
+  title: string;
+  note?: string;
+  fields: readonly FormFieldSpec[];
+  /** 返回非空字符串表示校验不通过（内容即错误提示），此时弹窗保持打开、内容不丢。 */
+  validate?: (values: Record<string, string>) => string | undefined;
+}
+
+interface FormFieldSpec {
+  key: string;
+  label: string;
+  /** 初始值（通常填默认值）；填空串则显示 placeholder。 */
+  value: string;
+  placeholder?: string;
+}
+
+/**
+ * 表单字段是单行输入：换行在这里没有业务含义，粘贴进来的换行压成空格——留着会让渲染按
+ * 单行算、而编辑器按多行算，光标列立刻错位。
+ */
+function applyFieldKey(editor: EditorState, key: Key, width: number): EditorState | undefined {
+  if (key.kind === 'ctrl' && key.key === 'j') return undefined;
+  if (key.kind === 'text' || key.kind === 'paste') {
+    return insertText(editor, key.text.replace(/\s*\n\s*/g, ' '));
+  }
+  return applyEditorKey(editor, key, width);
+}
+
+/** 上下文窗口的下限：低于它没有真实模型可用，多半是把单位写错了（比如把 256000 写成 256）。 */
+const MIN_CONTEXT_WINDOW = 1_000;
+
+/** 输出上限的下限：0 没法用。 */
+const MIN_MAX_TOKENS = 1;
+
+/**
+ * 模型向导第 2 步的校验：两个数值各自合法，且**互相自洽**。
+ *
+ * 只接受十进制整数，不接受 `256k` / `8m` 这类后缀：写进 config.toml 的本来就是整数，让用户
+ * 在这里做一次单位换算，等于把「256k 到底是 256000 还是 262144」这种歧义塞进配置里。
+ *
+ * 交叉校验是另一条值钱的检查——输出上限大于上下文窗口的请求，上游一定会拒绝；等到真正发请求
+ * 时才报错，用户已经走完整个向导了。
+ */
+function validateModelLimits(values: Record<string, string>): string | undefined {
+  const contextWindow = parseTokenCount(values.context_window ?? '');
+  if (contextWindow === undefined) {
+    return 'Context window must be a decimal integer, without a k/m suffix (write 256k as 256000).';
+  }
+  if (contextWindow < MIN_CONTEXT_WINDOW) {
+    return `Context window must be at least ${MIN_CONTEXT_WINDOW}; you entered ${contextWindow}.`;
+  }
+  const maxTokens = parseTokenCount(values.max_tokens ?? '');
+  if (maxTokens === undefined) {
+    return 'Max output tokens must be a decimal integer, without a k/m suffix (write 8k as 8192).';
+  }
+  if (maxTokens < MIN_MAX_TOKENS) {
+    return `Max output tokens must be at least ${MIN_MAX_TOKENS}; you entered ${maxTokens}.`;
+  }
+  if (maxTokens > contextWindow) {
+    return `Max output tokens cannot exceed the context window (${contextWindow}).`;
+  }
+  return undefined;
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function parseTokenAmount(input: string): number | undefined {
-  const match = /^(\d+(?:\.\d+)?)\s*(k|m)?$/i.exec(input.trim());
-  if (!match) return undefined;
-  const amount = Number(match[1]);
-  const unit = match[2]?.toLowerCase();
-  const multiplier = unit === 'm' ? 1_000_000 : unit === 'k' ? 1_000 : 1;
-  const value = amount * multiplier;
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
-}
-
-function formatTokenAmount(value: number): string {
-  if (value % 1_000_000 === 0) return `${value / 1_000_000}m`;
-  if (value % 1_000 === 0) return `${value / 1_000}k`;
-  return String(value);
+/**
+ * 严格解析十进制整数：只认 `^\d+$`。
+ *
+ * 刻意不走 `Number()` 的宽松解析——它会把 `0x10`、`1e3`、`12.0`、` 12 ` 都收下，而表单里多接受
+ * 一种写法，用户就多一次「为什么这么写也行/不行」的困惑。
+ */
+function parseTokenCount(input: string): number | undefined {
+  const text = input.trim();
+  if (!/^\d+$/.test(text)) return undefined;
+  const value = Number(text);
+  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 function displayBaseUrl(baseUrl: string): string {
@@ -1834,6 +2365,6 @@ function displayBaseUrl(baseUrl: string): string {
     url.hash = '';
     return url.toString();
   } catch {
-    return '[已配置的上游地址]';
+    return '[configured upstream URL]';
   }
 }

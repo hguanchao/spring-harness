@@ -34,35 +34,35 @@ export function renderTrustPrompt(options: TrustPromptOptions): string[] {
   const compact = height < 14 || width < 42;
   const pathLines = wrap(options.workspaceRoot, Math.max(8, innerWidth));
   const visiblePath = pathLines.slice(0, compact ? 1 : 2);
-  if (visiblePath.length === 0) visiblePath.push('（未知目录）');
+  if (visiblePath.length === 0) visiblePath.push('(unknown directory)');
   if (pathLines.length > visiblePath.length) {
     const last = visiblePath.length - 1;
     visiblePath[last] = truncate(visiblePath[last], Math.max(4, innerWidth - 3), '...');
   }
-  const compactHint = width < 42 ? '上下 | Enter | y/n' : '上下键选择 | Enter确认 | y信任 | n/Esc拒绝';
+  const compactHint = width < 42 ? 'Up/Down | Enter | y/n' : 'Up/Down select | Enter confirm | y trust | n/Esc deny';
 
   const lines: DialogLine[] = compact
     ? [
-        { text: truncate(`工作区：${visiblePath[0]}`, innerWidth, ''), paint: options.styler.cyan },
+        { text: truncate(`Workspace: ${visiblePath[0]}`, innerWidth, ''), paint: options.styler.cyan },
       ]
     : [
-        { text: '请确认是否允许 sph 在此目录中工作。', paint: options.styler.bold },
+        { text: 'Allow sph to work in this directory?', paint: options.styler.bold },
         { text: '' },
-        { text: '工作区', paint: options.styler.dim },
+        { text: 'Workspace', paint: options.styler.dim },
         ...visiblePath.map((line) => ({ text: line, paint: options.styler.cyan })),
         { text: '' },
-        { text: '该目录中的 AGENTS.md、skills 和工具会进入模型上下文，', paint: options.styler.dim },
-        { text: '工具也可能读取、修改或执行其中的内容。', paint: options.styler.dim },
+        { text: 'AGENTS.md, skills and tools from this directory enter the model context,', paint: options.styler.dim },
+        { text: 'and tools may read, modify, or execute content inside it.', paint: options.styler.dim },
         { text: '' },
       ];
 
   const choices: DialogChoice[] = [
-    { label: '信任此目录并继续', selected: options.choice === 'trust' },
-    { label: '拒绝并退出', selected: options.choice === 'deny' },
+    { label: 'Trust this directory and continue', selected: options.choice === 'trust' },
+    { label: 'Deny and exit', selected: options.choice === 'deny' },
   ];
   const frameRows = renderDialog({
     width: boxWidth,
-    title: '工作区尚未信任',
+    title: 'Workspace not trusted',
     marker: '[!]',
     titlePaint: options.styler.yellow,
     lines,

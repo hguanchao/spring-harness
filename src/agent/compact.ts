@@ -76,13 +76,13 @@ function turnStarts(messages: ChatMessage[]): number[] {
 }
 
 /** 机械压缩：先戳旧 tool result，再把更旧的轮次收成字符串拼接摘要。纯同步、零成本，做 fallback。 */
-function compactMessages(messages: ChatMessage[], contextWindow: number): ChatMessage[] {
+function compactMessages(messages: ChatMessage[], contextWindow: number, force = false): ChatMessage[] {
   if (messages.length === 0) return messages;
   const limit = Math.floor(contextWindow * PRESSURE_RATIO);
   // 不做整表浅拷贝：identity 保持不变才能命中 estimateTokens 的缓存，
   // 且后续 stubTool 本来就返回新对象，不需要预先复制一遍。
   let next: ChatMessage[] = messages;
-  if (estimateTokens(next) <= limit) return next;
+  if (!force && estimateTokens(next) <= limit) return next;
 
   const starts = turnStarts(next);
   const keepFrom = starts.length > KEEP_RECENT_TURNS ? starts[starts.length - KEEP_RECENT_TURNS] : 0;
@@ -91,7 +91,7 @@ function compactMessages(messages: ChatMessage[], contextWindow: number): ChatMe
   // "[compacted tool result]"，而摘要正是从这批消息生成的：结果是摘要内容全被抹平，
   // 历史信息彻底丢失（且摘要文本里出现的 [compacted tool result] 纯属噪声）。
   next = next.map((message, i) => (i < keepFrom && message.role === 'tool' ? stubTool(message) : message));
-  if (estimateTokens(next) <= limit) return next;
+  if (!force && estimateTokens(next) <= limit) return next;
 
   // base 由 toChatMessages() 产出，正常路径下没有 system 消息（system 由 projectContext 后置插入），
   // 所以首元素不能按 system 直接保留-或-丢弃：它是最早的 user 轮，
@@ -100,14 +100,50 @@ function compactMessages(messages: ChatMessage[], contextWindow: number): ChatMe
   const headIsSystem = first.role === 'system';
   const old = next.slice(headIsSystem ? 1 : 0, keepFrom);
   const recent = next.slice(keepFrom);
-  const summary: ChatMessage = {
-    role: 'user',
-    content: `[compacted earlier turns]\n${old
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .map((message) => `${message.role}: ${message.content.slice(0, 240)}`)
-      .join('\n')}`,
-  };
-  return headIsSystem ? [first, summary, ...recent] : [summary, ...recent];
+  const collapsed = old
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message) => `${message.role}: ${message.content.slice(0, 240)}`)
+    .join('\n');
+  // 没有可折叠的旧轮次时不要塞一条空摘要：那句 "[compacted earlier turns]" 后面空无一物，
+  // 只会让模型以为上下文被压缩过。
+  const head: ChatMessage[] = headIsSystem ? [first] : [];
+  if (collapsed) head.push({ role: 'user', content: `[compacted earlier turns]\n${collapsed}` });
+  let result = [...head, ...recent];
+
+  // 强制路径：provider 已确认超窗，估算水位不再可信，机械摘要后仍可能超限
+  // （单个工具结果就能顶满窗口）。这时从最旧一侧**整轮**丢弃——绝不能逐条丢：
+  // tool 消息必须紧跟带匹配 tool_call_id 的 assistant 消息，丢散了会被上游判成 400。
+  return force ? shrinkToLimit(result, limit) : result;
+}
+
+/** 反复丢弃最旧的完整轮次，直到进入水位线或只剩一轮。 */
+function shrinkToLimit(list: ChatMessage[], limit: number): ChatMessage[] {
+  let result = list;
+  while (estimateTokens(result) > limit) {
+    const trimmed = dropOldestTurn(result);
+    if (!trimmed) break;
+    result = trimmed;
+  }
+  return result;
+}
+
+/**
+ * 丢掉「最早的一个完整轮次」。返回 undefined 表示已经只剩一轮、无可再丢。
+ *
+ * 轮次边界 = 一条 user 消息到下一条 user 消息之间。保留列表头部（system / 摘要），
+ * 从第一个真实轮次的起点切到第二个轮次的起点。
+ */
+function dropOldestTurn(list: ChatMessage[]): ChatMessage[] | undefined {
+  const boundaries: number[] = [];
+  list.forEach((message, i) => {
+    if (message.role === 'user') boundaries.push(i);
+  });
+  // boundaries[0] 是摘要或最早的 user；至少要留下「摘要 + 一轮」或「最早一轮 + 次轮」。
+  if (boundaries.length <= 2) return undefined;
+  const from = boundaries[1];
+  const to = boundaries[2];
+  if (from === undefined || to === undefined || to <= from) return undefined;
+  return [...list.slice(0, from), ...list.slice(to)];
 }
 
 /** 倒序扫描；先用子串预筛，只有疑似 compaction 事件才付出 JSON.parse 的代价。 */
@@ -193,6 +229,7 @@ async function summarize(
   previous: CompactionEvent | undefined,
   range: SessionMessage[],
   signal?: AbortSignal,
+  onUsage?: (usage: TokenUsage) => void,
 ): Promise<string> {
   const transcript = range
     .filter((row) => row.role !== 'system')
@@ -210,16 +247,39 @@ async function summarize(
     [],
     signal,
   );
+  if (reply.usage) onUsage?.(reply.usage);
   const text = reply.text?.trim() ?? '';
   if (!text) throw new Error('empty compaction summary');
   return text;
 }
 
 /**
+ * 当前上下文规模：真实 usage + 自那次请求以来新增消息的估算增量。
+ *
+ * 旧实现直接取 lastUsage.promptTokens，于是「拿到过一次 usage 之后估算就再也不生效」——
+ * 而 usage 是**上一次请求**的快照，其后追加的 assistant / tool 消息（可能是一份几十 KB 的
+ * 工具结果）完全不参与判断，压缩决策系统性滞后。锚点把这段增量补回来。
+ */
+function estimatePromptTokens(
+  base: ChatMessage[],
+  messages: SessionMessage[],
+  lastUsage?: TokenUsage,
+  anchor?: number,
+): number {
+  if (!lastUsage) return estimateTokens(base);
+  const from = anchor ?? messages.length;
+  const appended = from < messages.length ? toChatMessages(messages.slice(from)) : [];
+  return lastUsage.promptTokens + estimateTokens(appended);
+}
+
+/**
  * 把会话镜像投影为可发送的上下文：超过水位线时先 stub 工具结果，
  * 再用 LLM 增量摘要旧轮次；失败回退到零成本机械压缩。
- * 真实 usage（上一轮 prompt tokens）优先于字符估算。
+ * 真实 usage（上一轮 prompt tokens + 之后的增量）优先于纯字符估算。
  * 摘要状态由调用方持久化（compaction event）并在内存中续用。
+ *
+ * `force` 用于 provider 已确认超窗之后的补救：此时水位线估算不再可信（可能是分词口径不同，
+ * 也可能单条工具结果就顶满窗口），必须无条件瘦身，且允许整轮丢弃。
  */
 export async function projectContext(options: {
   messages: SessionMessage[];
@@ -228,6 +288,12 @@ export async function projectContext(options: {
   client: LlmClient;
   signal?: AbortSignal;
   lastUsage?: TokenUsage;
+  /** lastUsage 对应的那次请求覆盖到了第几条会话消息（调用方在发请求前记下）。 */
+  lastUsageAnchor?: number;
+  /** provider 已确认超窗：跳过水位线判断，强制压缩。 */
+  force?: boolean;
+  /** 摘要调用产生的用量（辅助模型单独计费时用于记账）。 */
+  onUsage?: (usage: TokenUsage) => void;
   /** 系统提示词，投影后插在最前。 */
   system?: string;
 }): Promise<ProjectionResult> {
@@ -237,8 +303,9 @@ export async function projectContext(options: {
     options.system ? [{ role: 'system', content: options.system }, ...list] : list;
   const base = toChatMessages(messages, compaction);
   const limit = Math.floor(contextWindow * PRESSURE_RATIO);
-  const tokens = options.lastUsage?.promptTokens ?? estimateTokens(base);
-  if (messages.length === 0 || tokens <= limit) {
+  const tokens = estimatePromptTokens(base, messages, options.lastUsage, options.lastUsageAnchor);
+  const force = options.force === true;
+  if (messages.length === 0 || (!force && tokens <= limit)) {
     return { messages: withSystem(base) };
   }
 
@@ -248,8 +315,9 @@ export async function projectContext(options: {
   const stubbed = base.map((message, i) =>
     i > 0 && i < keepFrom && message.role === 'tool' ? stubTool(message) : message,
   );
-  // 只估算一次：stub 后仍超水位线时才继续走 LLM 摘要。
-  if (estimateTokens(stubbed) <= limit) {
+  // 只估算一次：stub 后仍超水位线时才继续走 LLM 摘要。force 时不能提前返回——
+  // provider 的判定优先于我们自己的估算，否则会原样重发同一个必然失败的请求。
+  if (!force && estimateTokens(stubbed) <= limit) {
     return { messages: withSystem(stubbed) };
   }
 
@@ -259,15 +327,21 @@ export async function projectContext(options: {
   const range = messages.slice(rangeFrom, Math.max(rangeFrom, keepOriginal));
   if (range.length > 0 && range.some((row) => row.role !== 'system')) {
     try {
-      const summary = await summarize(client, compaction, range, signal);
+      const summary = await summarize(client, compaction, range, signal, options.onUsage);
       const covered = rangeFrom + range.length;
       const next: CompactionEvent = { summary, covered };
-      return { messages: withSystem(toChatMessages(messages, next)), compaction: next };
+      const projected = toChatMessages(messages, next);
+      // 强制路径下摘要本身也可能不够短。这里只整轮丢弃、绝不走 compactMessages：
+      // 后者会把已有摘要当成普通历史再机械折叠一次，把摘要截成 240 字符的残句。
+      return {
+        messages: withSystem(force ? shrinkToLimit(projected, limit) : projected),
+        compaction: next,
+      };
     } catch {
       // 摘要失败不阻断任务：落入机械压缩。
     }
   }
-  return { messages: withSystem(compactMessages(base, contextWindow)) };
+  return { messages: withSystem(compactMessages(base, contextWindow, force)) };
 }
 
 /** turn 启动时从会话文件恢复最近一次压缩状态。 */

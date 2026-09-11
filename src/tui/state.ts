@@ -16,7 +16,7 @@ import type { EditorState } from './editor.js';
 import { emptyEditor } from './editor.js';
 import { summarizeToolCall } from './tool-view.js';
 
-export type Phase = 'idle' | 'running' | 'approval' | 'ask' | 'plan' | 'menu' | 'status';
+export type Phase = 'idle' | 'running' | 'approval' | 'ask' | 'plan' | 'menu' | 'status' | 'form';
 
 /** 一次性提示的级别：决定颜色与是否自动消失（warn/error 留到用户下一次操作）。 */
 export type NoticeLevel = 'info' | 'success' | 'warn' | 'error';
@@ -100,7 +100,46 @@ export interface PlanPrompt {
   resolve: (outcome: { approved: boolean; feedback?: string }) => void;
 }
 
-export type PendingPrompt = ApprovalPrompt | AskPrompt | PlanPrompt;
+export type PendingPrompt = ApprovalPrompt | AskPrompt | PlanPrompt | FormPrompt;
+
+/** 表单里的一个可编辑字段。 */
+export interface FormField {
+  /** 提交时取值用的键（`values[key]`）。 */
+  key: string;
+  label: string;
+  editor: EditorState;
+  /** 输入为空时显示的灰字示例（真填了空串仍算「空」，占位只负责提示格式）。 */
+  placeholder: string;
+}
+
+/**
+ * 多字段表单浮层（一次填多个值、一次提交）。
+ *
+ * 与 AskPrompt 的区别：AskPrompt 只收一个字符串，`resolve` 之后才由调用方校验——校验失败
+ * 时弹窗已经关了，调用方只能再问一次。表单把校验**留在弹窗内**：`validate` 返回非空就只设置
+ * `error` 并保持打开，用户改完再提交，不丢已填内容。
+ *
+ * 焦点用一个整数表达：`0..fields.length-1` 对应各字段，Tab / 上下键一次取模即可循环。
+ * 没有按钮行——Enter 提交、Esc 取消，两个动作不需要焦点。
+ */
+export interface FormPrompt {
+  kind: 'form';
+  title: string;
+  /** 标题下的补充说明（模型名、取值范围等），可省略。 */
+  note?: string;
+  fields: FormField[];
+  /** 焦点下标，见上方类型注释。 */
+  focus: number;
+  /** 最近一次提交的校验失败原因；为空表示没有错误要显示。 */
+  error?: string;
+  /**
+   * 提交时的校验钩子：返回字符串表示不通过（内容即错误提示），返回 undefined 表示通过。
+   * 省略则一律通过。
+   */
+  validate?: (values: Record<string, string>) => string | undefined;
+  /** 确认回传各字段文本（已 trim）；取消回传 undefined。 */
+  resolve: (values: Record<string, string> | undefined) => void;
+}
 
 /** 正在执行的工具：活动区的实时指示（工具输出进滚动区之前，用户靠它知道在跑什么）。 */
 export interface ActiveTool {
@@ -152,11 +191,11 @@ export interface TuiState {
    */
   scroll: number;
   /**
-   * 应用内的鼠标选区。**存屏幕坐标**（0 基行 + 0 基显示列），不存内容坐标。
+   * 应用内的鼠标选区。**存内容坐标**（正文行下标 + 显示列），不存屏幕坐标。
    *
-   * 为什么是屏幕坐标：终端报上来的就是屏幕坐标，且本项目没有常驻单元格网格，
-   * 「屏幕行 → 逻辑行」的反查要额外维护。代价是内容一滚动选区就会错位，
-   * 因此选区只在「按住不放」期间存在，一滚动或一敲键就清掉——生命周期短到不会错位。
+   * 为什么是内容坐标：选区要活过松手（左键拖动选择 → 右键才复制，模拟终端原生手势），
+   * 而屏幕坐标一滚屏、一追加内容就指向别的文字。内容坐标天然不受视口移动影响，
+   * 于是滚动也不必再清掉选区。
    */
   selection?: Selection;
   /** 鼠标滚轮是否启用。提示行据此决定要不要写「滚轮」——提示必须与真实按键一致。 */
@@ -165,7 +204,13 @@ export interface TuiState {
   thinkingIndex?: number;
 }
 
-/** 屏幕上的一个位置：0 基行号与 0 基显示列。 */
+/**
+ * 对话流里的一个位置：`row` 是正文（body 行数组）的下标，`col` 是显示列。
+ *
+ * 用**内容坐标**而不是屏幕坐标：选区要活过松手（松手只是结束选择、右键才复制），而屏幕坐标
+ * 一旦滚屏或追加内容就指向别的文字——高亮会跑到无关的行上，右键复制出来的也是别的内容。
+ * 内容坐标只在**重新折行**（改窗口宽度）时整体失效，那一种情况下面板自己把选区清掉。
+ */
 export interface Cell {
   row: number;
   col: number;
@@ -176,6 +221,9 @@ export interface Cell {
  *
  * 之所以用「起点 + 终点」而不是「起点 + 尺寸」：拖拽方向可以是任意的，
  * 用尺寸就要额外记方向；两个点则天然覆盖向上/向下/同行反向四种情形。
+ *
+ * 生命周期：按下起锚点 → 拖动延长 → 松开**保留**（高亮不撤）→ 右键复制时才清掉。
+ * 唯一会提前清的时机是内容坐标失效——改窗口宽度导致重新折行（见 app.render）。
  */
 export interface Selection {
   anchor: Cell;
@@ -365,8 +413,14 @@ export function applyAgentEvent(state: TuiState, event: AgentEvent): void {
     case 'thinking_start':
       state.thinkingIndex = addEntry(state, { kind: 'thinking', label: event.id, text: '', collapsed: true });
       break;
+    case 'thinking_delta': {
+      const index = state.thinkingIndex;
+      if (index !== undefined && state.entries[index]) state.entries[index].text += event.text;
+      break;
+    }
     case 'thinking_end': {
       const index = state.thinkingIndex;
+      // content 是权威全文：流式增量只用于过程中的展示，这里整体替换而不是拼接。
       if (index !== undefined && state.entries[index]) state.entries[index].text = event.content;
       state.thinkingIndex = undefined;
       break;
@@ -396,7 +450,7 @@ export function applyAgentEvent(state: TuiState, event: AgentEvent): void {
       break;
     }
     case 'ask':
-      state.notice = { text: `等待人工确认：${event.tool}`, level: 'info' };
+      state.notice = { text: `Waiting for approval: ${event.tool}`, level: 'info' };
       break;
     case 'usage':
       accumulateUsage(state, event.promptTokens, event.completionTokens, event.cachedTokens);

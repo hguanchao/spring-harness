@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
 import { sphConfigPath } from '../home.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
+import { DEFAULT_SPILL_THRESHOLD } from '../runtime/spill.js';
 import type { SandboxMode } from '../sandbox/types.js';
 
 export interface McpServerConfigFile {
@@ -28,6 +29,12 @@ export interface SphConfig {
   approval?: ApprovalMode;
   api: ApiProtocol;
   mcpServers: McpServerConfigFile[];
+  /** 压缩摘要专用模型（同一个 base_url/api_key）；省略则用主模型。 */
+  compactModel?: string;
+  /** auto 审批审查器专用模型；省略则用主模型。 */
+  reviewModel?: string;
+  /** 工具结果超过这个字符数就落盘，上下文只留预览与路径；0 表示关闭。 */
+  spillThreshold: number;
 }
 
 export const CONFIG_EXAMPLE = `base_url = "https://api.example.com/v1"
@@ -39,6 +46,9 @@ sandbox = "workspace"
 # api = "chat-completions"      # chat-completions | responses | anthropic-messages
 # reasoning_effort = "medium"   # off | low | medium | high | xhigh | max
 # approval = "ask"              # ask | auto | yolo（/approval 的选择会写回这里）
+# compact_model = ""            # 压缩摘要用的便宜模型；留空用主模型
+# review_model = ""             # auto 审批审查器用的模型；留空用主模型
+# spill_threshold = 8192        # 工具结果超过该字符数就落盘，0 关闭
 # [[mcp_servers]]
 # name = "demo"
 # command = "npx"
@@ -119,7 +129,34 @@ export function loadConfig(options?: {
   const approval = parseApprovalMode(file.approval);
   const api = parseApiProtocol(file.api);
   const mcpServers = parseMcpServers(file.mcp_servers);
-  return { baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers };
+  const compactModel = parseOptionalModel(file.compact_model, 'compact_model');
+  const reviewModel = parseOptionalModel(file.review_model, 'review_model');
+  const spillThreshold = parseSpillThreshold(file.spill_threshold);
+  return {
+    baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
+    compactModel, reviewModel, spillThreshold,
+  };
+}
+
+/** 辅助模型名可选：空串与缺省同义（用主模型），非字符串才报错。 */
+function parseOptionalModel(value: unknown, key: string): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new ConfigError(`${key} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+/**
+ * spill 阈值：正数开启，0 关闭，缺省用内置默认（8KB）。
+ * 显式给 0 是「我知道自己在做什么」的表达，不该被缺省值覆盖。
+ */
+function parseSpillThreshold(value: unknown): number {
+  if (value === undefined) return DEFAULT_SPILL_THRESHOLD;
+  if (typeof value !== 'number' || !Number.isInteger(value) || !Number.isFinite(value) || value < 0) {
+    throw new ConfigError('spill_threshold must be a non-negative integer (0 disables spilling)');
+  }
+  return value;
 }
 
 /**

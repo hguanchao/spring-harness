@@ -21,6 +21,10 @@ export function buildSystemPrompt(input: {
   mcpTools?: McpTool[];
   persistent?: string;
   planMode?: boolean;
+  /** 跨轮次任务目标（会话事件折叠而来）。 */
+  goal?: string;
+  /** 最近一次工具失败；恢复会话后尤其有用。 */
+  lastFailure?: { tool: string; excerpt: string };
 }): string {
   const memory = memoryToPrompt(loadMemory(input.workspaceRoot, sphHome()));
   const catalog = input.skills.length === 0
@@ -37,6 +41,13 @@ export function buildSystemPrompt(input: {
         'If your plan is rejected, revise it from the feedback — do not try to implement around the block.',
       ].join('\n')
     : '';
+  // 目标与失败历史来自会话事件，是「跨轮次」状态——压缩之后仍要看得见，所以放在提示词里。
+  const goalLine = input.goal
+    ? `Current goal (persisted across turns until the user clears it):\n${input.goal}`
+    : '';
+  const failureLine = input.lastFailure
+    ? `Most recent tool failure in this session:\n${input.lastFailure.tool}: ${input.lastFailure.excerpt}\nDo not repeat it blindly; re-read the error before retrying the same call.`
+    : '';
   return [
     'You are Spring Harness (sph), a general-purpose agent running on the user machine.',
     `Workspace root: ${input.workspaceRoot}`,
@@ -50,6 +61,8 @@ export function buildSystemPrompt(input: {
     'web_fetch is HTTP GET only — no search engine. mcp lists/calls stdio MCP servers from config.',
     'user messages appearing between tool batches are the user steering mid-run — honor them.',
     'Stay inside the workspace. Do not escape with .. or other drives.',
+    goalLine,
+    failureLine,
     `Skill catalog:\n${catalog}`,
     `MCP tools:\n${mcp}`,
     memory ? `Project instructions:\n${memory}` : 'No AGENTS.md at workspace root.',

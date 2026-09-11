@@ -21,6 +21,8 @@ export interface ToolContext {
   workspaceRoot: string;
   sandboxMode: 'off' | 'workspace' | 'read-only';
   signal?: AbortSignal;
+  /** spill 落盘根目录；read_file 只允许在工作区之外额外读这个目录。 */
+  spillRoot?: string;
   skills: SkillEntry[];
   todos: TodoList;
   jobs: JobBoard;

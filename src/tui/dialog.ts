@@ -68,16 +68,26 @@ function renderLine(text: string, width: number, paint?: (text: string) => strin
   return paint ? paint(fitted) : fitted;
 }
 
+/**
+ * 标签列与提示列之间的固定间隔。
+ *
+ * 不能依赖 pad 的尾随空格：标签显示宽度正好等于 labelWidth 时 pad 是空操作（不补一个空格），
+ * 提示会直接贴到标签上——同一个列表里就出现「有的行有间隔、有的行没有」，提示列整体错开。
+ * 所以间隔必须显式补，而且调用方算标签列宽时也要把它算进去。
+ */
+export const CHOICE_GAP = 2;
+
 function renderChoice(choice: DialogChoice, width: number, styler: Styler): string {
   const label = choice.labelWidth === undefined
     ? `  ${choice.label}`
-    : `  ${pad(truncate(choice.label, choice.labelWidth, ''), choice.labelWidth)}`;
-  const hint = choice.hint === undefined ? '' : choice.hint;
-  const plain = truncate(`${label}${hint}`, width, '');
+    : `  ${pad(choice.label, choice.labelWidth)}`;
+  const hint = choice.hint ?? '';
+  const gap = hint === '' ? '' : ' '.repeat(CHOICE_GAP);
+  const plain = truncate(`${label}${gap}${hint}`, width, '');
   if (choice.selected) return styler.inverse(pad(plain, width));
 
   if (hint === '') return renderLine(plain, width);
-  const labelWidth = Math.min(width, displayWidth(label));
-  const visibleHint = truncate(hint, Math.max(0, width - labelWidth), '');
-  return renderLine(`${label}${styler.dim(visibleHint)}`, width);
+  const headWidth = Math.min(width, displayWidth(label) + CHOICE_GAP);
+  const visibleHint = truncate(hint, Math.max(0, width - headWidth), '');
+  return renderLine(`${label}${gap}${styler.dim(visibleHint)}`, width);
 }

@@ -1,3 +1,4 @@
+import { llmError } from './errors.js';
 import type { ChatMessage, ContentPart, ReasoningEffort } from './openai.js';
 import { flattenToolSpec, type SseAcc } from './openai.js';
 import type { ProtocolAdapter } from './stream-client.js';
@@ -122,7 +123,7 @@ export function toAnthropicRequest(options: {
 }
 
 /** Anthropic SSE 事件流 → 与 chat.completions 共享的 SseAcc 累积结构。 */
-export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?: string } {
+export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
   const event: unknown = JSON.parse(payload);
   if (event === null || typeof event !== 'object') return {};
   const data = event as {
@@ -136,7 +137,7 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
     error?: { message?: string };
   };
   if (data.error || data.type === 'error') {
-    throw new Error(`Anthropic stream error: ${data.error?.message?.trim() || 'unknown'}`);
+    throw llmError('Anthropic stream error', data.error?.message?.trim() || 'unknown');
   }
   switch (data.type) {
     case 'message_start': {
@@ -163,7 +164,7 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
       // thinking_delta：Anthropic 思考链增量，与 signature_delta 不同，对用户有展示价值。
       if (data.delta?.type === 'thinking_delta' && data.delta.thinking) {
         acc.thinking += data.delta.thinking;
-        return {};
+        return { thinkingDelta: data.delta.thinking };
       }
       if (data.delta?.type === 'text_delta' && data.delta.text) {
         acc.text += data.delta.text;

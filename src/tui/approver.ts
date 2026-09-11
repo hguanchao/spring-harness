@@ -44,7 +44,7 @@ export class InteractiveApprover implements Approver {
     if (mode === 'auto' && this.classifier) {
       const verdict = await this.classifier(request);
       if (verdict.allowed) return true;
-      return this.ui.requestApproval(request, `审查器：${verdict.reason ?? 'denied'}`);
+      return this.ui.requestApproval(request, `Reviewer: ${verdict.reason ?? 'denied'}`);
     }
     return this.ui.requestApproval(request);
   }

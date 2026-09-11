@@ -1,3 +1,4 @@
+import { llmError } from './errors.js';
 import type { ProtocolAdapter } from './stream-client.js';
 
 export interface TokenUsage {
@@ -63,7 +64,7 @@ export interface LlmClient {
     messages: ChatMessage[],
     tools: unknown[],
     signal?: AbortSignal,
-    onDelta?: (delta: { text: string }) => void,
+    onDelta?: (delta: { text?: string; thinking?: string }) => void,
   ): Promise<StreamDelta>;
 }
 
@@ -108,14 +109,14 @@ export function llmErrorMessage(error: unknown): string {
 }
 
 /** 解析 OpenAI chat.completions SSE 的一行 data payload。 */
-export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: string } {
+export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
   if (payload === '[DONE]') return {};
   const json: unknown = JSON.parse(payload);
   if (json === null || typeof json !== 'object') return {};
   // 兼容端点把业务错误塞进 SSE data（HTTP 仍 200）：必须抛出，否则空 choices 会被当成成功空回复。
   const errorField = (json as { error?: unknown }).error;
   if (errorField !== undefined && errorField !== null) {
-    throw new Error(`LLM error: ${llmErrorMessage(errorField)}`);
+    throw llmError('LLM error', llmErrorMessage(errorField));
   }
   const usageRaw = (json as { usage?: unknown }).usage;
   if (usageRaw && typeof usageRaw === 'object') {
@@ -152,8 +153,10 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
   const delta = choice.delta;
   if (!delta) return {};
   let textDelta: string | undefined;
+  let thinkingDelta: string | undefined;
   if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
     acc.thinking += delta.reasoning_content;
+    thinkingDelta = delta.reasoning_content;
   }
   if (typeof delta.content === 'string' && delta.content.length > 0) {
     acc.text += delta.content;
@@ -167,7 +170,7 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
     if (call.function?.arguments) current.arguments += call.function.arguments;
     acc.tools.set(index, current);
   }
-  return { textDelta };
+  return { textDelta, thinkingDelta };
 }
 
 export function finishStream(acc: SseAcc): StreamDelta {

@@ -3,14 +3,17 @@ import { loadCompaction, projectContext, type CompactionEvent } from './compact.
 import type { AgentListener } from './events.js';
 import { TouchMemory } from './memory.js';
 import { buildSystemPrompt } from './prompt.js';
-import type { LlmClient, TokenUsage } from '../llm/openai.js';
+import { ContextOverflowError } from '../llm/errors.js';
+import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
 import { McpHub } from '../mcp/hub.js';
 import { JobBoard } from '../runtime/jobs.js';
 import { PersistentShell } from '../runtime/persistent-shell.js';
+import type { SpillStore } from '../runtime/spill.js';
 import { TodoList } from '../runtime/todos.js';
 import type { SandboxHandle } from '../sandbox/open.js';
 import { resolveShellBinary } from '../sandbox/shell-bin.js';
 import { createSession, type JsonlSession } from '../session/store.js';
+import { sessionEventData, type SessionFailure } from '../session/fold.js';
 import { lastAssistantMessage } from '../session/query.js';
 import type { SessionMessage } from '../session/types.js';
 import { scanSkills } from '../skills/scan.js';
@@ -52,6 +55,16 @@ export interface RunTurnOptions {
   /** 用户随本条 prompt 提交的图片（data URL）。 */
   userImages?: string[];
   memory?: TouchMemory;
+  /** 跨轮次任务目标（来自会话折叠）；注入系统提示词。 */
+  goal?: string;
+  /** 上一次工具失败（来自会话折叠）；注入系统提示词，避免恢复后重蹈覆辙。 */
+  lastFailure?: SessionFailure;
+  /** 超长工具结果落盘。未提供则所有结果原样进上下文（测试与库调用默认如此）。 */
+  spill?: SpillStore;
+  /** 压缩摘要专用 client（配置了 compact_model 时）；省略用主 client。 */
+  compactClient?: LlmClient;
+  /** 辅助调用（压缩）产生的用量回调，用于记账但不参与上下文水位。 */
+  onAuxUsage?: (usage: TokenUsage, purpose: string) => void;
 }
 
 /** 极简计数信号量：并行 subagent 超过上限时排队。 */
@@ -108,6 +121,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     mcpTools: mcp.listTools(),
     persistent: persistent.confined ? 'confined-oneshot' : 'long-lived',
     planMode: planState?.sessionMode === 'plan',
+    goal: options.goal,
+    lastFailure: options.lastFailure,
   });
   options.session.appendMessage({ role: 'user', content: options.prompt, images: options.userImages });
   options.session.append({
@@ -121,6 +136,10 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const mirror: SessionMessage[] = options.session.readMessages();
   let compaction: CompactionEvent | undefined = loadCompaction(options.session);
   let lastUsage: TokenUsage | undefined;
+  /** lastUsage 覆盖到的镜像位置：之后追加的消息没算进那份 prompt，估算时要补上。 */
+  let usageAnchor = mirror.length;
+  /** todo 上次落盘的样子：只有真的变了才写事件，避免每步都往 JSONL 塞一份重复快照。 */
+  let todoSnapshot = JSON.stringify(todos.list());
   const appendMessage = (message: Omit<SessionMessage, 'type' | 'ts'>): void => {
     options.session.appendMessage(message);
     mirror.push({ type: 'message', ts: new Date().toISOString(), ...message });
@@ -203,6 +222,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     noteMemoryTouch(absPath) {
       memory.noteTouch(absPath);
     },
+    spillRoot: options.spill?.root,
     async spawnSubagent(input) {
       if (input.background) {
         return jobs.startTask(input.description ?? input.prompt.slice(0, 60), (signal) =>
@@ -230,56 +250,90 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       appendMessage({ role: 'user', content: `[instructions from ${touch.relPath}]\n${touch.text}` });
     }
 
-    const projection = await projectContext({
-      messages: mirror,
-      compaction,
-      contextWindow: options.contextWindow,
-      client: options.client,
-      signal: options.signal,
-      lastUsage,
-      system,
-    });
-    if (projection.compaction) {
-      const next = projection.compaction;
-      if (next.covered !== (compaction?.covered ?? 0)) {
-        options.session.append({
-          type: 'event',
-          ts: new Date().toISOString(),
-          kind: 'compaction',
-          data: { summary: next.summary, covered: next.covered },
-        });
-        compaction = next;
-        options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
+    // 投影 + 压缩落盘集中一处：超限重试要再走一遍同样的流程。
+    const buildProjection = async (force: boolean): Promise<ChatMessage[]> => {
+      const auxUsage = options.onAuxUsage;
+      const projection = await projectContext({
+        messages: mirror,
+        compaction,
+        contextWindow: options.contextWindow,
+        // 摘要可以走便宜的小模型：它只读不写，且输出格式固定，是最典型的降本点。
+        client: options.compactClient ?? options.client,
+        signal: options.signal,
+        lastUsage,
+        lastUsageAnchor: usageAnchor,
+        force,
+        system,
+        ...(auxUsage ? { onUsage: (usage: TokenUsage) => auxUsage(usage, 'compaction') } : {}),
+      });
+      if (projection.compaction) {
+        const next = projection.compaction;
+        if (next.covered !== (compaction?.covered ?? 0)) {
+          options.session.append({
+            type: 'event',
+            ts: new Date().toISOString(),
+            kind: 'compaction',
+            data: { summary: next.summary, covered: next.covered },
+          });
+          compaction = next;
+          options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
+        }
       }
-    }
+      return projection.messages;
+    };
 
-    const streamed = { text: false };
+    let projected = await buildProjection(false);
+
+    const streamed = { text: false, thinking: false };
     // 思考开始先广播，消费端才能把 thinking 段与正文分开；complete 内部不区分思考/正文增量。
     const thinkingId = nextEventId('thinking');
     options.listener?.({ type: 'thinking_start', id: thinkingId });
     let reply: Awaited<ReturnType<RunTurnOptions['client']['complete']>>;
-    try {
-      reply = await options.client.complete(
-        projection.messages,
-        openaiTools(allowed),
-        options.signal,
-        (delta) => {
-          if (delta.text) {
-            streamed.text = true;
-            options.listener?.({ type: 'text', text: delta.text });
-          }
-        },
-      );
-    } catch (error) {
-      // 思考中途失败：补发 end 信号，防止消费端卡在 running 态。
-      options.listener?.({ type: 'thinking_end', id: thinkingId, content: '' });
-      throw error;
+    let anchorAt = mirror.length;
+    // provider 判定超窗时压缩后重试一次。上限 1 次：再失败说明单轮内容本身就超窗，
+    // 重试只会再烧一次调用。已经给用户看过正文**或思考链**时绝不重试，否则会看到重复内容。
+    let overflowRetried = false;
+    for (;;) {
+      anchorAt = mirror.length;
+      try {
+        reply = await options.client.complete(
+          projected,
+          openaiTools(allowed),
+          options.signal,
+          (delta) => {
+            if (delta.thinking) {
+              streamed.thinking = true;
+              options.listener?.({ type: 'thinking_delta', id: thinkingId, text: delta.thinking });
+            }
+            if (delta.text) {
+              streamed.text = true;
+              options.listener?.({ type: 'text', text: delta.text });
+            }
+          },
+        );
+        break;
+      } catch (error) {
+        const canRetry = error instanceof ContextOverflowError
+          && !overflowRetried
+          && !streamed.text
+          && !streamed.thinking
+          && !options.signal?.aborted;
+        if (!canRetry) {
+          // 思考中途失败：补发 end 信号，防止消费端卡在 running 态。
+          options.listener?.({ type: 'thinking_end', id: thinkingId, content: '' });
+          throw error;
+        }
+        overflowRetried = true;
+        options.listener?.({ type: 'status', text: '上下文超窗：已强制压缩，正在重试该请求...' });
+        projected = await buildProjection(true);
+      }
     }
     // 思考结束在正文之后广播：消费端完成 thinking 段与正文的分段展示。
     options.listener?.({ type: 'thinking_end', id: thinkingId, content: reply.thinking ?? '' });
     if (reply.text && !streamed.text) options.listener?.({ type: 'text', text: reply.text });
     if (reply.usage) {
       lastUsage = reply.usage;
+      usageAnchor = anchorAt;
       options.session.append({
         type: 'event',
         ts: new Date().toISOString(),
@@ -341,6 +395,12 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       } catch (error) {
         result = { ok: false, content: error instanceof Error ? error.message : String(error) };
       }
+      // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
+      // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
+      if (options.spill && result.ok && !result.images?.length) {
+        const spilled = options.spill.persist(call.name, result.content);
+        if (spilled !== undefined) result = { ...result, content: spilled };
+      }
       appendMessage({
         role: 'tool',
         content: result.content,
@@ -348,11 +408,31 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         toolName: call.name,
         images: result.images,
       });
+      // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
+      if (!result.ok) {
+        options.session.append({
+          type: 'event',
+          ts: new Date().toISOString(),
+          kind: 'tool_result',
+          data: sessionEventData.toolFailure(call.name, result.content),
+        });
+      }
       options.listener?.({ type: 'tool_end', name: call.name, id: call.id, ok: result.ok, content: result.content });
     };
 
     await Promise.all(reads.map(runOne));
     for (const call of writes) await runOne(call);
+
+    const nextTodos = JSON.stringify(todos.list());
+    if (nextTodos !== todoSnapshot) {
+      todoSnapshot = nextTodos;
+      options.session.append({
+        type: 'event',
+        ts: new Date().toISOString(),
+        kind: 'todo',
+        data: sessionEventData.todo(todos.list()),
+      });
+    }
   }
   throw new Error(`tool loop exceeded ${MAX_STEPS} steps`);
 }
