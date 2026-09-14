@@ -1,0 +1,605 @@
+import type { Approver } from '../approval/policy.js';
+import { loadCompaction, projectContext, type CompactionEvent } from './compact.js';
+import type { AgentListener, SubagentEvent } from './events.js';
+import { TouchMemory } from './memory.js';
+import { buildSystemPrompt } from './prompt.js';
+import { ContextOverflowError } from '../llm/errors.js';
+import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
+import { McpHub } from '../mcp/hub.js';
+import { JobBoard, jobNotificationText, type JobRecord, type SubagentInbox } from '../runtime/jobs.js';
+import type { SpillStore } from '../runtime/spill.js';
+import { TodoList } from '../runtime/todos.js';
+import { WorktreeStore } from '../runtime/worktrees.js';
+import type { SandboxHandle } from '../sandbox/open.js';
+import { shellArgv } from '../sandbox/shell-bin.js';
+import { errorMessage } from '../util.js';
+import { createSession, JsonlSession } from '../session/store.js';
+import { sessionEventData, type SessionFailure } from '../session/fold.js';
+import { lastAssistantMessage } from '../session/query.js';
+import type { SessionMessage, SessionRecord } from '../session/types.js';
+import { scanSkills } from '../skills/scan.js';
+import { EXPLORE_TOOLS, READ_TOOLS, ROOT_ONLY_TOOLS, findTool, openaiTools, tools } from '../tools/index.js';
+import { SUBAGENT_CONCURRENCY, type ToolContext } from '../tools/types.js';
+import { existsSync } from 'node:fs';
+
+const MAX_STEPS = 32;
+
+/**
+ * 活跃子代理 session id（进程级）：resume 校验「不在运行中」用。必须跨 runTurn 实例
+ * 共享——后台子代理会活过发起它的那一轮，按轮次建的集合看不见它们。
+ */
+const activeSubagentSessions = new Set<string>();
+
+/**
+ * 事件 id 用进程内单调序号。
+ * 旧实现用 `Date.now()`：同一毫秒内连续发出多个 ask/thinking_start 事件会撞号，
+ * 消费端（TUI）按 id 配对 start/end 时会串台。
+ */
+let eventSeq = 0;
+function nextEventId(prefix: string): string {
+  return `${prefix}-${++eventSeq}`;
+}
+
+export interface RunTurnOptions {
+  prompt: string;
+  workspaceRoot: string;
+  client: LlmClient;
+  session: JsonlSession;
+  sandbox: SandboxHandle;
+  approver: Approver;
+  contextWindow: number;
+  listener?: AgentListener;
+  signal?: AbortSignal;
+  mcp?: McpHub;
+  todos?: TodoList;
+  jobs?: JobBoard;
+  depth?: number;
+  allowedTools?: ReadonlySet<string>;
+  /** 用户随本条 prompt 提交的图片（data URL）。 */
+  userImages?: string[];
+  memory?: TouchMemory;
+  /** 跨轮次任务目标（来自会话折叠）；注入系统提示词。 */
+  goal?: string;
+  /** 上一次工具失败（来自会话折叠）；注入系统提示词，避免恢复后重蹈覆辙。 */
+  lastFailure?: SessionFailure;
+  /** 超长工具结果落盘。未提供则所有结果原样进上下文（测试与库调用默认如此）。 */
+  spill?: SpillStore;
+  /**
+   * 子代理嵌套深度预算：0 禁止派生，默认 1（对齐 grok-build 的扁平代理树）。
+   * 工具保持对子代理可见，超额调用在运行时拒绝——运行时策略统一负责拒绝。
+   */
+  maxSubagentDepth?: number;
+  /** 压缩摘要专用 client（配置了 compact_model 时）；省略用主 client。 */
+  compactClient?: LlmClient;
+  /** 辅助调用（压缩）产生的用量回调，用于记账但不参与上下文水位。 */
+  onAuxUsage?: (usage: TokenUsage, purpose: string) => void;
+  /**
+   * 父级/模型发来的消息收件箱（send_subagent_message）：每步顶部 drain 并注入为
+   * user 消息——投递到「下一个安全点」，不打断当前 LLM 调用。
+   */
+  inbox?: SubagentInbox;
+  /** 子代理 worktree 隔离的工作树仓库；省略时按需新建（isolation: worktree 才用到）。 */
+  worktrees?: WorktreeStore;
+}
+
+/** 极简计数信号量：并行 subagent 超过上限时排队。 */
+class Semaphore {
+  private waiters: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<() => void> {
+    if (this.waiters.length === 0 && this.active < this.limit) {
+      this.active++;
+      return () => this.release();
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(() => {
+        this.active++;
+        resolve(() => this.release());
+      });
+    });
+  }
+
+  private release(): void {
+    this.active--;
+    this.waiters.shift()?.();
+  }
+
+  private active = 0;
+}
+
+function parseArgs(raw: string): Record<string, unknown> {
+  if (!raw.trim()) return {};
+  const parsed: unknown = JSON.parse(raw);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('tool arguments must be an object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+export async function runTurn(options: RunTurnOptions): Promise<void> {
+  const depth = options.depth ?? 0;
+  const maxSubagentDepth = Math.max(0, Math.floor(options.maxSubagentDepth ?? 1));
+  const skills = scanSkills(options.workspaceRoot);
+  for (const warning of skills.warnings) options.listener?.({ type: 'status', text: warning });
+  const todos = options.todos ?? new TodoList();
+  const jobs = options.jobs ?? new JobBoard();
+  const mcp = options.mcp ?? new McpHub();
+  const memory = options.memory ?? new TouchMemory(options.workspaceRoot);
+  const worktrees = options.worktrees ?? new WorktreeStore();
+
+  const system = buildSystemPrompt({
+    workspaceRoot: options.workspaceRoot,
+    sandbox: options.sandbox.status.mode,
+    skills: skills.catalog,
+    mcpTools: mcp.listTools(),
+    goal: options.goal,
+    lastFailure: options.lastFailure,
+  });
+  options.session.appendMessage({ role: 'user', content: options.prompt, images: options.userImages });
+  options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
+
+  // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。
+  const mirror: SessionMessage[] = options.session.readMessages();
+  let compaction: CompactionEvent | undefined = loadCompaction(options.session);
+  let lastUsage: TokenUsage | undefined;
+  /** lastUsage 覆盖到的镜像位置：之后追加的消息没算进那份 prompt，估算时要补上。 */
+  let usageAnchor = mirror.length;
+  /** todo 上次落盘的样子：只有真的变了才写事件，避免每步都往 JSONL 塞一份重复快照。 */
+  let todoSnapshot = JSON.stringify(todos.list());
+  const appendMessage = (message: Omit<SessionMessage, 'type' | 'ts'>): void => {
+    options.session.appendMessage(message);
+    mirror.push({ type: 'message', ts: new Date().toISOString(), ...message });
+  };
+
+  const subagentSlots = new Semaphore(SUBAGENT_CONCURRENCY);
+  /**
+   * 子代理事件摘要落盘的上限：最终报告可以很长，完整版在子会话 JSONL 里，
+   * 主会话事件只留足够回放块展开阅读的头部。
+   */
+  const SUBAGENT_SUMMARY_LIMIT = 2000;
+
+  const runChild = async (input: {
+    prompt: string;
+    type: 'explore' | 'general';
+    signal?: AbortSignal;
+    description?: string;
+    mode: 'foreground' | 'background';
+    toolCallId?: string;
+    /** 续接的源子代理会话 id；源消息复制进新会话（grok 的 resume_from 同语义）。 */
+    resumeFrom?: string;
+    /** worktree：在隔离 git 工作树里跑。 */
+    isolation?: 'none' | 'worktree';
+    /** 后台任务的 record：子会话创建后回写 subagentSessionId 供 resume / send 寻址。 */
+    jobRecord?: JobRecord;
+  }): Promise<string> => {
+    // resume 校验（grok 同语义：源必须已完成、同类型）。源子代理的 start 事件落在
+    // 父会话文件里（childSessionId 关联），childType 与 worktree 从那里读。
+    let sourceRecords: SessionRecord[] = [];
+    let resumedWorktree: string | undefined;
+    if (input.resumeFrom !== undefined) {
+      if (activeSubagentSessions.has(input.resumeFrom)) {
+        throw new Error(`resume_from: subagent ${input.resumeFrom} is still running`);
+      }
+      sourceRecords = new JsonlSession(options.session.dir, input.resumeFrom).readAll();
+      if (sourceRecords.length === 0) {
+        throw new Error(`resume_from: subagent session ${input.resumeFrom} not found`);
+      }
+      const starts = options.session
+        .readAll()
+        .filter(
+          (record) =>
+            record.type === 'event'
+            && record.kind === 'subagent'
+            && record.data.phase === 'start'
+            && record.data.childSessionId === input.resumeFrom,
+        );
+      const last = starts.at(-1);
+      if (last && last.type === 'event') {
+        if (last.data.childType !== undefined && last.data.childType !== input.type) {
+          throw new Error(
+            `resume_from: source type ${String(last.data.childType)} does not match requested ${input.type}`,
+          );
+        }
+        if (typeof last.data.worktree === 'string') resumedWorktree = last.data.worktree;
+      }
+    }
+
+    // workspace 决策：resume 沿用源会话的工作树（仍在时，grok 同语义）；isolation
+    // worktree 在下方新建。树建在 workspace 内——Windows ACL 写授权与 bwrap bind 都按
+    // workspace root 授予，放外面子代理写不进。
+    let childWorkspaceRoot = options.workspaceRoot;
+    if (resumedWorktree !== undefined && existsSync(resumedWorktree)) {
+      childWorkspaceRoot = resumedWorktree;
+    }
+
+    const childSession = createSession(options.session.dir, childWorkspaceRoot, false);
+    const subId = nextEventId('sub');
+    const startedAt = Date.now();
+    activeSubagentSessions.add(childSession.id);
+    if (input.jobRecord) input.jobRecord.subagentSessionId = childSession.id;
+    if (input.resumeFrom !== undefined) {
+      // 续接：源消息（含工具往来）与 compaction 事件复制进新会话——runTurn 从会话
+      // 文件 seed 镜像，子代理自然带上完整上下文。其余事件（subagent/todo/usage）
+      // 属于源会话的历史，不复制：resume 的是对话，不是事件流。
+      for (const record of sourceRecords) {
+        if (record.type === 'message' || (record.type === 'event' && record.kind === 'compaction')) {
+          childSession.append(record);
+        }
+      }
+    }
+    // isolation worktree：从 HEAD 派生 sph/<id> 分支的隔离工作树（grok 同语义：
+    // 解析失败即 spawn 失败，不静默降级成共享工作区）。
+    let childWorktree: string | undefined;
+    if (input.isolation === 'worktree' && input.resumeFrom === undefined) {
+      const created = worktrees.create(options.workspaceRoot, childSession.id);
+      childWorkspaceRoot = created.path;
+      childWorktree = created.path;
+    }
+    // 后台子代理注册收件箱：仍在跑时父级/模型才能投递消息。foreground 阻塞父级，
+    // 天然不可寻址，不注册。
+    const childInbox = {
+      queue: [] as string[],
+      push(text: string): void {
+        this.queue.push(text);
+      },
+      drain(): string[] {
+        const out = this.queue;
+        this.queue = [];
+        return out;
+      },
+    };
+    if (input.mode === 'background') jobs.attachInbox(childSession.id, childInbox);
+
+    const description = input.description ?? input.prompt.slice(0, 60);
+    const subagentStart = {
+      id: subId,
+      description,
+      mode: input.mode,
+      childType: input.type,
+      childSessionId: childSession.id,
+      ...(input.toolCallId === undefined ? {} : { toolCallId: input.toolCallId }),
+      ...(childWorktree === undefined ? {} : { worktree: childWorktree }),
+    };
+    options.listener?.({ type: 'subagent_start', ...subagentStart });
+    options.session.appendEvent('subagent', { phase: 'start', ...subagentStart });
+    // 子事件封进 subagent_event：主流程的步骤块从此只属于主代理，TUI 按 id 归位子活动。
+    // usage / ask 是全局语义（用量计数、审批提示），保持直通；done 由 subagent_end 表达。
+    // usage 同时按子代理累计——subagent_end 要带出该子代理自己的 token 消耗量。
+    const childUsage = { promptTokens: 0, completionTokens: 0 };
+    const childListener: AgentListener = (event) => {
+      if (event.type === 'usage') {
+        childUsage.promptTokens += event.promptTokens;
+        childUsage.completionTokens += event.completionTokens;
+        options.listener?.(event);
+        options.listener?.({
+          type: 'subagent_event',
+          id: subId,
+          event: { type: 'usage', promptTokens: event.promptTokens, completionTokens: event.completionTokens },
+        });
+        return;
+      }
+      if (event.type === 'ask') {
+        options.listener?.(event);
+        return;
+      }
+      if (event.type === 'done') return;
+      // 孙代理的 subagent_start/end 也从这里封进 subagent_event（消费端按类型自行取舍：
+      // TUI 把孙活动并进子代理的聚合计数，不单开块）。
+      options.listener?.({ type: 'subagent_event', id: subId, event: event as SubagentEvent });
+    };
+
+    const allowed = input.type === 'explore'
+      ? EXPLORE_TOOLS
+      : new Set(tools.map((tool) => tool.name).filter((name) => !ROOT_ONLY_TOOLS.has(name)));
+    let outcome: { ok: boolean; summary: string } = { ok: true, summary: '' };
+    try {
+      await runTurn({
+        prompt: input.prompt,
+        workspaceRoot: childWorkspaceRoot,
+        client: options.client,
+        session: childSession,
+        sandbox: options.sandbox,
+        approver: options.approver,
+        contextWindow: options.contextWindow,
+        listener: childListener,
+        signal: input.signal ?? options.signal,
+        mcp,
+        todos,
+        jobs,
+        memory,
+        depth: depth + 1,
+        maxSubagentDepth,
+        allowedTools: allowed,
+        worktrees,
+        ...(input.mode === 'background' ? { inbox: childInbox } : {}),
+      });
+      const last = lastAssistantMessage(childSession.readMessages());
+      outcome = { ok: true, summary: last?.content || '(subagent produced no assistant text)' };
+      // 结果带 session id footer：模型据此能 resume 或继续发消息，不必再查 jobs。
+      return `${outcome.summary}\n\n[subagent session: ${childSession.id} — continue with subagent(resume_from: "${childSession.id}")]`;
+    } catch (error) {
+      outcome = { ok: false, summary: errorMessage(error) };
+      throw error;
+    } finally {
+      // start/end 成对发出、成对落盘：中途崩溃最多留下没有 end 的块，恢复端按 interrupted 呈现。
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      const tokens = childUsage.promptTokens + childUsage.completionTokens;
+      const lifecycle = {
+        ...(input.resumeFrom === undefined ? {} : { resumedFrom: input.resumeFrom }),
+        ...(childWorktree === undefined ? {} : { worktree: childWorktree }),
+      };
+      options.listener?.({
+        type: 'subagent_end',
+        id: subId,
+        ok: outcome.ok,
+        durationMs,
+        summary: outcome.summary,
+        tokens,
+        ...lifecycle,
+      });
+      options.session.appendEvent('subagent', {
+        phase: 'end',
+        id: subId,
+        ok: outcome.ok,
+        durationMs,
+        tokens,
+        summary: outcome.summary.slice(0, SUBAGENT_SUMMARY_LIMIT),
+        ...lifecycle,
+      });
+      jobs.detachInbox(childSession.id);
+      activeSubagentSessions.delete(childSession.id);
+    }
+  };
+
+  const ctx: ToolContext = {
+    workspaceRoot: options.workspaceRoot,
+    sandboxMode: options.sandbox.status.mode,
+    signal: options.signal,
+    skills: skills.catalog,
+    todos,
+    jobs,
+    mcp,
+    async runShell(command, timeoutMs) {
+      return options.sandbox.run({
+        ...shellArgv(command),
+        cwd: options.workspaceRoot,
+        timeoutMs,
+        signal: options.signal,
+      });
+    },
+    async approve(tool, detail) {
+      options.listener?.({ type: 'ask', id: nextEventId('ask'), tool, detail });
+      return options.approver.decide({ tool, command: detail });
+    },
+    async askUser(prompt) {
+      options.listener?.({ type: 'ask', id: nextEventId('ask'), tool: 'ask_user', detail: prompt });
+      return options.approver.ask?.(prompt) ?? '';
+    },
+    sendToSubagent(id, text) {
+      return jobs.sendToSubagent(id, text);
+    },
+    async escalateReadOnlyWrite(path) {
+      options.listener?.({
+        type: 'ask',
+        id: nextEventId('ask'),
+        tool: 'escalate',
+        detail: `run this write at workspace sandbox: ${path}`,
+      });
+      return options.approver.decide({ tool: 'escalate', path });
+    },
+    noteMemoryTouch(absPath) {
+      memory.noteTouch(absPath);
+    },
+    spillRoot: options.spill?.root,
+    async spawnSubagent(input) {
+      // 深度预算守卫（对齐 grok-build 的扁平代理树）：工具保持对子代理可见，运行时统一拒绝
+      // 超额派生。抛错经 runOne 的 catch 转成 isError 工具结果，模型能明确读到预算耗尽。
+      const childDepth = depth + 1;
+      if (childDepth > maxSubagentDepth) {
+        throw new Error(`subagent depth ${childDepth} exceeds maxDepth ${maxSubagentDepth}: a subagent cannot spawn its own subagents (flat by default)`);
+      }
+      const child = {
+        prompt: input.prompt,
+        type: input.type,
+        description: input.description,
+        toolCallId: input.toolCallId,
+        resumeFrom: input.resumeFrom,
+        isolation: input.isolation,
+      };
+      if (input.background) {
+        // task 回调收到自己的 record：子会话创建后回写 subagentSessionId（runChild 内完成）。
+        return jobs.startTask(input.description ?? input.prompt.slice(0, 60), (signal, job) =>
+          runChild({ ...child, mode: 'background', signal, jobRecord: job }));
+      }
+      const release = await subagentSlots.acquire();
+      try {
+        return await runChild({ ...child, mode: 'foreground' });
+      } finally {
+        release();
+      }
+    },
+  };
+
+  const allowed = options.allowedTools;
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    if (options.signal?.aborted) throw new Error('aborted');
+
+    // 后台任务完成推送（grok-build 语义：完成唤醒父级）：轮次进行中收到即注入下一步。
+    // 已收尾的轮次由 TUI 在 finally 里 drain 并自动开后续轮次；delivered 标记保证不重不漏。
+    for (const job of jobs.drainNotifications()) {
+      appendMessage({ role: 'user', content: jobNotificationText(job) });
+    }
+
+    // 父级/模型发来的消息（send_subagent_message）在下一步顶部入列——投递到
+    // 下一个安全点（grok 的 steer 语义），不打断当前 LLM 调用。
+    for (const text of options.inbox?.drain() ?? []) {
+      appendMessage({ role: 'user', content: `[message from parent session]\n${text}` });
+    }
+
+    // 触碰到的嵌套指令在进入下一次 LLM 请求前入列。
+    for (const touch of memory.drain()) {
+      appendMessage({ role: 'user', content: `[instructions from ${touch.relPath}]\n${touch.text}` });
+    }
+
+    // 投影 + 压缩落盘集中一处：超限重试要再走一遍同样的流程。
+    const buildProjection = async (force: boolean): Promise<ChatMessage[]> => {
+      const auxUsage = options.onAuxUsage;
+      const projection = await projectContext({
+        messages: mirror,
+        compaction,
+        contextWindow: options.contextWindow,
+        // 摘要可以走便宜的小模型：它只读不写，且输出格式固定，是最典型的降本点。
+        client: options.compactClient ?? options.client,
+        signal: options.signal,
+        lastUsage,
+        lastUsageAnchor: usageAnchor,
+        force,
+        system,
+        ...(auxUsage ? { onUsage: (usage: TokenUsage) => auxUsage(usage, 'compaction') } : {}),
+      });
+      if (projection.compaction) {
+        const next = projection.compaction;
+        if (next.covered !== (compaction?.covered ?? 0)) {
+          options.session.appendEvent('compaction', { summary: next.summary, covered: next.covered });
+          compaction = next;
+          options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
+        }
+      }
+      return projection.messages;
+    };
+
+    let projected = await buildProjection(false);
+
+    const streamed = { text: false, thinking: false };
+    // 思考开始先广播，消费端才能把 thinking 段与正文分开；complete 内部不区分思考/正文增量。
+    const thinkingId = nextEventId('thinking');
+    options.listener?.({ type: 'thinking_start', id: thinkingId });
+    let reply: Awaited<ReturnType<RunTurnOptions['client']['complete']>>;
+    let anchorAt = mirror.length;
+    // provider 判定超窗时压缩后重试一次。上限 1 次：再失败说明单轮内容本身就超窗，
+    // 重试只会再烧一次调用。已经给用户看过正文**或思考链**时绝不重试，否则会看到重复内容。
+    let overflowRetried = false;
+    for (;;) {
+      anchorAt = mirror.length;
+      try {
+        reply = await options.client.complete(
+          projected,
+          openaiTools(allowed),
+          options.signal,
+          (delta) => {
+            if (delta.thinking) {
+              streamed.thinking = true;
+              options.listener?.({ type: 'thinking_delta', id: thinkingId, text: delta.thinking });
+            }
+            if (delta.text) {
+              streamed.text = true;
+              options.listener?.({ type: 'text', text: delta.text });
+            }
+          },
+        );
+        break;
+      } catch (error) {
+        const canRetry = error instanceof ContextOverflowError
+          && !overflowRetried
+          && !streamed.text
+          && !streamed.thinking
+          && !options.signal?.aborted;
+        if (!canRetry) {
+          // 思考中途失败：补发 end 信号，防止消费端卡在 running 态。
+          options.listener?.({ type: 'thinking_end', id: thinkingId, content: '' });
+          throw error;
+        }
+        overflowRetried = true;
+        options.listener?.({ type: 'status', text: '上下文超窗：已强制压缩，正在重试该请求...' });
+        projected = await buildProjection(true);
+      }
+    }
+    // 思考结束在正文之后广播：消费端完成 thinking 段与正文的分段展示。
+    options.listener?.({ type: 'thinking_end', id: thinkingId, content: reply.thinking ?? '' });
+    if (reply.text && !streamed.text) options.listener?.({ type: 'text', text: reply.text });
+    if (reply.usage) {
+      lastUsage = reply.usage;
+      usageAnchor = anchorAt;
+      options.session.appendEvent('usage', { ...reply.usage });
+      options.listener?.({
+        type: 'usage',
+        promptTokens: reply.usage.promptTokens,
+        completionTokens: reply.usage.completionTokens,
+        ...(reply.usage.cachedTokens === undefined ? {} : { cachedTokens: reply.usage.cachedTokens }),
+      });
+    }
+
+    if (!reply.toolCalls?.length) {
+      appendMessage({ role: 'assistant', content: reply.text ?? '' });
+      options.session.appendEvent('turn_end', { depth });
+      options.listener?.({ type: 'done' });
+      return;
+    }
+
+    const parsedCalls = reply.toolCalls.map((call) => ({
+      id: call.id,
+      name: call.name,
+      arguments: parseArgs(call.arguments),
+    }));
+    appendMessage({
+      role: 'assistant',
+      content: reply.text ?? '',
+      toolCalls: parsedCalls,
+    });
+
+    const reads = parsedCalls.filter((call) => READ_TOOLS.has(call.name));
+    const writes = parsedCalls.filter((call) => !READ_TOOLS.has(call.name));
+
+    // 拒绝理由集中在一处判定：runOne 只负责执行与回写，可读性比嵌套 if/else 好。
+    const denyReason = (name: string): string | undefined => {
+      if (allowed && !allowed.has(name)) return `tool not allowed in this agent: ${name}`;
+      if (ROOT_ONLY_TOOLS.has(name) && depth > 0) return `tool only available to the root session: ${name}`;
+      if (!findTool(name)) return `unknown tool: ${name}`;
+      return undefined;
+    };
+
+    const runOne = async (call: (typeof parsedCalls)[number]) => {
+      options.listener?.({ type: 'tool_start', name: call.name, id: call.id, args: call.arguments });
+      const tool = findTool(call.name);
+      const denied = denyReason(call.name);
+      let result;
+      try {
+        if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${call.name}` };
+        else result = await tool.execute(call.arguments, ctx, call.id);
+      } catch (error) {
+        result = { ok: false, content: errorMessage(error) };
+      }
+      // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
+      // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
+      if (options.spill && result.ok && !result.images?.length) {
+        const spilled = options.spill.persist(call.name, result.content);
+        if (spilled !== undefined) result = { ...result, content: spilled };
+      }
+      appendMessage({
+        role: 'tool',
+        content: result.content,
+        toolCallId: call.id,
+        toolName: call.name,
+        images: result.images,
+      });
+      // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
+      if (!result.ok) {
+        options.session.appendEvent('tool_result', sessionEventData.toolFailure(call.name, result.content));
+      }
+      options.listener?.({ type: 'tool_end', name: call.name, id: call.id, ok: result.ok, content: result.content });
+    };
+
+    await Promise.all(reads.map(runOne));
+    for (const call of writes) await runOne(call);
+
+    const nextTodos = JSON.stringify(todos.list());
+    if (nextTodos !== todoSnapshot) {
+      todoSnapshot = nextTodos;
+      options.session.appendEvent('todo', sessionEventData.todo(todos.list()));
+    }
+  }
+  throw new Error(`tool loop exceeded ${MAX_STEPS} steps`);
+}
