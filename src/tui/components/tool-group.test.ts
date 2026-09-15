@@ -4,7 +4,16 @@ import type { TUI } from '../core/index.js';
 import { TOOL_DETAIL_INDENT, TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from './tool-execution.js';
 import { ToolGroupComponent } from './tool-group.js';
 
-const ui = { requestRender: () => {}, requestViewportRender: () => {} } as unknown as TUI;
+let renderCount = 0;
+let viewportCount = 0;
+const ui = {
+  requestRender: () => {
+    renderCount++;
+  },
+  requestViewportRender: () => {
+    viewportCount++;
+  },
+} as unknown as TUI;
 const STRIP = /\x1b\[[0-9;]*m/g;
 
 function indentOf(line: string): number {
@@ -129,5 +138,30 @@ describe('ToolGroupComponent 思考段的独立展开', () => {
     group.setExpanded(false, false);
     const text = rowsOf(group).join('\n');
     assert.ok(!text.includes('第一轮') && !text.includes('第二轮') && !text.includes('第三轮'));
+  });
+});
+
+describe('ToolGroupComponent 空思考链', () => {
+  it('收尾时空思考不占行', () => {
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    group.setThinking('', false, 800);
+    const rows = rowsOf(group);
+    assert.equal(rows.length, 0);
+    assert.ok(!rows.some((row) => row.includes('思考结束') || row.includes('Thinking')));
+  });
+});
+
+describe('ToolGroupComponent 流式思考的绘制通道', () => {
+  it('running 增量仍走 requestRender：思考段在转录里，视口通道会命中滚动缓存', () => {
+    renderCount = 0;
+    viewportCount = 0;
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    renderCount = 0;
+    viewportCount = 0;
+    group.setThinking('逐步思考', true);
+    assert.ok(renderCount >= 1, `流式思考应 bump 转录 generation，实际 requestRender=${renderCount}`);
+    assert.equal(viewportCount, 0);
   });
 });

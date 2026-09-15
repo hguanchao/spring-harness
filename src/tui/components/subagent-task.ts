@@ -64,8 +64,7 @@ export class SubagentTaskComponent extends Container {
     this.addChild(this.text);
     this.timer = setInterval(() => {
       this.markDirty();
-      if (isViewportTUI(this.ui)) this.ui.requestViewportRender();
-      else this.ui.requestRender();
+      this.paintDock();
     }, SPIN_MS);
   }
 
@@ -78,14 +77,19 @@ export class SubagentTaskComponent extends Container {
     this.activity = text;
     this.activityError = error;
     this.markDirty();
-    this.ui.requestRender();
+    this.paintDock();
   }
 
   addTokens(delta: number): void {
     if (!Number.isFinite(delta) || delta <= 0) return;
     this.tokens += delta;
     this.markDirty();
-    this.ui.requestRender();
+    this.paintDock();
+  }
+
+  private paintDock(): void {
+    if (isViewportTUI(this.ui)) this.ui.requestViewportRender();
+    else this.ui.requestRender();
   }
 
   private markDirty(): void {

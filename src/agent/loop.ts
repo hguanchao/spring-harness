@@ -1,8 +1,18 @@
 import type { Approver } from '../approval/policy.js';
-import { loadCompaction, projectContext, type CompactionEvent } from './compact.js';
+import {
+  flushWireImages,
+  loadCompaction,
+  projectContext,
+  pushSessionMessage,
+  wireFromMessages,
+  type CompactionEvent,
+  type WireState,
+} from './compact.js';
 import type { AgentListener, SubagentEvent } from './events.js';
 import { TouchMemory, touchInstructionBlock } from './memory.js';
+import { PLAN_BLOCKED_TOOLS, planBlockedReason } from './plan.js';
 import { buildSystemPrompt } from './prompt.js';
+import { runToolBatch } from './tool-run.js';
 import { ContextOverflowError } from '../llm/errors.js';
 import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
 import { McpHub } from '../mcp/hub.js';
@@ -16,10 +26,11 @@ import { errorMessage } from '../util.js';
 import { createSession, JsonlSession } from '../session/store.js';
 import { sessionEventData, type SessionFailure } from '../session/fold.js';
 import { lastAssistantMessage } from '../session/query.js';
+import { repairDanglingTools } from '../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../session/types.js';
 import { scanSkills } from '../skills/scan.js';
-import { EXPLORE_TOOLS, READ_TOOLS, ROOT_ONLY_TOOLS, findTool, openaiTools, tools } from '../tools/index.js';
-import { SUBAGENT_CONCURRENCY, type ToolContext } from '../tools/types.js';
+import { EXPLORE_TOOLS, ROOT_ONLY_TOOLS, findTool, isConcurrencySafe, openaiTools, tools } from '../tools/index.js';
+import { SUBAGENT_CONCURRENCY, type ToolContext, type ToolResult } from '../tools/types.js';
 import { subagentPrompt, type SubagentRole } from './subagent-prompt.js';
 import { existsSync } from 'node:fs';
 
@@ -82,6 +93,12 @@ export interface RunTurnOptions {
   /** 子代理 worktree 隔离的工作树仓库；省略时按需新建（isolation: worktree 才用到）。 */
   worktrees?: WorktreeStore;
   /**
+   * 计划模式开关（与 TUI 共享同一对象）。enter/exit 工具会原地翻转；
+   * 每步重读，所以一轮中途进出会在下一步的系统提示词里生效。
+   */
+  planMode?: { active: boolean };
+  reviewPlan?: (plan: string, title: string) => Promise<{ approved: boolean; feedback?: string }>;
+  /**
    * 子代理角色。设置时在主系统提示词之后追加该角色的约束段（只读边界、扁平代理树、
    * 产出格式、被拒出路）——子代理此前与主代理共用同一份提示词，缺这些边界。
    */
@@ -135,28 +152,34 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const memory = options.memory ?? new TouchMemory(options.workspaceRoot);
   const worktrees = options.worktrees ?? new WorktreeStore();
 
-  const system = buildSystemPrompt({
-    workspaceRoot: options.workspaceRoot,
-    sandbox: options.sandbox.status.mode,
-    skills: skills.catalog,
-    mcpTools: mcp.listTools(),
-    // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
-    // 整段消失，而不是留下一句指向不存在工具的指令。
-    allowedTools: options.allowedTools,
-    goal: options.goal,
-    lastFailure: options.lastFailure,
-  });
-  // 子代理角色段追加在末尾：主提示词在前、角色约束在后，父级主 turn 的前缀保持一致
-  // （缓存命中），且角色约束作为最后读到的一段不会被前面的通用规则盖过。
-  const systemPrompt = options.subagentRole
-    ? `${system}\n\n${subagentPrompt(options.subagentRole)}`
-    : system;
+  // 每步重读 planMode：enter/exit 发生在工具批里，下一步请求必须带上新引导。
+  const currentSystem = (): string => {
+    const system = buildSystemPrompt({
+      workspaceRoot: options.workspaceRoot,
+      sandbox: options.sandbox.status.mode,
+      skills: skills.catalog,
+      mcpTools: mcp.listTools(),
+      // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
+      // 整段消失，而不是留下一句指向不存在工具的指令。
+      allowedTools: options.allowedTools,
+      goal: options.goal,
+      lastFailure: options.lastFailure,
+      planMode: options.planMode?.active === true,
+    });
+    // 子代理角色段追加在末尾：主提示词在前、角色约束在后，父级主 turn 的前缀保持一致
+    // （缓存命中），且角色约束作为最后读到的一段不会被前面的通用规则盖过。
+    return options.subagentRole
+      ? `${system}\n\n${subagentPrompt(options.subagentRole)}`
+      : system;
+  };
   options.session.appendMessage({ role: 'user', content: options.prompt, images: options.userImages });
   options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
 
   // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。
   const mirror: SessionMessage[] = options.session.readMessages();
+  repairDanglingTools(options.session, mirror);
   let compaction: CompactionEvent | undefined = loadCompaction(options.session);
+  let wire: WireState = wireFromMessages(mirror, compaction);
   let lastUsage: TokenUsage | undefined;
   /** lastUsage 覆盖到的镜像位置：之后追加的消息没算进那份 prompt，估算时要补上。 */
   let usageAnchor = mirror.length;
@@ -164,7 +187,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   let todoSnapshot = JSON.stringify(todos.list());
   const appendMessage = (message: Omit<SessionMessage, 'type' | 'ts'>): void => {
     options.session.appendMessage(message);
-    mirror.push({ type: 'message', ts: new Date().toISOString(), ...message });
+    const row: SessionMessage = { type: 'message', ts: new Date().toISOString(), ...message };
+    mirror.push(row);
+    pushSessionMessage(wire, row);
   };
 
   const subagentSlots = new Semaphore(SUBAGENT_CONCURRENCY);
@@ -395,6 +420,23 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     sendToSubagent(id, text) {
       return jobs.sendToSubagent(id, text);
     },
+    planMode: options.planMode,
+    sessionDir: options.session.dir,
+    sessionId: options.session.id,
+    setPlanMode: options.planMode
+      ? (active: boolean) => {
+          if (!options.planMode || options.planMode.active === active) return;
+          options.planMode.active = active;
+          options.session.appendEvent('plan_mode', sessionEventData.planMode(active));
+          options.listener?.({
+            type: 'status',
+            text: active
+              ? 'Plan mode on — explore and design; writes are blocked until the plan is approved.'
+              : 'Plan mode off.',
+          });
+        }
+      : undefined,
+    reviewPlan: options.reviewPlan,
     async escalateReadOnlyWrite(path) {
       options.listener?.({
         type: 'ask',
@@ -463,9 +505,11 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // 投影 + 压缩落盘集中一处：超限重试要再走一遍同样的流程。
     const buildProjection = async (force: boolean): Promise<ChatMessage[]> => {
       const auxUsage = options.onAuxUsage;
+      flushWireImages(wire);
       const projection = await projectContext({
         messages: mirror,
         compaction,
+        base: wire.messages,
         contextWindow: options.contextWindow,
         // 摘要可以走便宜的小模型：它只读不写，且输出格式固定，是最典型的降本点。
         client: options.compactClient ?? options.client,
@@ -473,7 +517,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         lastUsage,
         lastUsageAnchor: usageAnchor,
         force,
-        system: systemPrompt,
+        system: currentSystem(),
         ...(auxUsage ? { onUsage: (usage: TokenUsage) => auxUsage(usage, 'compaction') } : {}),
       });
       if (projection.compaction) {
@@ -481,6 +525,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         if (next.covered !== (compaction?.covered ?? 0)) {
           options.session.appendEvent('compaction', { summary: next.summary, covered: next.covered });
           compaction = next;
+          wire = wireFromMessages(mirror, compaction);
           options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
         }
       }
@@ -490,7 +535,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     let projected = await buildProjection(false);
 
     const streamed = { text: false, thinking: false };
-    // 思考开始先广播，消费端才能把 thinking 段与正文分开；complete 内部不区分思考/正文增量。
+    // 思考段必须在 complete 之前开组：正文会断开当前分组，后补 start 会把「思考结束」插到前言后面。
+    // 状态行是否显示 Thinking… 由 TUI 看有没有 thinking_delta，这里只保证 start/end 成对。
     const thinkingId = nextEventId('thinking');
     options.listener?.({ type: 'thinking_start', id: thinkingId });
     let reply: Awaited<ReturnType<RunTurnOptions['client']['complete']>>;
@@ -533,7 +579,6 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         projected = await buildProjection(true);
       }
     }
-    // 思考结束在正文之后广播：消费端完成 thinking 段与正文的分段展示。
     options.listener?.({ type: 'thinking_end', id: thinkingId, content: reply.thinking ?? '' });
     if (reply.text && !streamed.text) options.listener?.({ type: 'text', text: reply.text });
     if (reply.usage) {
@@ -557,68 +602,80 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       });
     }
 
+    const reasoning = reply.reasoning?.length ? { reasoning: reply.reasoning } : {};
     if (!reply.toolCalls?.length) {
-      appendMessage({ role: 'assistant', content: reply.text ?? '' });
+      appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
       options.session.appendEvent('turn_end', { depth });
       options.listener?.({ type: 'done' });
       return;
     }
 
-    const parsedCalls = reply.toolCalls.map((call) => ({
-      id: call.id,
-      name: call.name,
-      arguments: parseArgs(call.arguments),
-    }));
+    const parseErrors = new Map<string, string>();
+    const parsedCalls = reply.toolCalls.map((call) => {
+      try {
+        return { id: call.id, name: call.name, arguments: parseArgs(call.arguments) };
+      } catch (error) {
+        parseErrors.set(call.id, errorMessage(error));
+        return { id: call.id, name: call.name, arguments: {} };
+      }
+    });
     appendMessage({
       role: 'assistant',
       content: reply.text ?? '',
       toolCalls: parsedCalls,
+      ...reasoning,
     });
 
-    const reads = parsedCalls.filter((call) => READ_TOOLS.has(call.name));
-    const writes = parsedCalls.filter((call) => !READ_TOOLS.has(call.name));
-
-    // 拒绝理由集中在一处判定：runOne 只负责执行与回写，可读性比嵌套 if/else 好。
-    const denyReason = (name: string): string | undefined => {
+    // 拒绝理由集中在一处判定：execute 只负责执行，提交由 runToolBatch 按模型序推进。
+    const denyReason = (name: string, args: Record<string, unknown> = {}): string | undefined => {
       if (allowed && !allowed.has(name)) return `tool not allowed in this agent: ${name}`;
       if (ROOT_ONLY_TOOLS.has(name) && depth > 0) return `tool only available to the root session: ${name}`;
       if (!findTool(name)) return `unknown tool: ${name}`;
+      if (options.planMode?.active && PLAN_BLOCKED_TOOLS.has(name)) {
+        if (name === 'subagent' && args.type === 'explore') return undefined;
+        return planBlockedReason(name);
+      }
       return undefined;
     };
 
-    const runOne = async (call: (typeof parsedCalls)[number]) => {
-      options.listener?.({ type: 'tool_start', name: call.name, id: call.id, args: call.arguments });
-      const tool = findTool(call.name);
-      const denied = denyReason(call.name);
-      let result;
-      try {
+    await runToolBatch({
+      calls: parsedCalls,
+      isParallel: isConcurrencySafe,
+      signal: options.signal,
+      onStart(call) {
+        options.listener?.({ type: 'tool_start', name: call.name, id: call.id, args: call.arguments });
+      },
+      async execute(call) {
+        const parseError = parseErrors.get(call.id);
+        if (parseError) return { ok: false, content: `invalid tool arguments: ${parseError}` };
+        const tool = findTool(call.name);
+        const denied = denyReason(call.name, call.arguments);
+        let result: ToolResult;
         if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${call.name}` };
         else result = await tool.execute(call.arguments, ctx, call.id);
-      } catch (error) {
-        result = { ok: false, content: errorMessage(error) };
-      }
-      // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
-      // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
-      if (options.spill && result.ok && !result.images?.length) {
-        const spilled = options.spill.persist(call.name, result.content);
-        if (spilled !== undefined) result = { ...result, content: spilled };
-      }
-      appendMessage({
-        role: 'tool',
-        content: result.content,
-        toolCallId: call.id,
-        toolName: call.name,
-        images: result.images,
-      });
-      // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
-      if (!result.ok) {
-        options.session.appendEvent('tool_result', sessionEventData.toolFailure(call.name, result.content));
-      }
-      options.listener?.({ type: 'tool_end', name: call.name, id: call.id, ok: result.ok, content: result.content });
-    };
-
-    await Promise.all(reads.map(runOne));
-    for (const call of writes) await runOne(call);
+        // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
+        // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
+        if (options.spill && result.ok && !result.images?.length) {
+          const spilled = options.spill.persist(call.name, result.content);
+          if (spilled !== undefined) result = { ...result, content: spilled };
+        }
+        return result;
+      },
+      onCommit(call, result) {
+        appendMessage({
+          role: 'tool',
+          content: result.content,
+          toolCallId: call.id,
+          toolName: call.name,
+          images: result.images,
+        });
+        // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
+        if (!result.ok) {
+          options.session.appendEvent('tool_result', sessionEventData.toolFailure(call.name, result.content));
+        }
+        options.listener?.({ type: 'tool_end', name: call.name, id: call.id, ok: result.ok, content: result.content });
+      },
+    });
 
     const nextTodos = JSON.stringify(todos.list());
     if (nextTodos !== todoSnapshot) {

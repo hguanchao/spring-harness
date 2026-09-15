@@ -1,14 +1,14 @@
 /**
  * LLM 请求重试策略。
  *
- * 与参考实现（grok 默认 15 次、dsh 指数退避落盘）不同：sph 是交互优先的
- * harness，TUI 用户在等流式输出，重试预算给小（3 次、总等待 <6s）。
  * 已开始流式输出后不重试，避免向用户重复吐字。
+ * 429 常见 Retry-After 数秒到几十秒：3 次 / 总等待 <6s 会直接报错，
+ * 默认 8 次、退避封顶 20s、Retry-After 封顶 60s。
  */
 export interface RetryOptions {
-  /** 最多重试次数（不含首次）。默认 3。 */
+  /** 最多重试次数（不含首次）。默认 8。 */
   maxRetries?: number;
-  /** 退避基准毫秒。默认 500，指数递增并加抖动。 */
+  /** 退避基准毫秒。默认 1000，指数递增并加抖动。 */
   baseDelayMs?: number;
 }
 
@@ -32,16 +32,16 @@ export function isRetryableStatus(status: number): boolean {
 export function retryAfterMs(header: string | null): number | undefined {
   if (!header) return undefined;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 60_000);
   const date = Date.parse(header);
-  if (!Number.isNaN(date)) return Math.max(0, Math.min(date - Date.now(), 30_000));
+  if (!Number.isNaN(date)) return Math.max(0, Math.min(date - Date.now(), 60_000));
   return undefined;
 }
 
-export function backoffMs(attempt: number, base = 500, hint?: number): number {
+export function backoffMs(attempt: number, base = 1000, hint?: number): number {
   if (hint !== undefined) return hint;
   const jitter = Math.floor(Math.random() * base * 0.25);
-  return Math.min(base * 2 ** attempt + jitter, 10_000);
+  return Math.min(base * 2 ** attempt + jitter, 20_000);
 }
 
 /** 可被 AbortSignal 打断的 sleep；被中止时直接抛出，不进入下一轮重试。 */
@@ -69,8 +69,8 @@ export async function withRetries<T>(
   shouldRetry: (error: unknown) => boolean,
   options?: RetryOptions & { signal?: AbortSignal },
 ): Promise<T> {
-  const maxRetries = options?.maxRetries ?? 3;
-  const base = options?.baseDelayMs ?? 500;
+  const maxRetries = options?.maxRetries ?? 8;
+  const base = options?.baseDelayMs ?? 1000;
   for (let attempt = 0; ; attempt++) {
     try {
       return await task(attempt);

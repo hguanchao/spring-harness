@@ -85,24 +85,28 @@ export const CHECKPOINT_PREAMBLE =
 const messageSizeCache = new WeakMap<ChatMessage, number>();
 
 /**
- * 粗算 token：只对初次见到的消息做 JSON.stringify，其余走缓存。
- * 旧实现对整个上下文重复 stringify——一个 turn 内最多触发 4 次
- * （projectContext 两次 + compactMessages 两次），长会话下是纯 CPU 浪费。
+ * 粗算 token：UTF-8 字节 / 4。只对初次见到的消息做 JSON.stringify，其余走缓存。
+ * 用字节而不是 JS 字符，避免中文系统性低估、压缩触发偏晚。
  *
  * 导出给 recap 的只读预算复用：两边必须用同一把尺子，否则「估算不超窗」
  * 与「provider 不判超窗」会漂移。
  */
 export function estimateTokens(messages: readonly ChatMessage[]): number {
-  let chars = 0;
+  let bytes = 0;
   for (const message of messages) {
     let size = messageSizeCache.get(message);
     if (size === undefined) {
-      size = JSON.stringify(message).length;
+      size = Buffer.byteLength(JSON.stringify(message), 'utf8');
       messageSizeCache.set(message, size);
     }
-    chars += size;
+    bytes += size;
   }
-  return Math.ceil(chars / 4);
+  return Math.ceil(bytes / 4);
+}
+
+/** 整数水位：`tokens * 100 >= window * 80`，避免 float 在 80% 边界漂移。 */
+export function isOverPressure(tokens: number, contextWindow: number): boolean {
+  return tokens * 100 >= contextWindow * Math.round(PRESSURE_RATIO * 100);
 }
 
 export interface ProjectionResult {
@@ -143,9 +147,25 @@ function stubOldTools(messages: ChatMessage[], keepFrom: number, skipFirst = fal
   );
 }
 
+/**
+ * 切点不能落在 assistant(tool_calls) 与其 tool result 之间。
+ * 若 cut 落在 tool 消息上，滑回开启这一轮工具的 assistant，整段留在「最近」侧。
+ */
+export function pairingBalancedCut(messages: readonly ChatMessage[], cut: number): number {
+  if (cut <= 0 || cut >= messages.length) return cut;
+  if (messages[cut]?.role !== 'tool') return cut;
+  let i = cut;
+  while (i > 0 && messages[i - 1]?.role === 'tool') i--;
+  if (i > 0 && messages[i - 1]?.role === 'assistant' && (messages[i - 1].tool_calls?.length ?? 0) > 0) {
+    return i - 1;
+  }
+  return i;
+}
+
 function keepFromIndex(messages: ChatMessage[], emptyFallback: number): number {
   const starts = turnStarts(messages);
-  return starts.length > KEEP_RECENT_TURNS ? starts[starts.length - KEEP_RECENT_TURNS] : emptyFallback;
+  const raw = starts.length > KEEP_RECENT_TURNS ? starts[starts.length - KEEP_RECENT_TURNS] : emptyFallback;
+  return pairingBalancedCut(messages, raw);
 }
 
 /** 机械压缩：先戳旧 tool result，再把更旧的轮次收成字符串拼接摘要。纯同步、零成本，做 fallback。 */
@@ -155,7 +175,7 @@ function compactMessages(messages: ChatMessage[], contextWindow: number, force =
   // 不做整表浅拷贝：identity 保持不变才能命中 estimateTokens 的缓存，
   // 且后续 stubTool 本来就返回新对象，不需要预先复制一遍。
   let next: ChatMessage[] = messages;
-  if (!force && estimateTokens(next) <= limit) return next;
+  if (!force && !isOverPressure(estimateTokens(next), contextWindow)) return next;
 
   const keepFrom = keepFromIndex(next, 0);
   // 只戳 tool 结果 —— 这一点与 projectContext 的第一级压缩保持一致。
@@ -163,7 +183,7 @@ function compactMessages(messages: ChatMessage[], contextWindow: number, force =
   // "[compacted tool result]"，而摘要正是从这批消息生成的：结果是摘要内容全被抹平，
   // 历史信息彻底丢失（且摘要文本里出现的 [compacted tool result] 纯属噪声）。
   next = stubOldTools(next, keepFrom);
-  if (!force && estimateTokens(next) <= limit) return next;
+  if (!force && !isOverPressure(estimateTokens(next), contextWindow)) return next;
 
   // base 由 toChatMessages() 产出，正常路径下没有 system 消息（system 由 projectContext 后置插入），
   // 所以首元素不能按 system 直接保留-或-丢弃：它是最早的 user 轮，
@@ -240,64 +260,86 @@ function latestCompaction(session: JsonlSession): CompactionEvent | undefined {
   return undefined;
 }
 /**
- * session 记录 → wire 消息。工具段产生的图片以一条 user 消息跟在同段工具消息之后（OpenAI 协议 tool 消息只能带文本）。
+ * 增量 wire 投影。loop 每步只 push 新消息；compaction.covered 变化时才全量重建。
+ * 工具图挂在连续 tool 段之后一条 user 上（OpenAI 的 tool 消息不能带图），所以
+ * pendingImages 必须跨 push 存活，发请求前再 flush。
+ */
+export interface WireState {
+  messages: ChatMessage[];
+  pendingImages: string[];
+}
+
+export function emptyWire(compaction?: CompactionEvent): WireState {
+  const messages: ChatMessage[] = [];
+  if (compaction && compaction.covered > 0) {
+    messages.push({
+      role: 'user',
+      content: `[compacted earlier context]\n${CHECKPOINT_PREAMBLE}\n\n${compaction.summary}`,
+    });
+  }
+  return { messages, pendingImages: [] };
+}
+
+export function flushWireImages(state: WireState): void {
+  if (state.pendingImages.length === 0) return;
+  state.messages.push({
+    role: 'user',
+    content: '[tool result image]',
+    parts: state.pendingImages.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+  });
+  state.pendingImages = [];
+}
+
+export function pushSessionMessage(state: WireState, row: SessionMessage): void {
+  if (row.role === 'tool') {
+    if (row.images) state.pendingImages.push(...row.images);
+    state.messages.push({
+      role: 'tool',
+      content: row.content,
+      tool_call_id: row.toolCallId,
+      name: row.toolName,
+    });
+    return;
+  }
+  flushWireImages(state);
+  if (row.role === 'assistant' && row.toolCalls && row.toolCalls.length > 0) {
+    state.messages.push({
+      role: 'assistant',
+      content: row.content,
+      tool_calls: row.toolCalls.map((call) => ({
+        id: call.id,
+        type: 'function' as const,
+        function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+      })),
+      ...(row.reasoning?.length ? { reasoning: row.reasoning } : {}),
+    });
+    return;
+  }
+  if (row.role === 'system') return;
+  const message: ChatMessage = { role: row.role, content: row.content };
+  if (row.images && row.images.length > 0 && row.role === 'user') {
+    message.parts = row.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }));
+  }
+  if (row.role === 'assistant' && row.reasoning?.length) message.reasoning = row.reasoning;
+  state.messages.push(message);
+}
+
+export function wireFromMessages(messages: readonly SessionMessage[], compaction?: CompactionEvent): WireState {
+  const state = emptyWire(compaction);
+  const from = compaction?.covered ?? 0;
+  for (const row of messages.slice(from)) pushSessionMessage(state, row);
+  flushWireImages(state);
+  return state;
+}
+
+/**
+ * session 记录 → wire 消息。
  *
  * 导出给 recap 复用：recap 的前缀必须与主轮次逐字一致，缓存才命中，
  * 所以投影这一步不允许有第二份实现。
  */
 export function toChatMessages(messages: SessionMessage[], compaction?: CompactionEvent): ChatMessage[] {
-  const from = compaction ? compaction.covered : 0;
-  const slice = messages.slice(from);
-  const wire: ChatMessage[] = [];
-  if (compaction && compaction.covered > 0) {
-    wire.push({
-      role: 'user',
-      content: `[compacted earlier context]\n${CHECKPOINT_PREAMBLE}\n\n${compaction.summary}`,
-    });
-  }
-  let pendingImages: string[] = [];
-  const flushImages = (): void => {
-    if (pendingImages.length === 0) return;
-    wire.push({
-      role: 'user',
-      content: '[tool result image]',
-      parts: pendingImages.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
-    });
-    pendingImages = [];
-  };
-  for (const row of slice) {
-    if (row.role === 'tool') {
-      if (row.images) pendingImages.push(...row.images);
-      wire.push({
-        role: 'tool',
-        content: row.content,
-        tool_call_id: row.toolCallId,
-        name: row.toolName,
-      });
-      continue;
-    }
-    flushImages();
-    if (row.role === 'assistant' && row.toolCalls && row.toolCalls.length > 0) {
-      wire.push({
-        role: 'assistant',
-        content: row.content,
-        tool_calls: row.toolCalls.map((call) => ({
-          id: call.id,
-          type: 'function' as const,
-          function: { name: call.name, arguments: JSON.stringify(call.arguments) },
-        })),
-      });
-      continue;
-    }
-    if (row.role === 'system') continue;
-    const message: ChatMessage = { role: row.role, content: row.content };
-    if (row.images && row.images.length > 0 && row.role === 'user') {
-      message.parts = row.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }));
-    }
-    wire.push(message);
-  }
-  flushImages();
-  return wire;
+  return wireFromMessages(messages, compaction).messages;
 }
 
 async function summarize(
@@ -372,16 +414,18 @@ export async function projectContext(options: {
   onUsage?: (usage: TokenUsage) => void;
   /** 系统提示词，投影后插在最前。 */
   system?: string;
+  /** 已投影的未 stub wire；省略则从 messages 重建。调用方须先 flush 图片。 */
+  base?: ChatMessage[];
 }): Promise<ProjectionResult> {
   const { messages, contextWindow, client, signal } = options;
   const compaction = options.compaction;
   const withSystem = (list: ChatMessage[]): ChatMessage[] =>
     options.system ? [{ role: 'system', content: options.system }, ...list] : list;
-  const base = toChatMessages(messages, compaction);
+  const base = options.base ?? toChatMessages(messages, compaction);
   const limit = Math.floor(contextWindow * PRESSURE_RATIO);
   const tokens = estimatePromptTokens(base, messages, options.lastUsage, options.lastUsageAnchor);
   const force = options.force === true;
-  if (messages.length === 0 || (!force && tokens <= limit)) {
+  if (messages.length === 0 || (!force && !isOverPressure(tokens, contextWindow))) {
     return { messages: withSystem(base) };
   }
 
@@ -390,7 +434,7 @@ export async function projectContext(options: {
   const stubbed = stubOldTools(base, keepFrom, true);
   // 只估算一次：stub 后仍超水位线时才继续走 LLM 摘要。force 时不能提前返回——
   // provider 的判定优先于我们自己的估算，否则会原样重发同一个必然失败的请求。
-  if (!force && estimateTokens(stubbed) <= limit) {
+  if (!force && !isOverPressure(estimateTokens(stubbed), contextWindow)) {
     return { messages: withSystem(stubbed) };
   }
 

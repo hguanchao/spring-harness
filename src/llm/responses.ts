@@ -39,6 +39,8 @@ export function toResponsesInput(messages: ChatMessage[]): InputItem[] {
       items.push({ role: 'user', content });
       continue;
     }
+    // 不回传 reasoning.encrypted_content：它绑定签发密钥。zen Console 转手会 400
+    // `encrypted_content was not issued to this caller`。
     if (message.content) {
       items.push({ role: 'assistant', content: [{ type: 'output_text', text: message.content }] });
     }
@@ -76,7 +78,11 @@ export function buildResponsesRequest(options: RequestBodyOptions): Record<strin
     input: toResponsesInput(options.messages),
     // Responses 的工具定义是扁平结构，openaiTools() 产出的是嵌套 function 形态，这里摊平。
     ...(options.tools.length > 0
-      ? { tools: options.tools.map((tool) => ({ type: 'function', ...flattenToolSpec(tool) })) }
+      ? {
+          tools: options.tools.map((tool) => ({ type: 'function', ...flattenToolSpec(tool) })),
+          // zen/cliproxy：缺 tool_choice 会把 function_call 剥掉，只剩「继续看…」前言然后停轮。
+          tool_choice: 'auto',
+        }
       : {}),
     ...(effort
       ? { reasoning: REQUEST_REASONING_SUMMARY ? { effort, summary: 'auto' } : { effort } }
@@ -86,17 +92,75 @@ export function buildResponsesRequest(options: RequestBodyOptions): Record<strin
   };
 }
 
+function toolForDelta(acc: SseAcc, itemId?: string): { id: string; name: string; arguments: string; itemId?: string } | undefined {
+  if (itemId) {
+    for (const tool of acc.tools.values()) {
+      if (tool.itemId === itemId) return tool;
+    }
+  }
+  return acc.currentToolIndex !== undefined ? acc.tools.get(acc.currentToolIndex) : undefined;
+}
+
+function upsertReasoning(
+  acc: SseAcc,
+  item: { id?: string; encrypted_content?: string | null; summary?: Array<{ type?: string; text?: string }> },
+): void {
+  const id = item.id;
+  if (!id) return;
+  const current = acc.reasoningItems.get(id) ?? { id };
+  if (typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0) {
+    current.encryptedContent = item.encrypted_content;
+  }
+  if (item.summary && item.summary.length > 0) {
+    const text = item.summary.map((part) => part.text ?? '').filter(Boolean).join('\n\n');
+    if (text) current.summary = text;
+  }
+  acc.reasoningItems.set(id, current);
+}
+
+function upsertFunctionCall(
+  acc: SseAcc,
+  item: { id?: string; call_id?: string; name?: string; arguments?: string },
+): void {
+  const callId = item.call_id ?? '';
+  for (const tool of acc.tools.values()) {
+    if ((callId && tool.id === callId) || (item.id && tool.itemId === item.id)) {
+      if (item.name) tool.name = item.name;
+      if (item.arguments !== undefined) tool.arguments = item.arguments;
+      return;
+    }
+  }
+  const index = acc.tools.size;
+  acc.tools.set(index, {
+    id: callId,
+    name: item.name ?? '',
+    arguments: item.arguments ?? '',
+    itemId: item.id,
+  });
+  acc.currentToolIndex = index;
+}
+
 /** Responses SSE 事件流 → 与 chat.completions 共享的 SseAcc 累积结构。 */
 export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
+  if (payload === '[DONE]') return {};
   const event = parseSseJson(payload);
   if (!event) return {};
   const data = event as {
     type?: string;
     delta?: string;
+    item_id?: string;
     summary?: string;
     summary_index?: number;
     part?: { type?: string; text?: string };
-    item?: { type?: string; call_id?: string; name?: string; arguments?: string };
+    item?: {
+      type?: string;
+      id?: string;
+      call_id?: string;
+      name?: string;
+      arguments?: string;
+      encrypted_content?: string | null;
+      summary?: Array<{ type?: string; text?: string }>;
+    };
     response?: {
       usage?: {
         input_tokens?: number;
@@ -106,6 +170,15 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       };
       error?: { message?: string } | null;
       status?: string;
+      output?: Array<{
+        type?: string;
+        id?: string;
+        call_id?: string;
+        name?: string;
+        arguments?: string;
+        encrypted_content?: string | null;
+        summary?: Array<{ type?: string; text?: string }>;
+      }>;
     };
   };
   switch (data.type) {
@@ -122,20 +195,36 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
         ? appendStreamDelta(acc, undefined, '\n\n')
         : {};
     case 'response.output_item.added':
+      if (data.item?.type === 'reasoning') upsertReasoning(acc, data.item);
       if (data.item?.type === 'function_call') {
         const index = acc.tools.size;
-        acc.tools.set(index, { id: data.item.call_id ?? '', name: data.item.name ?? '', arguments: data.item.arguments ?? '' });
+        acc.tools.set(index, {
+          id: data.item.call_id ?? '',
+          name: data.item.name ?? '',
+          arguments: data.item.arguments ?? '',
+          itemId: data.item.id,
+        });
         acc.currentToolIndex = index;
       }
       return {};
     case 'response.function_call_arguments.delta':
       if (data.delta) {
-        const tool = acc.currentToolIndex !== undefined ? acc.tools.get(acc.currentToolIndex) : undefined;
+        const tool = toolForDelta(acc, data.item_id);
         if (tool) tool.arguments += data.delta;
+      }
+      return {};
+    case 'response.output_item.done':
+      if (data.item?.type === 'reasoning') upsertReasoning(acc, data.item);
+      if (data.item?.type === 'function_call') {
+        upsertFunctionCall(acc, data.item);
       }
       return {};
     case 'response.completed':
     case 'response.incomplete': {
+      for (const item of data.response?.output ?? []) {
+        if (item?.type === 'reasoning') upsertReasoning(acc, item);
+        if (item?.type === 'function_call') upsertFunctionCall(acc, item);
+      }
       const usage = data.response?.usage;
       if (usage) {
         const cached = usage.input_tokens_details?.cached_tokens;

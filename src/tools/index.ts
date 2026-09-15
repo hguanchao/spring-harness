@@ -6,12 +6,14 @@ import { shellTool } from './shell.js';
 import { skillTool } from './skill.js';
 import { todoTool } from './todo.js';
 import { askUserTool } from './ask-user.js';
-import { webFetchTool } from './web-fetch.js';
+import { globTool } from './glob.js';
+import { webSearchTool } from './web-search.js';
 import { jobsTool } from './jobs.js';
 import { subagentTool } from './subagent.js';
 import { sendSubagentMessageTool } from './send-subagent.js';
 import { mcpTool } from './mcp.js';
 import type { ToolSpec } from './types.js';
+import { enterPlanModeTool, exitPlanModeTool } from './plan.js';
 import { writeTool } from './write.js';
 
 export const tools: ToolSpec[] = [
@@ -19,33 +21,42 @@ export const tools: ToolSpec[] = [
   writeTool,
   searchReplaceTool,
   grepTool,
+  globTool,
   listDirTool,
   shellTool,
   skillTool,
   todoTool,
   askUserTool,
-  webFetchTool,
+  webSearchTool,
   jobsTool,
   subagentTool,
   sendSubagentMessageTool,
   mcpTool,
+  enterPlanModeTool,
+  exitPlanModeTool,
 ];
 
 /**
- * 只读/无副作用工具：同一回复里的多个调用用 Promise.all 并行执行。
- * subagent 在此集合里——同一回复的多个前台 task 才会真并行（各受 SUBAGENT_CONCURRENCY 并发信号量约束），
- * 且全部返回后才进入下一轮 LLM，保证「子代理跑完再总结」。
+ * 同一步可并行的工具。缺省 exclusive（未知名字、写工具、todo、mcp、ask）。
+ * subagent 在此集合里——同一回复的多个前台 task 才会真并行（各受 SUBAGENT_CONCURRENCY 约束）。
  */
-export const READ_TOOLS = new Set(['read_file', 'grep', 'list_dir', 'skill', 'todo', 'jobs', 'subagent']);
+const PARALLEL_TOOLS = new Set([
+  'read_file', 'grep', 'glob', 'list_dir', 'skill', 'jobs', 'web_search', 'subagent',
+]);
+
+/** 未知工具 fail-closed：不当成只读。 */
+export function isConcurrencySafe(name: string): boolean {
+  return PARALLEL_TOOLS.has(name);
+}
 export const EXPLORE_TOOLS = new Set([
-  'read_file', 'grep', 'list_dir', 'skill', 'web_fetch', 'ask_user', 'todo',
+  'read_file', 'grep', 'glob', 'list_dir', 'skill', 'web_search', 'ask_user', 'todo',
 ]);
 /**
  * 仅根会话可见的工具（grok 的 send_subagent_message 同语义）：子代理互相发消息
  * 会形成无主的旁路通道。运行时为 general 子代理构建 allowedTools 时剔除，
  * denyReason 兜底双保险。
  */
-export const ROOT_ONLY_TOOLS = new Set(['send_subagent_message']);
+export const ROOT_ONLY_TOOLS = new Set(['send_subagent_message', 'enter_plan_mode', 'exit_plan_mode']);
 
 export function openaiTools(allowed?: ReadonlySet<string>): Array<{
   type: 'function';

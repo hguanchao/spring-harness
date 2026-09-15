@@ -3,9 +3,16 @@
  * 所以「配了代理」必须显式装一个 undici dispatcher 才生效。
  *
  * 走全局 dispatcher 而不是逐个 fetch 传参：sph 的出网点有三处（LLM 流、模型目录、
- * web_fetch），全局装配让调用方零感知，之后新增出网点也自动被覆盖。
+ * web_search），全局装配让调用方零感知，之后新增出网点也自动被覆盖。
  */
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
+import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
+
+/** 直连时复用连接：建 TLS 会话比 keepalive 贵一个数量级。代理路径由 EnvHttpProxyAgent 自己管池。 */
+const keepAliveAgent = new Agent({
+  connections: 8,
+  keepAliveTimeout: 30_000,
+  pipelining: 0,
+});
 
 /** 标准代理环境变量是否存在（大小写都认，与 undici 自身的读取习惯一致）。 */
 function hasEnvProxy(env: NodeJS.ProcessEnv): boolean {
@@ -22,10 +29,17 @@ export function applyProxy(
   configProxy: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
-  if (configProxy === '') return;
+  if (configProxy === '') {
+    setGlobalDispatcher(keepAliveAgent);
+    return;
+  }
   if (configProxy !== undefined) {
     setGlobalDispatcher(new EnvHttpProxyAgent({ httpProxy: configProxy, httpsProxy: configProxy }));
     return;
   }
-  if (hasEnvProxy(env)) setGlobalDispatcher(new EnvHttpProxyAgent());
+  if (hasEnvProxy(env)) {
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+    return;
+  }
+  setGlobalDispatcher(keepAliveAgent);
 }

@@ -35,7 +35,7 @@ export interface SphConfig {
   /** 附加到每个 LLM 请求的静态头；api_key 为空时由它承担免鉴权会话标识。 */
   httpHeaders: Record<string, string>;
   /**
-   * 出站代理 URL（覆盖 LLM 请求、模型目录、web_fetch 等全部出网点）。
+   * 出站代理 URL（覆盖 LLM 请求、模型目录、web_search 等全部出网点）。
    * 三态：undefined 回退 HTTP(S)_PROXY 环境变量；显式 "" 强制直连；非空必须 http(s)。
    */
   proxy?: string;

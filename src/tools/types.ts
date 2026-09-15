@@ -43,6 +43,13 @@ export interface ToolContext {
   }): Promise<string>;
   /** 给仍在跑的后台子代理投递一条消息（root-only 工具的底层通道）。 */
   sendToSubagent(id: string, text: string): 'queued' | 'not_found' | 'completed';
+  /** 与 runTurn 共享的计划模式开关；子代理不设。 */
+  planMode?: { active: boolean };
+  sessionDir?: string;
+  sessionId?: string;
+  setPlanMode?(active: boolean): void;
+  /** 把完整计划呈给用户评审；取消/继续规划时 approved=false。 */
+  reviewPlan?(plan: string, title: string): Promise<{ approved: boolean; feedback?: string }>;
 }
 
 export interface ToolSpec {

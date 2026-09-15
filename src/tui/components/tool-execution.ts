@@ -81,9 +81,10 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   write: 'Write',
   search_replace: 'Edit',
   grep: 'Grep',
+  glob: 'Glob',
   list_dir: 'List',
   shell: 'Bash',
-  web_fetch: 'Fetch',
+  web_search: 'Search',
   subagent: 'Subagent',
   todo: 'Todo',
   skill: 'Skill',
@@ -119,11 +120,17 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
     case 'list_dir':
       return oneLine(pick('path', 'file_path', 'filePath'));
     case 'grep':
+    case 'glob':
       return oneLine(pick('pattern', 'query'));
     case 'search_replace':
       return oneLine(pick('path', 'file_path'));
-    case 'web_fetch':
-      return oneLine(pick('url'));
+    case 'web_search': {
+      const queries = args.queries;
+      if (Array.isArray(queries)) {
+        return oneLine(queries.filter((item) => typeof item === 'string').join(', '));
+      }
+      return oneLine(pick('query', 'url'));
+    }
     // 只取 description：prompt 是整段任务书，回落到它会把一堵墙印进行标题（见 subagent 工具 schema）。
     case 'subagent':
       return oneLine(pick('description'));

@@ -4,7 +4,6 @@
  */
 
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from '../core/index.js';
-import { colorIdeaInline } from '../syntax/idea-inline.js';
 import { highlight, normalizeLanguage } from '../syntax/highlight.js';
 import { PALETTE, type ThemeColor } from './palettes.js';
 
@@ -145,6 +144,13 @@ export class Theme {
     return `${ansi}${text}\x1b[49m`;
   }
 
+  /** 裸背景 SGR，给清屏/清行用。不能包 49m，否则 2K 填回默认底。 */
+  bgSeq(color: ThemeColor): string {
+    const ansi = this.bgColors.get(color);
+    if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+    return ansi;
+  }
+
   bold(text: string): string {
     return sgr('\x1b[1m', '\x1b[22m', text);
   }
@@ -164,14 +170,22 @@ export class Theme {
 
 export const theme = new Theme(PALETTE);
 
+/** OSC 11 用真 hex，256 色终端也能拿到 #141414，不跟 SGR 量化走。 */
+export function oscSetCanvasBackground(): string {
+  return `\x1b]11;${PALETTE.bg}\x07`;
+}
+
+/** 退出 TUI 时还原终端默认底；1049l 不会自动清掉 OSC 11。 */
+export function oscResetCanvasBackground(): string {
+  return `\x1b]111\x07`;
+}
+
 const HIGHLIGHT_CACHE_LIMIT = 32;
 const highlightCache = new Map<string, string[]>();
 
 /**
- * 语法色：方法/函数蓝 #56a8f5、注解金、关键字橙、字符串绿，注释灰斜体；
- * 其余 scope（标识符/类型/属性/数字/运算符/标点/默认正文）全部归到代码块的**一个**中性档
- * `mdCodeBlock`，块内不会出现灰白相间。
- * 角色 → 颜色的唯一映射表在 palettes.ts 的 CODE_* 常量，这里只做 scope → 角色。
+ * 带语言围栏的 scope → 色。只有关键字/函数/字符串/类型走蓝，其余归中性灰。
+ * 行内码不走这张表。
  */
 const highlightTheme: Record<string, (text: string) => string> = {
   comment: (t) => theme.italic(theme.fg('syntaxComment', t)),
@@ -180,7 +194,7 @@ const highlightTheme: Record<string, (text: string) => string> = {
   keyword: (t) => theme.fg('syntaxKeyword', t),
   'selector-tag': (t) => theme.fg('syntaxKeyword', t),
   'meta-keyword': (t) => theme.fg('syntaxKeyword', t),
-  literal: (t) => theme.fg('mdCodeBlock', t),
+  literal: (t) => theme.fg('syntaxKeyword', t),
   'built_in': (t) => theme.fg('syntaxKeyword', t),
   title: (t) => theme.fg('syntaxFunction', t),
   function: (t) => theme.fg('syntaxFunction', t),
@@ -197,10 +211,10 @@ const highlightTheme: Record<string, (text: string) => string> = {
   symbol: (t) => theme.fg('syntaxString', t),
   regexp: (t) => theme.fg('syntaxString', t),
   addition: (t) => theme.fg('syntaxString', t),
-  deletion: (t) => theme.fg('error', t),
-  number: (t) => theme.fg('mdCodeBlock', t),
-  type: (t) => theme.bold(theme.fg('mdCodeBlock', t)),
-  class: (t) => theme.bold(theme.fg('mdCodeBlock', t)),
+  deletion: (t) => theme.fg('mdCodeBlock', t),
+  number: (t) => theme.fg('syntaxKeyword', t),
+  type: (t) => theme.bold(theme.fg('syntaxFunction', t)),
+  class: (t) => theme.bold(theme.fg('syntaxFunction', t)),
   operator: (t) => theme.fg('mdCodeBlock', t),
   punctuation: (t) => theme.fg('mdCodeBlock', t),
   tag: (t) => theme.fg('syntaxKeyword', t),
@@ -210,61 +224,22 @@ const highlightTheme: Record<string, (text: string) => string> = {
   default: (t) => theme.fg('mdCodeBlock', t),
 };
 
-/** grok-build：无语言标记或 text/plaintext 的围栏不当代码高亮，整块走正文色。 */
+/** grok-build：无语言标记或 text/plaintext 的围栏不当代码高亮，整块走中性灰。 */
 const UNTAGGED_LANGS = new Set(['plaintext', 'text', 'txt', 'output', 'ansi', 'console', 'raw']);
 
 /**
- * 行内代码（codespan）的词法猜测配色。
- *
- * 中性档用 `mdCode`（行内蓝）而不是代码块的 `mdCodeBlock`（#808080）：
- * 行内码夹在正文里，再用正文灰就看不出是代码。标识符/数字/方法共用这一档，不高亮过满。
- */
-const ideaInlineColors = {
-  keyword: (t: string) => theme.fg('syntaxKeyword', t),
-  method: (t: string) => theme.fg('syntaxFunction', t),
-  constant: (t: string) => theme.fg('mdCode', t),
-  annotation: (t: string) => theme.fg('syntaxAnnotation', t),
-  string: (t: string) => theme.fg('syntaxString', t),
-  number: (t: string) => theme.fg('mdCode', t),
-  comment: (t: string) => theme.italic(theme.fg('syntaxComment', t)),
-  identifier: (t: string) => theme.fg('mdCode', t),
-};
-
-/**
- * 围栏代码块整块一个中性色：`mdCodeBlock`，与围栏 ``` 同色。
- *
- * 两条来由：
- * 1. 无语言 / text / plaintext 围栏曾经复用行内码的 `colorIdeaInline` 做词法猜测，
- *    于是目录清单里的 `RestEndpointPathTest(4)` 被当成方法调用上了方法色——用户已经明确
- *    标了 text，就不该再猜语法。
- * 2. 带语言的围栏现在也走这里（见 `FENCE_SYNTAX_HIGHLIGHT`）：同一份消息里正文是一种
- *    配色、代码块是另一种，看起来像两套设计。
+ * 无标签围栏：不对词法、不上蓝，整块中性灰。
+ * 目录树/配置片段是代码块，不该跟正文一样亮。
  */
 function plainCodeLines(code: string): string[] {
   return code.split('\n').map((line) => theme.fg('mdCodeBlock', line));
 }
 
 /**
- * 围栏代码块是否上语法色。
- *
- * **关（当前）**：整块走中性档 `mdCodeBlock`，与围栏 ``` 同色。代码是「引用的证据」，
- * 安静下来把注意力留给正文；也避免同一份消息里出现两套配色。
- * **开**：按语言标签走 highlight.js 文法（`highlightTheme` 的 scope → 角色映射）。
- *
- * 留成开关而不是删掉整条链路，是因为配色取向还在调整；改这一行即可切回。
- * 若要彻底移除，可一并删掉本文件的 `highlightTheme`、`src/tui/syntax/highlight.ts`
- * 与 `highlight.js` 依赖。
- */
-const FENCE_SYNTAX_HIGHLIGHT = false;
-
-/**
- * 高亮代码块。
- *
- * 关掉语法色后，「语言标签」只剩信息意义：围栏仍原样显示 ```java，但块内不再着色。
- * 带语言的分支保留原语义——无语言 / text / plaintext / console 与未知语言本来就不上色。
+ * 高亮代码块。无语言 / text / 未知语言整块中性灰，不猜词法；
+ * 只有 highlight.js 认得出的语言标签才上蓝色语法色。
  */
 export function highlightCode(code: string, lang?: string): string[] {
-  if (!FENCE_SYNTAX_HIGHLIGHT) return plainCodeLines(code);
   const validLang = normalizeLanguage(lang);
   if (!validLang || UNTAGGED_LANGS.has(validLang)) return plainCodeLines(code);
   const key = `${validLang}\0${code}`;
@@ -283,7 +258,7 @@ export function highlightCode(code: string, lang?: string): string[] {
     }
     return lines;
   } catch {
-    // highlight.js 抛错时同样整块走中性档：半块彩色半块灰比全灰更难读。
+    // highlight.js 抛错时同样整块走中性灰：半块蓝半块灰比全灰更难读。
     return plainCodeLines(code);
   }
 }
@@ -298,7 +273,8 @@ export function getMarkdownTheme(): MarkdownTheme {
     },
     link: (text: string) => theme.underline(theme.fg('mdLink', text)),
     linkUrl: (text: string) => theme.fg('mdLinkUrl', text),
-    code: (text: string) => colorIdeaInline(text, ideaInlineColors),
+    // grok-build：行内码整段蓝、加粗，不做词法猜测。
+    code: (text: string) => theme.bold(theme.fg('mdCode', text)),
     codeBlock: (text: string) => theme.fg('mdCodeBlock', text),
     // 围栏 ``` 与注释同为 #808080，但**刻意不叠斜体**：斜体留给注释，
     // 围栏是结构标记不是内容，叠斜体后整段代码的边界会糊掉。

@@ -23,6 +23,8 @@ export interface SessionMessage {
   toolCalls?: ToolCall[];
   /** data URL 形式的图片附件（用户输入的 @图片 或 read_file 读到的图片）。 */
   images?: string[];
+  /** Responses 推理项，下一轮原样回传；没有 encryptedContent 的项不要存。 */
+  reasoning?: Array<{ id: string; encryptedContent?: string; summary?: string }>;
 }
 
 export type SessionRecord = SessionEvent | SessionMessage;

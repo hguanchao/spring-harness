@@ -4,7 +4,7 @@ export type ApprovalMode = 'ask' | 'auto' | 'yolo';
 export const APPROVAL_MODES: readonly ApprovalMode[] = ['ask', 'auto', 'yolo'];
 
 /** 需要审查的工具：ask 模式问人，auto 模式过分类器，yolo 直接放行。 */
-export const REVIEWED_TOOLS = new Set(['shell', 'web_fetch', 'mcp']);
+export const REVIEWED_TOOLS = new Set(['shell', 'web_search', 'mcp', 'enter_plan_mode']);
 
 export interface ApprovalRequest {
   tool: string;

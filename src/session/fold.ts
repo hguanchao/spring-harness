@@ -50,10 +50,12 @@ export interface FoldedSessionState {
   lastRecapMainTurn: number;
   /** 最近一次 recap 的正文（含未上屏的长尾输出），供 /status 展示。 */
   lastRecap?: string;
+  /** 计划模式是否激活（last-wins）。 */
+  planMode: boolean;
 }
 
 export function emptySessionState(): FoldedSessionState {
-  return { todos: [], failures: [], depth: 0, lastRecapMainTurn: 0 };
+  return { todos: [], failures: [], depth: 0, lastRecapMainTurn: 0, planMode: false };
 }
 
 function parseTodoItems(value: unknown): TodoItem[] | undefined {
@@ -81,7 +83,7 @@ function asFiniteNumber(value: unknown): number | undefined {
  * - `model_selection` / `goal` 都是 last-wins；
  * - `recap` 的 mainTurns 是水印（last-wins，只在提交时写入），正文保留最近一次；
  * - `tool_result` 只记失败，滑动保留最近 MAX_TRACKED_FAILURES 条。
- * 旧会话里的 `plan_mode` 事件忽略（plan mode 已移除）。
+ * - `plan_mode` 是 last-wins 布尔；缺省或坏数据视为未激活。
  */
 export function foldSessionState(records: readonly SessionRecord[]): FoldedSessionState {
   const state = emptySessionState();
@@ -129,6 +131,10 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
         if (summary !== '') state.lastRecap = summary;
         break;
       }
+      case 'plan_mode': {
+        if (typeof data.active === 'boolean') state.planMode = data.active;
+        break;
+      }
       case 'tool_result': {
         // 只保留失败：成功记录对恢复没有价值，却会让日志和内存都翻倍。
         if (data.ok !== false) break;
@@ -164,6 +170,7 @@ export const sessionEventData = {
     mainTurns: input.mainTurns,
     shown: input.shown,
   }),
+  planMode: (active: boolean): Record<string, unknown> => ({ active }),
   toolFailure: (tool: string, content: string): Record<string, unknown> => ({
     tool,
     ok: false,

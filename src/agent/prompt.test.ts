@@ -115,6 +115,19 @@ describe('工具段的条件拼装', () => {
   });
 });
 
+describe('计划模式引导', () => {
+  it('未激活时不出现 plan_mode 段', () => {
+    assert.ok(!base().includes('<plan_mode>'));
+  });
+
+  it('激活时要求先规划再呈交，并点名 exit_plan_mode', () => {
+    const p = base({ planMode: true });
+    assert.ok(p.includes('<plan_mode>'));
+    assert.ok(p.includes('Do not implement'));
+    assert.ok(p.includes('exit_plan_mode'));
+  });
+});
+
 describe('沟通与格式', () => {
   it('锚定「读者没看过你的工具调用」', () => {
     assert.ok(base().includes('has not seen your tool calls'));

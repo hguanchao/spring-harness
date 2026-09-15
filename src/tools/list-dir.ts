@@ -4,7 +4,7 @@ import { asString, clip, type ToolContext, type ToolResult, type ToolSpec } from
 
 export const listDirTool: ToolSpec = {
   name: 'list_dir',
-  description: 'List a directory inside the workspace — not shell ls or find. Hidden and git-ignored entries are omitted, and large directories are summarized rather than fully listed, so an entry missing here is not proof it does not exist; use grep to search by name when you are unsure where a file lives.',
+  description: 'List a directory inside the workspace — not shell ls or find. Hidden and git-ignored entries are omitted, and large directories are summarized rather than fully listed, so an entry missing here is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
   schema: {
     type: 'object',
     properties: {

@@ -18,6 +18,7 @@ export interface HeaderData {
   approvalMode: string;
   sandboxMode: string;
   mcpServerCount: number;
+  planMode?: boolean;
 }
 
 export interface ReadonlyHeaderDataProvider {
@@ -61,6 +62,7 @@ export class HeaderComponent implements Component {
     const workspace = data.gitBranch ? `${data.workspaceRoot} (${data.gitBranch})` : data.workspaceRoot;
     const model = data.effort ? `${data.model} · effort ${data.effort}` : data.model;
     const environment = [`approval ${data.approvalMode}`, `sandbox ${data.sandboxMode}`];
+    if (data.planMode) environment.push('plan on');
     if (data.mcpServerCount > 0) environment.push(`mcp ${data.mcpServerCount}`);
 
     const rows: Array<[string, string]> = [

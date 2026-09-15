@@ -244,6 +244,10 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       jobs,
       goal: folded.goal,
       lastFailure: folded.failures.at(-1),
+      planMode: { active: folded.planMode },
+      reviewPlan: approvalMode === 'yolo'
+        ? async () => ({ approved: true })
+        : undefined,
       compactClient,
       onAuxUsage: recordAuxUsage,
       spill: new SpillStore(join(sphSpillRoot(), session.id), config.spillThreshold),

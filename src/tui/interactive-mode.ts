@@ -39,6 +39,7 @@ import {
   type ReasoningEffort,
   type TokenUsage,
 } from '../llm/openai.js';
+import { displayNameForModel } from '../llm/models.js';
 import { readModelCache, writeModelCache } from '../llm/model-cache.js';
 import type { McpHub } from '../mcp/hub.js';
 import type { JobBoard } from '../runtime/jobs.js';
@@ -59,6 +60,7 @@ import {
   listSessions,
   setCurrentSession,
 } from '../session/store.js';
+import { repairDanglingTools } from '../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../session/types.js';
 import {
   BLOCK_GAP,
@@ -155,6 +157,7 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'new', label: '/new', hint: 'Start a new session' },
   { id: 'sessions', label: '/sessions', hint: 'Browse sessions, or switch by id' },
   { id: 'recap', label: '/recap', hint: 'Summarize the session so far' },
+  { id: 'plan', label: '/plan', hint: 'Enter plan mode, or /plan off to leave' },
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
@@ -180,14 +183,15 @@ const MAX_DOCK_SUBAGENT_ROWS = 5;
 /**
  * 子代理内部事件 → 行内活动段文案，与底部状态行共用同一套词（WorkingLabel）。
  *
- * 返回 undefined 表示这个事件不改变活动段（`tool_end` / `status` / `thinking_end` 都不改，
- * 下一步的动作会自己覆盖上来），调用方据此跳过重绘。
+ * 返回 undefined 表示这个事件不改变活动段（`tool_end` / `status` / `thinking_start` 不改）。
+ * thinking_start 每轮都会发，但很多端点不吐 reasoning，不能一开就切到 Thinking…。
  */
 function subagentActivity(event: SubagentEvent): string | undefined {
   switch (event.type) {
-    case 'thinking_start':
     case 'thinking_delta':
       return WorkingLabel.thinking;
+    case 'thinking_end':
+      return WorkingLabel.working;
     case 'text':
       return WorkingLabel.responding;
     case 'tool_start':
@@ -237,6 +241,8 @@ class InteractiveMode implements ApprovalUi {
   private contextWindow: number;
   private goal?: string;
   private lastFailure?: SessionFailure;
+  /** 与 runTurn 共享同一对象，工具进出计划模式会原地翻转。 */
+  private readonly plan = { active: false };
   private gitBranch?: string;
 
   private running = false;
@@ -461,8 +467,10 @@ class InteractiveMode implements ApprovalUi {
   // ------------------------------------------------------------------ 会话回放
 
   private restoreSession(): void {
-    const records = this.session.readAll();
+    let records = this.session.readAll();
     if (records.length === 0) return;
+    const messages = messagesOf(records);
+    if (repairDanglingTools(this.session, messages) > 0) records = this.session.readAll();
 
     this.replayRecords(records);
     this.pinLatestUserMessage();
@@ -490,6 +498,7 @@ class InteractiveMode implements ApprovalUi {
     const folded = foldSessionState(records);
     this.goal = folded.goal;
     this.lastFailure = folded.failures.at(-1);
+    this.plan.active = folded.planMode;
     this.lastRecapMainTurn = folded.lastRecapMainTurn;
     // 持久化深度下限：resume 出的子代理会话不能伪装成顶层继续派生（ds 的 delegationDepth 语义）。
     this.sessionDepth = folded.depth;
@@ -645,6 +654,8 @@ class InteractiveMode implements ApprovalUi {
         worktrees: this.deps.worktrees,
         goal: this.goal,
         lastFailure: this.lastFailure,
+        planMode: this.plan,
+        reviewPlan: (plan, title) => this.reviewPlan(plan, title),
         compactClient: this.compactClient,
         onAuxUsage: (usage, purpose) => this.recordAuxUsage(usage, purpose),
         ...(this.deps.spillRoot === undefined
@@ -715,6 +726,15 @@ class InteractiveMode implements ApprovalUi {
 
   // ------------------------------------------------------------------ 事件投影
 
+  /**
+   * transcript：转录区内容变了，必须 bump contentGeneration，否则 ScrollView 缓存不重测。
+   * dock：底栏/子代理行，走视口通道，避免把整份转录当结构变化重排。
+   */
+  private paint(kind: 'transcript' | 'dock'): void {
+    if (kind === 'dock' && isViewportTUI(this.ui)) this.ui.requestViewportRender();
+    else this.ui.requestRender();
+  }
+
   private readonly listener: AgentListener = (event) => {
     switch (event.type) {
       case 'text': {
@@ -722,19 +742,18 @@ class InteractiveMode implements ApprovalUi {
         this.setActivity(WorkingLabel.responding);
         const assistant = this.ensureAssistant();
         assistant.appendText(event.text);
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'thinking_start': {
         this.thinkingId = event.id;
         this.thinkingBuffer = '';
         this.thinkingStartedAt = Date.now();
-        this.setActivity(WorkingLabel.thinking);
-        // 思考链并入工具分组：它和同一步的工具调用共享折叠语义（grok-build 的
-        //「run claims finished thoughts」）。这一步先开组，稍后的 tool_start 会复用同一个组。
+        // 不在 start 切 Thinking…：无 reasoning 的工具轮次永远等不到 delta，状态行会假死。
         this.thinkingGroup = this.ensureToolGroup();
-        // 一次 LLM 调用一段思考：显式开新段，同组内多段各留其位，不再互相覆盖。
         this.thinkingGroup.beginThinking();
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'thinking_delta': {
         if (event.id === this.thinkingId) {
@@ -743,7 +762,8 @@ class InteractiveMode implements ApprovalUi {
           this.thinkingBuffer += event.text;
           this.thinkingGroup?.setThinking(this.thinkingBuffer, true);
         }
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'thinking_end': {
         if (event.id === this.thinkingId) {
@@ -757,8 +777,12 @@ class InteractiveMode implements ApprovalUi {
           this.thinkingStartedAt = undefined;
           this.thinkingBuffer = '';
           this.thinkingId = undefined;
+          // 没 reasoning 的工具轮次不会再来 thinking_delta；状态行若还停在 Thinking…，
+          // 这里立刻离开，别等下一步工具/正文。
+          if (this.activityLabel === WorkingLabel.thinking) this.setActivity(WorkingLabel.working);
         }
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'tool_start': {
         // 工具活动切断当前助手段：下一个 thinking/text 事件经 ensureAssistant 在工具组
@@ -773,7 +797,8 @@ class InteractiveMode implements ApprovalUi {
         this.setActivity(WorkingLabel.running(toolDisplayName(event.name)));
         // subagent 的实时进度由转录内任务块承担，不进底部「正在跑」区。
         if (event.name !== 'subagent') this.addPendingToolLine(event.id, event.name, event.args);
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'tool_end': {
         const tool = this.pendingTools.get(event.id);
@@ -784,19 +809,23 @@ class InteractiveMode implements ApprovalUi {
         this.removePendingToolLine(event.id);
         // 工具收尾后回到「等模型下一步」：可能是压缩，也可能是下一次请求。
         this.setActivity(WorkingLabel.working);
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'usage': {
         this.applyUsage(event as unknown as Record<string, unknown>);
-        break;
+        this.paint('dock');
+        return;
       }
       case 'status': {
         this.addNotice(event.text, event.level ?? 'dim');
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'error': {
         this.addNotice(event.text, 'error');
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'subagent_start': {
         this.subagentDepth++;
@@ -829,7 +858,8 @@ class InteractiveMode implements ApprovalUi {
             'dim',
           );
         }
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'subagent_end': {
         this.subagentDepth = Math.max(0, this.subagentDepth - 1);
@@ -839,20 +869,21 @@ class InteractiveMode implements ApprovalUi {
             : `subagent · FAILED: ${event.summary.slice(0, 200)}`;
           this.addNotice(label, event.ok ? 'dim' : 'error');
         }
-        break;
+        this.paint('transcript');
+        return;
       }
       case 'subagent_event': {
         this.onSubagentEvent(event.id, event.event);
-        break;
+        return;
       }
       case 'done': {
         this.finalizeStreaming();
-        break;
+        this.paint('transcript');
+        return;
       }
       default:
         break;
     }
-    this.ui.requestRender();
   };
 
   /**
@@ -867,14 +898,17 @@ class InteractiveMode implements ApprovalUi {
       // 行没建出来（异常时序/老会话回放）：退回独立行，至少不让子活动凭空消失。
       if (event.type === 'tool_start') this.addNotice(`  ↳ ${event.name}`, 'dim');
       else if (event.type === 'error') this.addNotice(`  ↳ ${event.text}`, 'error');
+      if (event.type === 'tool_start' || event.type === 'error') this.paint('transcript');
       return;
     }
     if (event.type === 'usage') {
       entry.live?.addTokens(event.promptTokens + event.completionTokens);
+      this.paint('dock');
       return;
     }
     const activity = subagentActivity(event);
     if (activity !== undefined) entry.live?.setActivity(activity, event.type === 'error');
+    this.paint('dock');
   }
 
   /**
@@ -1125,6 +1159,7 @@ class InteractiveMode implements ApprovalUi {
       approvalMode: this.approval,
       sandboxMode: this.deps.sandbox.status.mode,
       mcpServerCount: this.deps.mcpServerCount,
+      planMode: this.plan.active,
     };
   }
 
@@ -1137,6 +1172,7 @@ class InteractiveMode implements ApprovalUi {
       contextWindow: this.contextWindow,
       contextTokens: this.contextTokens,
       usage: this.usage,
+      planMode: this.plan.active,
     };
   }
 
@@ -1210,6 +1246,9 @@ class InteractiveMode implements ApprovalUi {
       case 'recap':
         await this.commandRecap(false);
         break;
+      case 'plan':
+        await this.commandPlan(argument);
+        break;
       case 'goal':
         await this.commandGoal(argument);
         break;
@@ -1257,6 +1296,7 @@ class InteractiveMode implements ApprovalUi {
     this.clearChat();
     this.goal = undefined;
     this.lastFailure = undefined;
+    this.plan.active = false;
     this.resetRecapState();
     this.refreshCounters();
     this.addNotice(`Started session ${this.session.id}`, 'success');
@@ -1443,6 +1483,7 @@ class InteractiveMode implements ApprovalUi {
         mcpTools: this.deps.mcp.listTools(),
         goal: this.goal,
         lastFailure: this.lastFailure,
+        planMode: this.plan.active,
       }),
       contextWindow: this.contextWindow,
     };
@@ -1476,6 +1517,64 @@ class InteractiveMode implements ApprovalUi {
     this.breakToolGroup();
     this.chatContainer.addChild(new RecapMessageComponent(summary));
     this.ui.requestRender();
+  }
+
+  private writePlanMode(active: boolean): void {
+    if (this.plan.active === active) {
+      this.addNotice(active ? 'Already in plan mode. /plan off to leave.' : 'Plan mode is already off.', 'dim');
+      return;
+    }
+    this.plan.active = active;
+    this.session.appendEvent('plan_mode', sessionEventData.planMode(active));
+    this.addNotice(
+      active
+        ? 'Plan mode on. Explore and design; writes are blocked until the plan is approved. /plan off to leave.'
+        : 'Plan mode off.',
+      'success',
+    );
+    this.ui.requestRender();
+  }
+
+  private async commandPlan(argument: string): Promise<void> {
+    if (argument === 'off') {
+      this.writePlanMode(false);
+      return;
+    }
+    if (!this.plan.active) this.writePlanMode(true);
+    else if (argument === '') this.addNotice('Already in plan mode. /plan off to leave.', 'dim');
+    if (argument === '') return;
+    if (this.running) {
+      this.addNotice('A turn is already running — the next step will use plan mode. Press Esc to interrupt.', 'warn');
+      return;
+    }
+    await this.executeTurn(argument);
+  }
+
+  private async reviewPlan(plan: string, title: string): Promise<{ approved: boolean; feedback?: string }> {
+    const lines = plan.split('\n');
+    const preview = lines.length > 28 ? `${lines.slice(0, 28).join('\n')}\n…` : plan;
+    const choice = await showSelectDialog(this.ui, {
+      title,
+      bodyText: preview,
+      items: [
+        { value: 'approve', label: 'Approve', description: 'Leave plan mode and carry out the plan' },
+        { value: 'revise', label: 'Keep planning', description: 'Stay in plan mode; optional feedback next' },
+      ],
+      maxVisible: 2,
+      maxHeight: '80%',
+    });
+    if (choice === 'approve') return { approved: true };
+    if (choice === 'revise') {
+      const feedback = await showInputDialog(this.ui, {
+        title: 'Feedback (optional)',
+        hint: 'Enter send · Esc skip',
+      });
+      return { approved: false, feedback: feedback ?? '' };
+    }
+    return {
+      approved: false,
+      feedback: 'The user dismissed the plan review to speak instead; stay in plan mode, stop here, and wait for their message.',
+    };
   }
 
   private async commandGoal(argument: string): Promise<void> {
@@ -1531,8 +1630,8 @@ class InteractiveMode implements ApprovalUi {
     }
     const items: SelectItem[] = models.map((id) => ({
       value: id,
-      label: id,
-      description: id === this.model ? 'current' : undefined,
+      label: displayNameForModel(id),
+      description: id === this.model ? `${id}    current` : id,
     }));
     const selected = await this.editor.showInlineMenu({ title: 'Model', items, maxVisible: 14 });
     if (!selected || selected.value === this.model) return;

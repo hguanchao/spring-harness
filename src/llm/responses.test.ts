@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { applyResponsesEvent, buildResponsesRequest, toResponsesInput } from './responses.js';
-import { newSseAcc } from './openai.js';
+import { finishStream, newSseAcc } from './openai.js';
 import type { ChatMessage } from './openai.js';
 
 const user = (content: string): ChatMessage => ({ role: 'user', content });
@@ -19,6 +19,82 @@ describe('buildResponsesRequest', () => {
       const body = buildResponsesRequest({ model: 'm', messages: [user('hi')], tools: [], reasoningEffort: effort });
       assert.equal(body.reasoning, undefined, `effort=${effort}`);
     }
+  });
+
+  it('带 tools 时发 tool_choice auto', () => {
+    const body = buildResponsesRequest({
+      model: 'm',
+      messages: [user('hi')],
+      tools: [{ type: 'function', function: { name: 'read_file', description: '', parameters: {} } }],
+    });
+    assert.equal(body.tool_choice, 'auto');
+  });
+
+  it('不向网关回传 encrypted_content：zen Console 会 400', () => {
+    const body = buildResponsesRequest({
+      model: 'm',
+      messages: [user('hi')],
+      tools: [],
+      reasoningEffort: 'xhigh',
+    });
+    assert.equal(body.store, undefined);
+    assert.equal(body.include, undefined);
+  });
+});
+
+describe('applyResponsesEvent 工具调用', () => {
+  it('[DONE] 不当成 JSON 解析失败', () => {
+    const acc = newSseAcc();
+    assert.deepEqual(applyResponsesEvent('[DONE]', acc), {});
+  });
+
+  it('并行 function_call 的 arguments.delta 按 item_id 寻址', () => {
+    const acc = newSseAcc();
+    applyResponsesEvent(
+      JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'fc_a', call_id: 'call_a', name: 'read_file', arguments: '' },
+      }),
+      acc,
+    );
+    applyResponsesEvent(
+      JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'fc_b', call_id: 'call_b', name: 'glob', arguments: '' },
+      }),
+      acc,
+    );
+    applyResponsesEvent(
+      JSON.stringify({ type: 'response.function_call_arguments.delta', item_id: 'fc_a', delta: '{"path":"a"}' }),
+      acc,
+    );
+    applyResponsesEvent(
+      JSON.stringify({ type: 'response.function_call_arguments.delta', item_id: 'fc_b', delta: '{"pattern":"*"}' }),
+      acc,
+    );
+    const calls = finishStream(acc).toolCalls ?? [];
+    assert.equal(calls[0]?.arguments, '{"path":"a"}');
+    assert.equal(calls[1]?.arguments, '{"pattern":"*"}');
+  });
+
+  it('从 output_item.done 收下 encrypted_content', () => {
+    const acc = newSseAcc();
+    applyResponsesEvent(
+      JSON.stringify({
+        type: 'response.output_item.done',
+        item: {
+          type: 'reasoning',
+          id: 'rs_1',
+          encrypted_content: 'blob',
+          summary: [{ type: 'summary_text', text: '先看目录' }],
+        },
+      }),
+      acc,
+    );
+    const reasoning = finishStream(acc).reasoning ?? [];
+    assert.equal(reasoning[0]?.id, 'rs_1');
+    assert.equal(reasoning[0]?.encryptedContent, 'blob');
+    assert.equal(reasoning[0]?.summary, '先看目录');
   });
 });
 
@@ -99,5 +175,20 @@ describe('toResponsesInput', () => {
     assert.equal(items[2]?.role, 'assistant');
     assert.equal(items[3]?.type, 'function_call');
     assert.equal(items[4]?.type, 'function_call_output');
+  });
+
+  it('不把 encrypted reasoning 写进 input：该字段绑定签发方，转手会 400', () => {
+    const items = toResponsesInput([
+      user('hi'),
+      {
+        role: 'assistant',
+        content: '看目录',
+        reasoning: [{ id: 'rs_1', encryptedContent: 'enc' }],
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }],
+      },
+    ]);
+    assert.equal(items.some((item) => item.type === 'reasoning'), false);
+    assert.equal(items[1]?.role, 'assistant');
+    assert.equal(items[2]?.type, 'function_call');
   });
 });

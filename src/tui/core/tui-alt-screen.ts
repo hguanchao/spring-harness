@@ -45,6 +45,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils.js";
+import { oscResetCanvasBackground, oscSetCanvasBackground, theme } from "../theme/theme.js";
 
 const ENTER_ALT_SCREEN = "\x1b[?1049h";
 const EXIT_ALT_SCREEN = "\x1b[?1049l";
@@ -277,7 +278,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? ENABLE_BUTTON_MOTION_MOUSE
 				: ENABLE_ALL_MOTION_MOUSE;
 		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}\x1b[2J\x1b[H\x1b[?25l`,
+			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}${oscSetCanvasBackground()}${theme.bgSeq("bg")}\x1b[2J\x1b[H\x1b[?25l`,
 		);
 	}
 
@@ -298,14 +299,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!this.altScreenActive) return;
 		this.altScreenActive = false;
 		if (options.preserveScreen) {
-			this.terminal.write(`${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`);
+			this.terminal.write(
+				`${BEGIN_SYNCHRONIZED_OUTPUT}${oscResetCanvasBackground()}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`,
+			);
 		} else {
 			const width = Math.max(1, this.terminal.columns);
 			const documentLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 			this.lastDocument = this.applyLineResets(documentLines.map((line) => line.replaceAll(CURSOR_MARKER, ""))).map(
 				(line) => clipLineToWidth(line, width),
 			);
-			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
+			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${oscResetCanvasBackground()}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
 			for (let row = 0; row < this.lastDocument.length; row++) {
 				if (row > 0) buffer += "\r\n";
 				buffer += `\r\x1b[2K${this.lastDocument[row] ?? ""}`;
@@ -1279,15 +1282,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const fullRedraw =
 			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;
 
+		const canvasBg = theme.bgSeq("bg");
 		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
-			buffer += `\x1b[2J`;
+			buffer += `${canvasBg}\x1b[2J`;
 		}
 
 		for (let row = 0; row < height; row++) {
 			if (!fullRedraw && screen[row] === this.previousScreen[row]) continue;
-			buffer += `\x1b[${row + 1};1H\x1b[2K${screen[row] ?? ""}`;
+			buffer += `\x1b[${row + 1};1H${canvasBg}\x1b[2K${screen[row] ?? ""}`;
 		}
 
 		if (cursorPos) {

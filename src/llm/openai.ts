@@ -36,6 +36,13 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } };
 
+/** Responses 推理项：下一轮必须原样回传 encrypted_content，否则模型跨步丢思考状态。 */
+export interface ReasoningItem {
+  id: string;
+  encryptedContent?: string;
+  summary?: string;
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
@@ -48,6 +55,7 @@ export interface ChatMessage {
     type: 'function';
     function: { name: string; arguments: string };
   }>;
+  reasoning?: ReasoningItem[];
 }
 
 export interface StreamDelta {
@@ -55,6 +63,7 @@ export interface StreamDelta {
   /** 推理模型（DeepSeek reasoner 等）暴露的思考链；delta.reasoning_content 累积。 */
   thinking?: string;
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+  reasoning?: ReasoningItem[];
   finishReason?: string;
   usage?: TokenUsage;
 }
@@ -76,12 +85,15 @@ interface ToolAcc {
   id: string;
   name: string;
   arguments: string;
+  /** Responses `output_item.id`，arguments.delta 用它寻址，不能只认 last-added。 */
+  itemId?: string;
 }
 
 export interface SseAcc {
   text: string;
   thinking: string;
   tools: Map<number, ToolAcc>;
+  reasoningItems: Map<string, ReasoningItem>;
   finish?: string;
   usage?: TokenUsage;
   /** Responses 协议的 arguments delta 事件不带 index，用它定位最近一个工具调用。 */
@@ -90,7 +102,7 @@ export interface SseAcc {
 
 /** 三协议共用的空累积器；字段语义见 SseAcc。 */
 export function newSseAcc(): SseAcc {
-  return { text: '', thinking: '', tools: new Map() };
+  return { text: '', thinking: '', tools: new Map(), reasoningItems: new Map() };
 }
 
 /** OpenAI / Responses 共用的 JSON + Bearer 头。 */
@@ -226,10 +238,12 @@ export function finishStream(acc: SseAcc): StreamDelta {
       name: call.name,
       arguments: call.arguments,
     }));
+  const reasoning = [...acc.reasoningItems.values()].filter((item) => item.encryptedContent);
   return {
     text: acc.text,
     thinking: acc.thinking || undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    reasoning: reasoning.length > 0 ? reasoning : undefined,
     finishReason: acc.finish,
     usage: acc.usage,
   };
@@ -284,6 +298,7 @@ export function buildRequestBody(options: RequestBodyOptions): Record<string, un
     model: options.model,
     messages: options.messages.map(serializeMessage),
     tools: options.tools.length > 0 ? options.tools : undefined,
+    tool_choice: options.tools.length > 0 ? 'auto' : undefined,
     stream: true,
     stream_options: { include_usage: true },
     reasoning_effort: activeReasoningEffort(options.reasoningEffort),

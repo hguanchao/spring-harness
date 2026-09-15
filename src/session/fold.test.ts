@@ -49,6 +49,19 @@ describe('foldSessionState recap', () => {
     assert.equal(state.lastRecap, 'wired up recap');
   });
 
+  it('folds plan_mode as last-wins', () => {
+    const state = foldSessionState([
+      { type: 'event', ts: 't', kind: 'plan_mode', data: sessionEventData.planMode(true) },
+      { type: 'event', ts: 't', kind: 'plan_mode', data: sessionEventData.planMode(false) },
+      { type: 'event', ts: 't', kind: 'plan_mode', data: sessionEventData.planMode(true) },
+    ]);
+    assert.equal(state.planMode, true);
+  });
+
+  it('treats missing plan_mode as inactive', () => {
+    assert.equal(foldSessionState([]).planMode, false);
+  });
+
   it('ignores unrelated events', () => {
     const state = foldSessionState([
       { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind: 'goal', data: { text: 'ship it' } },

@@ -48,7 +48,7 @@ type VerbKind =
   | 'skill'
   | 'search'
   | 'dir'
-  | 'webFetch'
+  | 'webSearch'
   | 'subagent'
   | 'command'
   | 'edit'
@@ -70,7 +70,7 @@ const VERB_WORDS: Record<VerbKind, VerbWords> = {
   skill: { past: 'Read', present: 'Reading', one: 'skill', many: 'skills' },
   search: { past: 'Searched', present: 'Searching', one: 'pattern', many: 'patterns' },
   dir: { past: 'Listed', present: 'Listing', one: 'dir', many: 'dirs' },
-  webFetch: { past: 'Fetched', present: 'Fetching', one: 'website', many: 'websites' },
+  webSearch: { past: 'Searched', present: 'Searching', one: 'web query', many: 'web queries' },
   subagent: { past: 'Ran', present: 'Running', one: 'subagent', many: 'subagents' },
   command: { past: 'Ran', present: 'Running', one: 'command', many: 'commands' },
   edit: { past: 'Edited', present: 'Editing', one: 'file', many: 'files' },
@@ -89,8 +89,9 @@ const TOOL_VERB_KINDS: Record<string, VerbKind> = {
   read_file: 'file',
   skill: 'skill',
   grep: 'search',
+  glob: 'search',
   list_dir: 'dir',
-  web_fetch: 'webFetch',
+  web_search: 'webSearch',
   subagent: 'subagent',
   shell: 'command',
   write: 'edit',
@@ -233,6 +234,8 @@ export class ToolGroupComponent extends VStack {
     thinking.running = running;
     thinking.durationMs = durationMs;
     this.markDirty();
+    // 思考段在转录 ScrollView 里：必须 bump contentGeneration，视口通道会命中
+    // 滚动缓存、增量看不见。listener 同帧也会 requestRender，框架会合并。
     this.ui.requestRender();
   }
 
@@ -316,7 +319,7 @@ export class ToolGroupComponent extends VStack {
   /** 重算一段思考的行文案；正文只在它自己展开时挂上。 */
   private updateThinking(member: ThinkingMember): void {
     const caret = member.running ? TOOL_MARK.running : TOOL_MARK.done;
-    // 收尾文案对齐参考实现：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。
+    // 收尾文案：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。空链不占行。
     const label = member.running
       ? 'Thinking…'
       : member.durationMs === undefined
@@ -349,12 +352,8 @@ export class ToolGroupComponent extends VStack {
   /**
    * 重建组件树：统一间距 → 汇总行 → 思考行 → 展开的成员。
    *
-   * 思考段**有内容才算成员**：不是所有模型都吐推理内容，但 `thinking_start/end` 在每次
-   * LLM 调用前都会广播（`loop.ts`），不过滤就会给每个工具组挂一行永远展开不出东西的
-   * `Thought`。运行中但还没有增量时也不占位——输入框上方的状态行已经在说 `Thinking…`。
-   *
-   * 有内容时，思考行可见的三个条件是：组已展开、这一段还在跑、或本组没有工具。前两个保证
-   * 「随组折叠」，第三个保证纯思考的组不会渲染成一片空白。汇总行只在有工具时出现。
+   * 思考段**有内容才占行**：空链（很多端点不吐 reasoning）不画「思考结束」。
+   * 运行中但还没有增量时也不占位。有内容时随组折叠；组里没有工具时纯思考行必须可见。
    */
   private rebuild(width: number): void {
     const visible = (member: ThinkingMember): boolean =>

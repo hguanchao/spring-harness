@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { Markdown } from '../components/markdown.js';
-import { getMarkdownTheme, highlightCode, theme } from './theme.js';
+import { PALETTE } from './palettes.js';
+import {
+  getMarkdownTheme,
+  highlightCode,
+  oscResetCanvasBackground,
+  oscSetCanvasBackground,
+  Theme,
+  theme,
+} from './theme.js';
 
 /** 只看前景色 SGR，忽略加粗/斜体等修饰。 */
 const FG = /\x1b\[38;(?:5;\d+|2;\d+;\d+;\d+)m/g;
@@ -39,24 +47,29 @@ describe('highlightCode', () => {
     assert.equal(distinctColors(lines).length, 1);
   });
 
-  it('带语言的围栏同样整块同色，不再上语法色', () => {
+  it('带语言的围栏上蓝色语法色，关键字与正文灰不同色', () => {
     const lines = highlightCode('public class Foo { return "s"; } // hi', 'java');
-    assert.equal(distinctColors(lines).length, 1, `expected one color, got ${distinctColors(lines).join(',')}`);
+    const fence = colorsOf(getMarkdownTheme().codeBlockBorder('```'))[0];
+    const codes = distinctColors(lines);
+    assert.ok(codes.length >= 2, `expected syntax colors, got ${codes.join(',')}`);
+    assert.ok(codes.some((c) => c !== fence), 'tagged fence must use a color besides muted');
   });
 
-  it('围栏与块内正文同色，语言标签只剩信息意义', () => {
-    const theme = getMarkdownTheme();
-    const fenceColor = colorsOf(theme.codeBlockBorder('```java'))[0];
-    for (const lang of ['java', 'python', 'bash', 'text', undefined, 'not-a-real-language']) {
+  it('无语言 / text / 未知语言整块中性灰，不上蓝', () => {
+    const muted = colorsOf(theme.fg('mdCodeBlock', 'x'))[0];
+    const body = colorsOf(theme.fg('mdText', 'x'))[0];
+    const syntax = colorsOf(theme.fg('syntaxKeyword', 'x'))[0];
+    for (const lang of ['text', undefined, 'not-a-real-language']) {
       const codes = distinctColors(highlightCode('@Override public void f() { return "x"; } // c', lang));
-      assert.deepEqual(codes, [fenceColor], `${lang ?? '(none)'} 应与围栏同色`);
+      assert.deepEqual(codes, [muted], `${lang ?? '(none)'} 应与代码块灰同色`);
+      assert.notEqual(muted, body);
+      assert.notEqual(muted, syntax);
     }
   });
 
-  it('text 围栏的内容色与围栏色一致', () => {
-    const theme = getMarkdownTheme();
+  it('text 围栏的内容色与围栏灰一致', () => {
     const [line] = highlightCode('some text', 'text');
-    assert.equal(colorsOf(line ?? '')[0], colorsOf(theme.codeBlockBorder('```'))[0]);
+    assert.equal(colorsOf(line ?? '')[0], colorsOf(getMarkdownTheme().codeBlockBorder('```'))[0]);
   });
 });
 
@@ -82,25 +95,27 @@ describe('代码档配色分工', () => {
     );
   });
 
-  it('方法与它的括号同色，且与注解色不同', () => {
+  it('行内码整段单色，注解和标识符不再分色', () => {
     const markdownTheme = getMarkdownTheme();
-    // foo(x)：方法名 + 左括号 + 参数 + 右括号。行内蓝收敛后参数也走同一档。
-    const codes = colorsOf(markdownTheme.code('foo(x)'));
-    assert.equal(codes.length, 4, `expected 4 colored runs, got ${codes.join(',')}`);
-    assert.equal(codes[0], codes[1], '方法名与左括号应同色');
-    assert.equal(codes[0], codes[3], '右括号应与方法名同色');
-    assert.equal(codes[0], codes[2], '标识符与方法共用行内蓝');
-    assert.notEqual(codes[0], colorsOf(markdownTheme.code('@Override'))[0]);
+    const ident = colorsOf(markdownTheme.code('Spring MVC'));
+    const method = colorsOf(markdownTheme.code('now()'));
+    const anno = colorsOf(markdownTheme.code('@Override'));
+    assert.equal(ident.length, 1);
+    assert.equal(method.length, 1);
+    assert.equal(anno.length, 1);
+    assert.equal(ident[0], method[0]);
+    assert.equal(ident[0], anno[0]);
   });
 
-  it('裸行内码用蓝色，和正文分开', () => {
+  it('行内码整段语法蓝，与正文、代码块灰都不同', () => {
     const markdownTheme = getMarkdownTheme();
     const inline = colorsOf(markdownTheme.code('Spring MVC'))[0];
     const body = colorsOf(theme.fg('mdText', 'Spring MVC'))[0];
-    const method = colorsOf(markdownTheme.code('now()'))[0];
-    assert.ok(inline);
-    assert.notEqual(inline, body, '行内码不能再跟正文同色');
-    assert.equal(inline, method, '裸标识符与方法共用行内蓝');
+    const block = colorsOf(markdownTheme.codeBlock('Spring MVC'))[0];
+    const syntax = colorsOf(theme.fg('syntaxKeyword', 'x'))[0];
+    assert.equal(inline, syntax);
+    assert.notEqual(inline, body);
+    assert.notEqual(inline, block);
   });
 });
 
@@ -114,11 +129,33 @@ describe('引用块里的行内代码', () => {
     assert.equal(distinctColors(quoteLines).length, 1, `expected one color, got ${distinctColors(quoteLines).join(',')}`);
   });
 
-  it('引用块外的行内代码仍然自带颜色', () => {
+  it('引用块外的行内码是蓝，正文是灰', () => {
     const lines = markdownOf('prose with `Spring MVC` inside')
       .render(60)
       .filter((line) => line.includes('prose'));
     assert.equal(lines.length, 1);
-    assert.equal(distinctColors(lines).length, 2);
+    const codes = distinctColors(lines);
+    assert.ok(codes.includes(colorsOf(theme.fg('mdText', 'x'))[0] ?? ''));
+    assert.ok(codes.includes(colorsOf(theme.fg('syntaxKeyword', 'x'))[0] ?? ''));
+  });
+});
+
+describe('画布底色', () => {
+  it('主色是 Material Deep Purple 300，不是 TokyoNight 品红', () => {
+    assert.equal(PALETTE.primary, '#9575cd');
+    assert.notEqual(PALETTE.primary, '#bb9af7');
+  });
+
+  it('语法蓝是 Material Blue 300，不是 TokyoNight 亮蓝', () => {
+    assert.equal(PALETTE.syntaxKeyword, '#64b5f6');
+    assert.notEqual(PALETTE.syntaxKeyword, '#7aa2f7');
+  });
+
+  it('与 GrokNight bg_base 一致，OSC 11 用真 hex', () => {
+    assert.equal(PALETTE.bg, '#141414');
+    const t = new Theme(PALETTE, 'truecolor');
+    assert.equal(t.bgSeq('bg'), '\x1b[48;2;20;20;20m');
+    assert.equal(oscSetCanvasBackground(), '\x1b]11;#141414\x07');
+    assert.equal(oscResetCanvasBackground(), '\x1b]111\x07');
   });
 });

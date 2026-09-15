@@ -2,6 +2,9 @@ import { errorMessage, flattenWhitespace } from '../util.js';
 import { llmError } from './errors.js';
 import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
 
+/** 两次 SSE chunk 之间的默认空闲上限。交互 CLI 比 grok 的 300s 更短，避免 TUI 挂死。 */
+export const SSE_IDLE_TIMEOUT_MS = 120_000;
+
 export interface SseStreamParams {
   url: string;
   headers: Record<string, string>;
@@ -9,6 +12,29 @@ export interface SseStreamParams {
   signal?: AbortSignal;
   /** 每收到一行 data payload（已剥掉 "data:" 前缀）回调一次；抛错即中断读取。 */
   onData: (payload: string) => void;
+  /** 两次 chunk 间隔超时；<=0 关闭。默认 SSE_IDLE_TIMEOUT_MS。 */
+  idleTimeoutMs?: number;
+}
+
+async function readIdle(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (idleMs <= 0) return reader.read();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new RetryableError(`LLM stream idle timeout (${idleMs}ms)`)),
+          idleMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -52,11 +78,12 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const idleMs = params.idleTimeoutMs ?? SSE_IDLE_TIMEOUT_MS;
   let buffer = '';
   let sawData = false;
   let sample = '';
   for (;;) {
-    const { value, done } = await reader.read();
+    const { value, done } = await readIdle(reader, idleMs);
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const lines = buffer.split(/\r?\n/);
     buffer = done ? '' : (lines.pop() ?? '');

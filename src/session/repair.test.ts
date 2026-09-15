@@ -1,0 +1,74 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it } from 'node:test';
+import { findDanglingToolCalls, INTERRUPTED_TOOL, repairDanglingTools } from './repair.js';
+import { JsonlSession } from './store.js';
+import type { SessionMessage } from './types.js';
+
+function msg(partial: Omit<SessionMessage, 'type' | 'ts'>): SessionMessage {
+  return { type: 'message', ts: '2026-01-01T00:00:00.000Z', ...partial };
+}
+
+describe('findDanglingToolCalls', () => {
+  it('returns nothing when every tool call has a result', () => {
+    const dangling = findDanglingToolCalls([
+      msg({ role: 'user', content: 'hi' }),
+      msg({
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'read_file', arguments: { path: 'a.ts' } }],
+      }),
+      msg({ role: 'tool', content: 'ok', toolCallId: 'c1', toolName: 'read_file' }),
+    ]);
+    assert.deepEqual(dangling, []);
+  });
+
+  it('finds tool calls with no matching result', () => {
+    const dangling = findDanglingToolCalls([
+      msg({
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'c1', name: 'read_file', arguments: {} },
+          { id: 'c2', name: 'grep', arguments: {} },
+        ],
+      }),
+    ]);
+    assert.deepEqual(dangling, [
+      { id: 'c1', name: 'read_file' },
+      { id: 'c2', name: 'grep' },
+    ]);
+  });
+});
+
+describe('repairDanglingTools', () => {
+  it('appends synthetic tool results and is a no-op on a paired session', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sph-repair-'));
+    try {
+      const session = new JsonlSession(dir, 's1');
+      const messages: SessionMessage[] = [
+        msg({
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'c1', name: 'shell', arguments: {} },
+            { id: 'c2', name: 'grep', arguments: {} },
+          ],
+        }),
+      ];
+      assert.equal(repairDanglingTools(session, messages), 2);
+      assert.equal(messages.length, 3);
+      assert.equal(messages[1]?.content, INTERRUPTED_TOOL);
+      assert.equal(messages[1]?.toolCallId, 'c1');
+      assert.equal(messages[2]?.toolCallId, 'c2');
+      const records = session.readAll();
+      assert.equal(records.filter((row) => row.type === 'message' && row.role === 'tool').length, 2);
+      assert.equal(records.filter((row) => row.type === 'event' && row.kind === 'tool_result').length, 2);
+      assert.equal(repairDanglingTools(session, messages), 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
