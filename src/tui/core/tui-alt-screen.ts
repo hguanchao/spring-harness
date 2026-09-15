@@ -5,6 +5,8 @@ import { compositeStickyUserMessages } from "../components/sticky-user-message.j
 import { getKeybindings } from "./keybindings.js";
 import { isKeyRelease } from "./keys.js";
 import {
+	compositeScrollbars,
+	contentPaintRight,
 	getLayoutBoxesAt,
 	getScrollbarGeometry,
 	getScrollViewBox,
@@ -1218,11 +1220,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!this.scrollToEndIndicator || !scrollView.followEnd || scrollView.isFollowingEnd) return screen;
 		const box = getScrollViewBox(layout, scrollView);
 		const clip = box?.clip;
-		if (!clip || clip.width <= 0 || clip.height <= 0) return screen;
+		if (!box || !clip || clip.width <= 0 || clip.height <= 0) return screen;
 		const row = clip.y + clip.height - 1;
 		if (row >= screen.length) return screen;
-		const scrollbarColumn = box ? getScrollbarGeometry(box)?.column : undefined;
-		const availableWidth = Math.max(0, (scrollbarColumn ?? clip.x + clip.width) - clip.x);
+		const availableWidth = Math.max(0, contentPaintRight(box) - clip.x);
 		const text = truncateToWidth(this.scrollToEndIndicator(), availableWidth, "");
 		const textWidth = visibleWidth(text);
 		if (textWidth === 0) return screen;
@@ -1260,12 +1261,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.contentGeneration,
 		);
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
-		screen = compositeStickyUserMessages(screen, nextLayout, width);
+		// 叠层从底到顶：layout 正文（含滚动条）已经在 nextLayout.lines 里。
+		// 内容装饰不得盖住视口 chrome / 浮层 / flash，否则选区会染上对话框、│ 会穿出吸顶气泡。
+		screen = this.applySelection(screen, nextLayout);
 		screen = compositeRowSelection(screen, nextLayout, width);
+		screen = compositeStickyUserMessages(screen, nextLayout, width);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
+		// 吸顶与正文气泡同宽，滑块最后盖回右缘，避免气泡短一列、滑块被灰底吃掉。
+		screen = compositeScrollbars(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
-		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
 
 		const cursorPos = this.extractCursorPosition(screen, height);

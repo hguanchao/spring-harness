@@ -321,7 +321,15 @@ function layoutComponent(
 				node.state.scrollTop,
 			);
 		} else {
+			const previousScrollTop = node.state.scrollTop;
 			node.state.updateLayout(cached.box.rect.height, viewportHeight || cached.box.rect.height, context.requestRender);
+			// follow-end / pin-reserve 可能在缓存命中后改 scrollTop（编辑器变高把转录视口挤矮）。
+			// 不跟着平移的话，文档还停在旧偏移，下一次滚轮会从错误的 cache.scrollTop 起跳。
+			if (node.state.scrollTop !== previousScrollTop) {
+				translateBox(cached.box, previousScrollTop - node.state.scrollTop);
+				const entry = scrollChildCache.get(scrollView);
+				if (entry) entry.scrollTop = node.state.scrollTop;
+			}
 		}
 		const childBox = cached.box;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;
@@ -478,6 +486,13 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	};
 }
 
+/** 滚动内容可画到的右缘（不含滚动条列）。没有滚动条时就是 clip 右缘。 */
+export function contentPaintRight(box: LayoutBox): number {
+	const clipRight = box.clip.x + box.clip.width;
+	const column = getScrollbarGeometry(box)?.column;
+	return column === undefined ? clipRight : Math.min(clipRight, column);
+}
+
 function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
@@ -519,6 +534,17 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 	for (const child of box.children) paintBox(child, screen, totalWidth);
 
 	paintScrollbar(box, screen, totalWidth);
+}
+
+/** 在内容装饰（吸顶、选区）之后重画滑块，避免为了让列而把气泡画短一截。 */
+export function compositeScrollbars(screen: string[], frame: LayoutFrame, totalWidth: number): string[] {
+	const result = [...screen];
+	const visit = (box: LayoutBox): void => {
+		paintScrollbar(box, result, totalWidth);
+		for (const child of box.children) visit(child);
+	};
+	visit(frame.root);
+	return result;
 }
 
 export function renderLayoutFrame(

@@ -130,11 +130,14 @@ export class SelectList implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.filteredItems.length === 0) return undefined;
-		// 滚轮不改选中项：选择只走键盘上下键。
-		//
-		// 仍然吞掉事件并声明「无需重绘」：可视区是以选中项为中心算出来的，单独滚视口没有意义；
-		// 放它穿过去只会让弹窗背后的转录跟着动。`render: false` 是为了不因为一次滚轮白重绘一帧。
-		if (event.type === "wheel") return { handled: true, render: false };
+		// 滚轮只改高亮（可视区跟着选中项走），不确认。点选同理：确认只走 Enter。
+		if (event.type === "wheel" && event.wheelDelta) {
+			const delta = event.wheelDelta < 0 ? -1 : 1;
+			const previousIndex = this.selectedIndex;
+			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
+			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
+			return { handled: true, render: this.selectedIndex !== previousIndex };
+		}
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 		const { startIndex, endIndex } = this.getVisibleRange();
@@ -155,9 +158,7 @@ export class SelectList implements Component {
 			const changed = this.selectedIndex !== clickedIndex;
 			this.selectedIndex = clickedIndex;
 			if (changed) this.notifySelectionChange();
-			const selectedItem = this.filteredItems[this.selectedIndex];
-			if (selectedItem) this.onSelect?.(selectedItem);
-			return { handled: true };
+			return { handled: true, render: changed };
 		}
 		return undefined;
 	}

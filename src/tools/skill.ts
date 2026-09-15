@@ -3,7 +3,7 @@ import { asString, clip, type ToolContext, type ToolResult, type ToolSpec } from
 
 export const skillTool: ToolSpec = {
   name: 'skill',
-  description: 'Load a skill SKILL.md by catalog name. Use when a listed skill matches the task.',
+  description: 'Load a SKILL.md by catalog name when a listed skill matches the task. Your instructions list only its name and description; this returns the full file, so call it before following a skill you have not read.',
   schema: {
     type: 'object',
     properties: { name: { type: 'string' } },

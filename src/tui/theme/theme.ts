@@ -216,8 +216,8 @@ const UNTAGGED_LANGS = new Set(['plaintext', 'text', 'txt', 'output', 'ansi', 'c
 /**
  * 行内代码（codespan）的词法猜测配色。
  *
- * 中性档用 `mdCode`（#cccccc）而不是代码块的 `mdCodeBlock`（#808080）：行内码夹在正文里，
- * 压暗一档就和正文糊在一起了。带色相的三档与代码块共用。
+ * 中性档用 `mdCode`（行内蓝）而不是代码块的 `mdCodeBlock`（#808080）：
+ * 行内码夹在正文里，再用正文灰就看不出是代码。标识符/数字/方法共用这一档，不高亮过满。
  */
 const ideaInlineColors = {
   keyword: (t: string) => theme.fg('syntaxKeyword', t),

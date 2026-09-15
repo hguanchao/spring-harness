@@ -290,7 +290,11 @@ describe('buildRecapRequest', () => {
       system: 'sys',
       contextWindow: 256_000,
     });
-    assert.equal(messages[1]?.content, '[compacted earlier context]\nearlier work');
+    const content = messages[1]?.content ?? '';
+    assert.ok(content.startsWith('[compacted earlier context]'));
+    assert.ok(content.endsWith('earlier work'));
+    // 消费侧必须带「别复述、别致谢」的说明，否则模型会把摘要复述一遍。
+    assert.ok(content.includes('without restating it'));
   });
 });
 

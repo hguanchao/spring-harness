@@ -36,7 +36,9 @@ export function jobNotificationText(job: JobRecord): string {
   const footer = job.subagentSessionId
     ? `\n\n[subagent session: ${job.subagentSessionId} — continue with subagent(resume_from: "${job.subagentSessionId}")]`
     : '';
-  return `[background task ${ok ? 'completed' : 'FAILED'}: ${job.command}]\n${body}${footer}`;
+  // 说明来源与性质：这条是运行时生成的通知，不是用户发言，也不是待办。
+  // 不写清楚，模型会把它当成新指令去执行一遍，或当成用户提问去回答。
+  return `[background task ${ok ? 'completed' : 'FAILED'}: ${job.command} — runtime notification, not a user request; do not start this work again unless the result shows it failed]\n${body}${footer}`;
 }
 
 type TaskDoneListener = (job: JobRecord) => void;

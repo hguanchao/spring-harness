@@ -5,7 +5,11 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 export const shellTool: ToolSpec = {
   name: 'shell',
   description:
-    'Run a PowerShell command in the workspace root. On Windows this is pwsh, not bash. Writes outside the workspace fail under the workspace sandbox (partial OS enforcement).',
+    'Run a shell command in the workspace root — pwsh on Windows, sh elsewhere, so bash-only syntax may not apply.'
+    + ' Each call is one-shot: no cwd, variable, or function survives between calls, so pass explicit paths'
+    + ' instead of relying on an earlier cd. Check the exit-code marker on every result before moving on.'
+    + ' A write denied by the workspace sandbox is policy, not a command bug: restate the path inside the'
+    + ' workspace rather than reaching for another way to write it.',
   schema: {
     type: 'object',
     properties: {

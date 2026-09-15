@@ -47,7 +47,6 @@ import type { WorktreeStore } from '../runtime/worktrees.js';
 import { SpillStore } from '../runtime/spill.js';
 import type { TodoList } from '../runtime/todos.js';
 import type { SandboxHandle } from '../sandbox/open.js';
-import { exportJson, exportMarkdown } from '../session/export.js';
 import {
   foldSessionState,
   sessionEventData,
@@ -91,6 +90,7 @@ import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, toolDisp
 import { SubagentTaskComponent } from './components/subagent-task.js';
 import { ToolGroupComponent } from './components/tool-group.js';
 import { UserMessageComponent } from './components/user-message.js';
+import { userMessageBubbleY } from './components/sticky-user-message.js';
 import { RecapMessageComponent } from './components/recap.js';
 import { getEditorTheme, getMarkdownTheme, theme } from './theme/theme.js';
 import { errorMessage, flattenWhitespace, formatDuration } from '../util.js';
@@ -155,16 +155,10 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'new', label: '/new', hint: 'Start a new session' },
   { id: 'sessions', label: '/sessions', hint: 'Browse sessions, or switch by id' },
   { id: 'recap', label: '/recap', hint: 'Summarize the session so far' },
-  { id: 'status', label: '/status', hint: 'Show the full status panel' },
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
   { id: 'approval', label: '/approval', hint: 'Set approval mode: ask | auto | yolo' },
-  { id: 'todo', label: '/todo', hint: 'Show the to-do list' },
-  { id: 'jobs', label: '/jobs', hint: 'Show background jobs' },
-  { id: 'export', label: '/export', hint: 'Export this session (md | json)' },
-  { id: 'clear', label: '/clear', hint: 'Clear the conversation view' },
-  { id: 'quit', label: '/quit', hint: 'Quit' },
 ];
 
 /** 命令别名（对齐 grok-build 的 `/summarize`）：只影响输入，不进命令面板。 */
@@ -486,7 +480,7 @@ class InteractiveMode implements ApprovalUi {
     let y = this.headerContainer.render(width).length;
     let pin: number | undefined;
     for (const child of this.chatContainer.children) {
-      if (child instanceof UserMessageComponent) pin = y;
+      if (child instanceof UserMessageComponent) pin = userMessageBubbleY(y);
       y += child.render(width).length;
     }
     view.setPinY(pin);
@@ -1216,9 +1210,6 @@ class InteractiveMode implements ApprovalUi {
       case 'recap':
         await this.commandRecap(false);
         break;
-      case 'status':
-        await this.commandStatus();
-        break;
       case 'goal':
         await this.commandGoal(argument);
         break;
@@ -1231,19 +1222,6 @@ class InteractiveMode implements ApprovalUi {
       case 'approval':
         await this.commandApproval(argument);
         break;
-      case 'todo':
-        await this.commandTodo();
-        break;
-      case 'jobs':
-        await this.commandJobs();
-        break;
-      case 'export':
-        await this.commandExport(argument);
-        break;
-      case 'clear':
-        this.commandClear();
-        break;
-      case 'quit':
       case 'exit':
         this.quit();
         break;
@@ -1500,32 +1478,6 @@ class InteractiveMode implements ApprovalUi {
     this.ui.requestRender();
   }
 
-  private async commandStatus(): Promise<void> {
-    const lines = [
-      `- **session**: \`${this.session.id}\``,
-      `- **workspace**: \`${this.deps.workspaceRoot}\``,
-      `- **model**: \`${this.model}\``,
-      `- **effort**: \`${this.effort ?? '(default)'}\``,
-      `- **approval**: \`${this.approval}\``,
-      `- **sandbox**: \`${this.deps.sandbox.status.mode}\``,
-      `- **context window**: \`${this.contextWindow}\``,
-      `- **goal**: \`${this.goal ?? '(none)'}\``,
-      `- **last recap**: \`${this.lastRecapPreview() ?? '(none)'}\``,
-      `- **tokens**: ↑${this.usage.promptTokens} ↓${this.usage.completionTokens} R${this.usage.cachedTokens}`,
-    ];
-    await showMessageDialog(this.ui, { title: 'Status', text: lines.join('\n') });
-  }
-
-  /**
-   * 最近一次 recap 的短预览。
-   * 从会话日志折叠而来而不是内存字段：`/status` 在 resume 之后也要给出同样的答案。
-   */
-  private lastRecapPreview(): string | undefined {
-    const summary = foldSessionState(this.session.readAll()).lastRecap;
-    if (summary === undefined) return undefined;
-    return summary.length > 120 ? `${summary.slice(0, 120)}…` : summary;
-  }
-
   private async commandGoal(argument: string): Promise<void> {
     if (argument === '') {
       if (this.goal) {
@@ -1674,46 +1626,6 @@ class InteractiveMode implements ApprovalUi {
   private applyApprovalBorder(): void {
     const color = this.approval === 'yolo' ? 'error' : this.approval === 'auto' ? 'warning' : 'borderMuted';
     this.editor.borderColor = (text: string) => theme.fg(color, text);
-  }
-
-  private async commandTodo(): Promise<void> {
-    const items = this.deps.todos.list();
-    if (items.length === 0) {
-      this.addNotice('To-do list is empty.', 'dim');
-      return;
-    }
-    const text = items
-      .map((item) => `- [${item.status === 'completed' ? 'x' : ' '}] ${item.content}`)
-      .join('\n');
-    await showMessageDialog(this.ui, { title: 'To-do', text });
-  }
-
-  private async commandJobs(): Promise<void> {
-    const jobs = this.deps.jobs.list();
-    if (jobs.length === 0) {
-      this.addNotice('No background jobs.', 'dim');
-      return;
-    }
-    const text = jobs
-      .map((job) => `- \`${job.id}\` ${job.status} · ${job.result ?? job.command ?? ''}`)
-      .join('\n');
-    await showMessageDialog(this.ui, { title: 'Jobs', text });
-  }
-
-  private async commandExport(argument: string): Promise<void> {
-    const format = argument === 'json' ? 'json' : 'md';
-    const content = format === 'json' ? exportJson(this.session) : exportMarkdown(this.session);
-    await showMessageDialog(this.ui, {
-      title: `Export (${format})`,
-      text: `\`\`\`\n${content.slice(0, 20000)}\n\`\`\``,
-      hint: 'Esc close',
-      width: '90%',
-    });
-  }
-
-  private commandClear(): void {
-    this.clearChat();
-    this.addNotice('Conversation view cleared.', 'dim');
   }
 
   private clearChat(): void {

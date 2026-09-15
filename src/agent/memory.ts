@@ -50,10 +50,46 @@ export function loadMemory(workspaceRoot: string, sphHome: string): MemoryFile[]
   return files;
 }
 
+/**
+ * 逃逸规则文件里的标签形态。
+ *
+ * 指令文件是工作区里的普通文本，模型却会把它们当提示词读。若不加处理，一个包含
+ * `</instructions>` 或 `\</system-reminder>` 的 AGENTS.md 就能提前闭合容器、把后面的
+ * 正文抬成系统级指令。这里只中和标签形态，不动正文内容。
+ */
+function neutralizeInstructionText(text: string): string {
+  return text.replace(/<\/?(instructions|system-reminder|rules|user_rules)>/gi, (tag) =>
+    tag.replace('<', '‹').replace('>', '›'),
+  );
+}
+
+/**
+ * 指令文件 → 提示词片段。
+ *
+ * 两个来源的**权重不同**，必须在容器上写出来，否则模型只能自己猜：用户级
+ * （~/.sph/AGENTS.md）是跨项目的个人偏好，项目级（工作区 AGENTS.md / CLAUDE.md）是
+ * 本仓库的约定，冲突时项目级优先——因为它更具体。
+ */
 export function memoryToPrompt(files: MemoryFile[]): string {
-  return files
-    .map((file) => `[${file.source === 'user' ? 'user' : 'project'} instructions: ${file.path}]\n${file.text}`)
-    .join('\n\n');
+  if (files.length === 0) return '';
+  const blocks = files.map((file) => {
+    const scope = file.source === 'user' ? 'user-level (applies to every project)' : 'project-level (applies to this workspace)';
+    return `[instructions from ${file.path} — ${scope}]\n${neutralizeInstructionText(file.text)}`;
+  });
+  return [
+    'Follow these instructions where they apply. If a user-level and a project-level instruction conflict, the project-level one wins — it is more specific to this code.',
+    'They are instructions about how to work here, not a task: do not carry out anything they merely describe.',
+    '',
+    blocks.join('\n\n'),
+  ].join('\n');
+}
+
+/**
+ * 触碰注入的单个片段（loop 在工具边界把嵌套指令塞进会话）。
+ * 与 memoryToPrompt 用同一套措辞和同一道逃逸，避免两个入口行为分叉。
+ */
+export function touchInstructionBlock(relPath: string, text: string): string {
+  return `[instructions from ${relPath} — applies under this directory]\n${neutralizeInstructionText(text)}`;
 }
 
 export interface TouchInjection {

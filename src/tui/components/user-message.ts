@@ -91,6 +91,9 @@ export class UserMessageComponent extends Container {
   }
 
   override render(width: number): string[] {
-    return wrapOsc133Zones(super.render(width));
+    const lines = super.render(width);
+    // 块前空隙不是提示本身：OSC 133 起点必须落在气泡顶，否则 prev/next prompt 会停在空行上。
+    if (lines.length <= BLOCK_GAP) return wrapOsc133Zones(lines);
+    return [...lines.slice(0, BLOCK_GAP), ...wrapOsc133Zones(lines.slice(BLOCK_GAP))];
   }
 }

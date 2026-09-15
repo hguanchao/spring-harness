@@ -7,7 +7,7 @@
  */
 
 import { BLOCK_GAP } from './primitives.js';
-import { getScrollbarGeometry, getScrollViewBox, type LayoutBox, type LayoutFrame } from '../core/layout.js';
+import { getScrollViewBox, type LayoutBox, type LayoutFrame } from '../core/layout.js';
 import { compositeTuiLine, type Component } from '../core/tui.js';
 
 export const STICKY_USER_MESSAGE = Symbol.for('sph.sticky-user-message');
@@ -17,6 +17,14 @@ export const MAX_STICKY_HEIGHT = 5;
 
 /** 吸顶块与下一条用户气泡之间预留的 1 行空隙，顶走判定用。 */
 export const HEADER_CONTENT_GAP = 1;
+
+/**
+ * 用户消息 LayoutBox 的首行是块前空隙，不是气泡。
+ * pin-reserve / 滚到该条 必须钉气泡顶，否则视口顶先空一行，跟 overlay 吸顶差 1 行。
+ */
+export function userMessageBubbleY(componentTop: number): number {
+  return componentTop + BLOCK_GAP;
+}
 
 export interface StickyUserMessage extends Component {
   readonly [STICKY_USER_MESSAGE]: true;
@@ -161,9 +169,10 @@ export function compositeStickyUserMessages(screen: string[], frame: LayoutFrame
   const visible = overlay.slice(rendered.clipTop);
   if (visible.length === 0) return screen;
 
-  const scrollbarColumn = getScrollbarGeometry(scrollBox)?.column;
-  const overlayRight = scrollbarColumn ?? scrollBox.clip.x + scrollBox.clip.width;
-  const paintWidth = Math.max(1, Math.min(overlayWidth, overlayRight - sticky.rect.x));
+  // 与正文气泡同宽：auto 滚动条是叠在最后一列上的，为它让列会让吸顶比下面的气泡短一截。
+  // 滑块由 doRender 在装饰层之后重画，盖回最后一列。
+  const clipRight = scrollBox.clip.x + scrollBox.clip.width;
+  const paintWidth = Math.max(1, Math.min(overlayWidth, clipRight - sticky.rect.x));
   const viewportBottom = viewportTop + viewportHeight;
   const result = [...screen];
   const last = Math.min(viewportTop + visible.length, viewportBottom, result.length);

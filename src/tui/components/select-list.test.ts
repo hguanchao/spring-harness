@@ -50,34 +50,42 @@ function selectedValue(list: SelectList, width = 40): string | undefined {
 }
 
 describe('SelectList 的滚轮', () => {
-	it('向下滚轮不改选中项', () => {
+	it('向下滚轮改高亮，不确认', () => {
 		const l = list();
-		const before = selectedValue(l);
+		let confirmed = 0;
+		l.onSelect = () => {
+			confirmed++;
+		};
 		l.handleMouse(wheel(1));
-		assert.equal(selectedValue(l), before);
+		assert.equal(selectedValue(l), 'item-1');
+		assert.equal(confirmed, 0);
 	});
 
-	it('向上滚轮不改选中项', () => {
+	it('向上滚轮改高亮', () => {
 		const l = list();
 		l.setSelectedIndex(2);
-		const before = selectedValue(l);
 		l.handleMouse(wheel(-1));
-		assert.equal(selectedValue(l), before);
+		assert.equal(selectedValue(l), 'item-1');
 	});
 
-	it('连续滚轮多次也不改选中项', () => {
+	it('滚到边界后停住，不回卷', () => {
 		const l = list();
-		const before = selectedValue(l);
 		for (let i = 0; i < 10; i++) l.handleMouse(wheel(1));
+		assert.equal(selectedValue(l), 'item-4');
 		for (let i = 0; i < 10; i++) l.handleMouse(wheel(-1));
-		assert.equal(selectedValue(l), before);
+		assert.equal(selectedValue(l), 'item-0');
 	});
 
-	it('滚轮被吞掉且声明无需重绘，不会穿透到弹窗背后的转录', () => {
+	it('滚轮被吞掉；有变化才重绘，不会穿透到弹窗背后的转录', () => {
 		const l = list();
-		const result = l.handleMouse(wheel(1));
-		assert.equal(result?.handled, true, '必须吞掉滚轮，否则背后的转录会跟着滚');
-		assert.equal(result?.render, false, '没有变化就不该为一次滚轮白重绘一帧');
+		const moved = l.handleMouse(wheel(1));
+		assert.equal(moved?.handled, true, '必须吞掉滚轮，否则背后的转录会跟着滚');
+		assert.equal(moved?.render, true);
+		const atEnd = list();
+		atEnd.setSelectedIndex(4);
+		const stuck = atEnd.handleMouse(wheel(1));
+		assert.equal(stuck?.handled, true);
+		assert.equal(stuck?.render, false, '没有变化就不该为一次滚轮白重绘一帧');
 	});
 
 	it('空列表的滚轮交回上层', () => {
@@ -102,12 +110,29 @@ describe('SelectList 的键盘与点击', () => {
 		assert.equal(selectedValue(l), 'item-0');
 	});
 
-	it('点击仍然选中（鼠标的明确意图保留）', () => {
+	it('点击只高亮，不确认', () => {
 		const l = list();
+		let confirmed: string | undefined;
+		l.onSelect = (item) => {
+			confirmed = item.value;
+		};
 		// 选中项在中间时可视区是 item-1..item-3（以选中项为中心），第 0 行即 item-1。
 		l.setSelectedIndex(2);
 		l.handleMouse({ ...wheel(0), type: 'press', button: 'left', y: 0 });
+		l.handleMouse({ ...wheel(0), type: 'click', button: 'left', y: 0 });
 		assert.equal(selectedValue(l), 'item-1');
+		assert.equal(confirmed, undefined);
+	});
+
+	it('回车才确认当前高亮项', () => {
+		const l = list();
+		let confirmed: string | undefined;
+		l.onSelect = (item) => {
+			confirmed = item.value;
+		};
+		l.setSelectedIndex(2);
+		l.handleInput('\r');
+		assert.equal(confirmed, 'v2');
 	});
 
 	it('移动鼠标不改选中项（hover 不选中）', () => {

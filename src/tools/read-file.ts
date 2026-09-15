@@ -126,7 +126,10 @@ function resolveReadTarget(workspaceRoot: string, path: string, spillRoot?: stri
 export const readFileTool: ToolSpec = {
   name: 'read_file',
   description:
-    'Read a file inside the workspace. Images (png/jpg/jpeg/gif/webp) are returned as attachments the model can see. Text is read in windows of at most 100KB: use offset (1-based line) and limit to page through a large file instead of assuming it ends there.',
+    'Use this — not shell cat, head, or tail — to inspect a file inside the workspace.'
+    + ' Images (png/jpg/jpeg/gif/webp) come back as attachments you can see.'
+    + ' Text is read in windows: use offset (1-based line) and limit to page through a large file'
+    + ' rather than assuming the file ends where the window does.',
   schema: {
     type: 'object',
     properties: {

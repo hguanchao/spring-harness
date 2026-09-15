@@ -4,7 +4,7 @@ import { asOptionalBool, asString, asStringOrEmpty, guardReadOnlyWrite, type Too
 
 export const searchReplaceTool: ToolSpec = {
   name: 'search_replace',
-  description: 'Replace a unique old_string in a workspace file. Fails if the string occurs 0 or >1 times unless replace_all is true.',
+  description: 'Replace an exact old_string in a workspace file — not sed or awk. old_string must match exactly once: when it is ambiguous, add surrounding lines to make it unique, or set replace_all to change every occurrence. The line-number prefix shown by read_file is not part of the file — match only the content after it.',
   schema: {
     type: 'object',
     properties: {

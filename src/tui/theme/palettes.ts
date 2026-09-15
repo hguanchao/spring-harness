@@ -6,8 +6,8 @@
  * - text 浅灰：助手正文、用户气泡字
  * - muted 中性灰：弱化、工具行、斜体、引用、滚动条
  * - error / warning / success：失败 / 水位 / 成功通知
- * - 代码档见下方 CODE_* 常量：方法/函数 #56a8f5，注解 #ffc66d，关键字 #cc7832，
- *   字符串 #6a8759，注释 #808080 斜体；中性档按渲染面分两档（见 CODE_* 注释）。
+ * - 代码档见下方 CODE_* 常量：行内/方法蓝 #56a8f5，注解 #ffc66d，关键字 #cc7832，
+ *   字符串 #6a8759，注释 #808080 斜体；围栏中性档 #808080（见 CODE_* 注释）。
  */
 
 const GRAY = '#808080';
@@ -20,16 +20,18 @@ const BODY = '#cccccc';
  * 中性档按**渲染面**分两档，而不是按 scope 细分：
  * - 围栏代码块正文 #808080 —— 整块比助手正文暗一档，读起来是「一段引用的原始输出」，
  *   围栏 ``` 与之同色，块内不再出现灰白相间。
- * - 行内代码 #cccccc —— 行内码夹在正文中间，压到 #808080 就和正文糊在一起了。
+ * - 行内代码 #56a8f5 —— 与方法同蓝。正文是 #cccccc，行内码再用灰白会糊成一块；
+ *   收敛成这一档蓝，不再给标识符另开颜色。
  *
  * highlight.js 的 default / variable / type / property / number / operator / punctuation
  * 在真实代码里大面积交错，各自留一点色差只会让代码块看起来脏；它们各自归到所属面的
  * 中性档，只有方法/函数、注解、关键字、字符串几档才带色相。
  */
 const CODE_BLOCK_PLAIN = GRAY;
-const CODE_INLINE_PLAIN = '#cccccc';
-/** 方法 / 函数（含它的括号）。 */
-const CODE_METHOD = '#56a8f5';
+/** 行内码中性档：方法蓝。`Spring MVC` / `Java 17` 这类标识符走它，和正文分开。 */
+const CODE_INLINE_PLAIN = '#56a8f5';
+/** 方法 / 函数（含它的括号）。与行内中性档同色，行内不多开一档。 */
+const CODE_METHOD = CODE_INLINE_PLAIN;
 const CODE_ANNOTATION = '#ffc66d';
 const CODE_KEYWORD = '#cc7832';
 const CODE_STRING = '#6a8759';

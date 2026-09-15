@@ -3,7 +3,7 @@
  *
  * highlight.js 只处理带语言的围栏。Markdown `` `scanProject()` `` 整段走 codespan，
  * 不着色就会全是默认字。这里按 JetBrains Language Defaults（Darcula）做词法猜测：
- * 关键字橙、方法蓝、注解金、字符串绿，常量/字段/数字与其余标识符同为中性灰白 #cccccc。
+ * 关键字橙、注解金、字符串绿；方法/数字/常量/其余标识符同为行内蓝，不高亮过满。
  *
  * 来源：IntelliJ 预置方案 Darcula（Editor | Color Scheme | Language Defaults），
  * 官方说明见 https://www.jetbrains.com/help/idea/configuring-colors-and-fonts.html
@@ -200,7 +200,7 @@ interface Piece {
  * 2. **紧跟 `=` 的关键字是配置项名，不是关键字**（`class=RefreshEndpointsAction`）。
  * 3. **树状图整行不上色**，避免 `├── model/  HttpMethod` 里的路径被拆成「方法名 + 括号」。
  *
- * 方法调用的括号与方法名同色：`foo(` 被劈成「方法色名字 + 灰括号」两截时，
+ * 方法调用的括号与方法名同色：`foo(` 被劈成「蓝名字 + 另一色括号」两截时，
  * 看起来像两个不相干的 token，而它本来是一个调用。
  *
  * 注意：这里**没有**做「整段证据门槛」。曾试过「单个关键字且无其他代码特征就不上色」，

@@ -56,8 +56,8 @@ TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+L       clear the view
           Ctrl+C       abort the running turn; press twice to exit
           Ctrl+D       exit (when the input is empty)
-TUI commands: /help /new /sessions /recap /status /goal /model /effort
-              /approval /todo /jobs /export /clear /quit
+TUI commands: /help /new /sessions /recap /goal /model /effort
+              /approval
               (/summarize is an alias of /recap; a recap is also generated
               automatically when you come back after being away)
 

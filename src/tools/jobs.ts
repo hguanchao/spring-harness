@@ -2,7 +2,7 @@ import { asString, clip, type ToolContext, type ToolResult, type ToolSpec } from
 
 export const jobsTool: ToolSpec = {
   name: 'jobs',
-  description: 'Inspect background subagent jobs (status snapshots). action: list | get. Background work started with subagent(background: true) notifies you automatically when it completes — use this tool only to check status or re-read a result.',
+  description: 'Inspect background work you already started. action: list | get. Completion arrives as a notification, so do not poll or sleep-wait — use this only to check status or re-read a result. It does not start work; that is subagent(background: true).',
   schema: {
     type: 'object',
     properties: {

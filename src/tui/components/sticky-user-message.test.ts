@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { renderLayoutFrame } from '../core/layout.js';
+import { visibleWidth } from '../core/utils.js';
+import { BLOCK_GAP, Text, VStack } from './primitives.js';
+import { ScrollView } from './scroll-view.js';
 import {
   computeStickyLayout,
+  compositeStickyUserMessages,
   HEADER_CONTENT_GAP,
+  userMessageBubbleY,
   type PromptDescriptor,
 } from './sticky-user-message.js';
+import { UserMessageComponent } from './user-message.js';
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+}
 
 function makePrompts(specs: ReadonlyArray<readonly [number, number]>, minHeight = 4): PromptDescriptor[] {
   return specs.map(([yVirtual, fullHeight], index) => ({
@@ -105,5 +116,59 @@ describe('computeStickyLayout', () => {
     assert.equal(mid.pinned?.renderHeight, 10);
     const far = computeStickyLayout(30, 24, prompts);
     assert.equal(far.pinned?.renderHeight, 5);
+  });
+});
+
+describe('userMessageBubbleY', () => {
+  it('skips the leading BLOCK_GAP so pin-reserve sits on the bubble', () => {
+    assert.equal(userMessageBubbleY(0), BLOCK_GAP);
+    assert.equal(userMessageBubbleY(12), 12 + BLOCK_GAP);
+  });
+});
+
+describe('pin-reserve 钉气泡顶', () => {
+  it('follow-end 时视口顶是气泡而不是块前空行', () => {
+    const header = new Text('HEADER', 0, 0);
+    const user = new UserMessageComponent('hello there');
+    const reply = new Text('short reply', 0, 0);
+    const chat = new VStack([user, reply]);
+    const doc = new VStack([header, chat]);
+    const view = new ScrollView(doc, { follow: 'end', primary: true });
+
+    const width = 40;
+    const viewport = 16;
+    let y = header.render(width).length;
+    let pin: number | undefined;
+    for (const child of chat.children) {
+      if (child instanceof UserMessageComponent) pin = userMessageBubbleY(y);
+      y += child.render(width).length;
+    }
+    view.setPinY(pin);
+
+    const frame = renderLayoutFrame(view, width, viewport, () => {});
+    assert.equal(view.scrollTop, pin);
+    const screen = compositeStickyUserMessages(frame.lines, frame, width);
+    const top = stripAnsi(screen[0] ?? '');
+    assert.match(top, /┃/, '视口顶应是用户气泡左边框，而不是 BLOCK_GAP 空行');
+  });
+
+  it('auto 滚动条下吸顶与正文气泡同宽，不因让列而短一截', () => {
+    const user = new UserMessageComponent('你能做什么');
+    const filler = new Text(Array.from({ length: 40 }, (_, i) => `L${i}`).join('\n'), 0, 0);
+    const view = new ScrollView(new VStack([user, filler]), {
+      follow: 'none',
+      primary: true,
+      scrollbar: 'auto',
+    });
+    const width = 40;
+    const viewport = 10;
+    renderLayoutFrame(view, width, viewport, () => {});
+    assert.ok(view.scrollHeight > viewport);
+    view.scrollTo(userMessageBubbleY(0) + 1);
+    const frame = renderLayoutFrame(view, width, viewport, () => {});
+    const screen = compositeStickyUserMessages(frame.lines, frame, width);
+    const stickyWidth = visibleWidth(stripAnsi(screen[0] ?? ''));
+    const bubbleWidth = visibleWidth(stripAnsi(user.renderSticky(width)[0] ?? ''));
+    assert.equal(stickyWidth, bubbleWidth);
   });
 });

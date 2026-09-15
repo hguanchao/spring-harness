@@ -3,7 +3,7 @@ import { clip, type ToolContext, type ToolResult, type ToolSpec } from './types.
 
 export const todoTool: ToolSpec = {
   name: 'todo',
-  description: 'Replace the in-session todo list. statuses: pending | in_progress | completed.',
+  description: 'Replace the in-session todo list — send the whole list every call, because it replaces rather than merges. statuses: pending | in_progress | completed. Keep at most one item in_progress at a time and mark items completed as they finish rather than batching them. Skip it for work that does not span multiple steps.',
   schema: {
     type: 'object',
     properties: {

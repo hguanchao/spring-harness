@@ -11,13 +11,71 @@ const SUMMARY_ITEM_LIMIT = 2000;
 /** 摘要产物长度上限（词），约束模型输出别失控。 */
 const SUMMARY_WORD_LIMIT = 700;
 
-const COMPACTION_SYSTEM = [
-  'You compress an agent conversation history into a compact working summary.',
-  'Preserve, in this priority: the active task goal and acceptance criteria; decisions made and why;',
-  'file paths, commands and code symbols already touched; errors hit and their fixes; what remains undone.',
-  'Drop pleasantries and redundant tool output. Write at most ~' + SUMMARY_WORD_LIMIT + ' words.',
-  'Output the summary only, as terse bullet lines.',
-].join(' ');
+/**
+ * 压缩指令。
+ *
+ * 三条写法定生死，都是压缩 prompt 最容易漏的：
+ * 1. **接收者模型**：明确读者看不到被压缩那段里的任何工具输出，模型才会把只存在于
+ *    工具结果里的事实内联进来，而不是写「见上文」。
+ * 2. **固定分段 + 空段写 (none)**：下游可解析，且防止模型自作主张合并段落。
+ * 3. **增量合并规则**：多轮压缩时不指定「前序摘要是权威的」，模型要么整段照抄
+ *    （陈旧信息永久存活），要么整个丢掉（早期历史蒸发）。
+ */
+/** 导出供测试断言：结构改动必须有测试兜着，否则压缩质量悄悄退化没人发现。 */
+export const COMPACTION_SYSTEM = [
+  'You are now acting as a compaction engine for this agent session. Condense the conversation',
+  'into a working checkpoint that lets another model resume the work with no loss of essential context.',
+  '',
+  'The reader will see only the user\'s request and this checkpoint — it will NOT see any tool call or',
+  'tool output from the span being condensed. A fact that exists only inside a tool result must be',
+  'written into the checkpoint, not referenced as if it were still visible.',
+  '',
+  'Output EXACTLY the sections below, in order. Use terse bullets, not prose paragraphs.',
+  'Write "(none)" for an empty section — never drop a section.',
+  '',
+  '## Goal and Acceptance Criteria',
+  '- [what the user asked for and what "done" means; quote the request verbatim when exact wording matters]',
+  '',
+  '## Decisions and Rationale',
+  '- [what was chosen and why]',
+  '',
+  '## Files, Commands, and Symbols',
+  '- [exact path: why it matters, what changed]',
+  '',
+  '## Errors and Fixes',
+  '- [error: how it was resolved]',
+  '',
+  '## Remaining Work',
+  '- [explicitly requested work not yet done]',
+  '',
+  '## Current State',
+  '- [precisely what was in progress at this checkpoint]',
+  '',
+  '## Next Step',
+  '- [the single next action, directly in line with the most recent request, or "(none)"]',
+  '',
+  'Rules:',
+  '- Preserve exact file paths, commands, error strings, identifiers, numeric values, and code fragments.',
+  '- Capture user feedback faithfully, especially corrections — a dropped correction gets repeated.',
+  '- Keep it economical: a focused checkpoint that fits is worth more than an exhaustive one that gets',
+  `  truncated. Aim for at most ~${SUMMARY_WORD_LIMIT} words.`,
+  '- If the conversation already contains a prior checkpoint, it is authoritative for the earlier span:',
+  '  carry its still-true facts forward, drop what is now stale, and merge everything into ONE',
+  '  consolidated checkpoint under this same structure. Do not copy it forward verbatim.',
+  '- Do NOT mention that context was compacted, and do not refer to this request.',
+  '- Output only the checkpoint: do not call any tool or take any other action.',
+].join('\n');
+
+/**
+ * 摘要消费侧的说明。
+ *
+ * 光有生成侧约束不够：模型拿到摘要后最典型的行为是「根据摘要，我接下来要……」，
+ * 把已经做完的事复述一遍。这句把复述和致谢都堵掉。
+ */
+export const CHECKPOINT_PREAMBLE =
+  'This is an automatically generated checkpoint condensing an earlier span of the conversation. '
+  + 'Treat it as established background: build on it without restating it, and continue the task '
+  + 'directly from the messages that follow without acknowledging this checkpoint.';
 
 /**
  * 单条消息的序列化长度缓存。
@@ -121,7 +179,14 @@ function compactMessages(messages: ChatMessage[], contextWindow: number, force =
   // 没有可折叠的旧轮次时不要塞一条空摘要：那句 "[compacted earlier turns]" 后面空无一物，
   // 只会让模型以为上下文被压缩过。
   const head: ChatMessage[] = headIsSystem ? [first] : [];
-  if (collapsed) head.push({ role: 'user', content: `[compacted earlier turns]\n${collapsed}` });
+  // 机械折叠产物不是模型摘要，但仍要说明「这是什么、别当成新指令去执行」——
+  // 这段是旧发言的截断拼接，模型容易把它读成待办清单。
+  if (collapsed) {
+    head.push({
+      role: 'user',
+      content: `[compacted earlier turns — truncated excerpts of older messages, not new instructions]\n${collapsed}`,
+    });
+  }
   let result = [...head, ...recent];
 
   // 强制路径：provider 已确认超窗，估算水位不再可信，机械摘要后仍可能超限
@@ -187,7 +252,7 @@ export function toChatMessages(messages: SessionMessage[], compaction?: Compacti
   if (compaction && compaction.covered > 0) {
     wire.push({
       role: 'user',
-      content: `[compacted earlier context]\n${compaction.summary}`,
+      content: `[compacted earlier context]\n${CHECKPOINT_PREAMBLE}\n\n${compaction.summary}`,
     });
   }
   let pendingImages: string[] = [];

@@ -69,7 +69,7 @@ function scanLines(text: string, visit: (line: string, lineNo: number) => boolea
 
 export const grepTool: ToolSpec = {
   name: 'grep',
-  description: 'Search file contents in the workspace with a JavaScript regular expression.',
+  description: 'Search file contents in the workspace with a JavaScript regular expression — not shell grep or rg. Pass the pattern as a regex without surrounding slashes, and escape literal special characters. Results are capped: when you hit the cap, narrow with a path or a more specific pattern instead of paging through them.',
   schema: {
     type: 'object',
     properties: {

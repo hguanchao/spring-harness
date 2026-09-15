@@ -64,6 +64,8 @@ const RECAP_BUDGET_HEADROOM_TOKENS = 4_000;
 export function recapInstruction(): string {
   return [
     '<system-reminder>Write ONE sentence recap body for a user returning from idle.',
+    'Write for someone who was in this session but has lost the thread: state where the work stands,',
+    'do not re-explain context they already have, and do not summarize the tool calls themselves.',
     'Output ONLY the body (the UI adds the "Recap —" label).',
     'Do NOT call any tools — respond with plain text only.',
     '',

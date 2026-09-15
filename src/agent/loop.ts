@@ -1,7 +1,7 @@
 import type { Approver } from '../approval/policy.js';
 import { loadCompaction, projectContext, type CompactionEvent } from './compact.js';
 import type { AgentListener, SubagentEvent } from './events.js';
-import { TouchMemory } from './memory.js';
+import { TouchMemory, touchInstructionBlock } from './memory.js';
 import { buildSystemPrompt } from './prompt.js';
 import { ContextOverflowError } from '../llm/errors.js';
 import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
@@ -20,6 +20,7 @@ import type { SessionMessage, SessionRecord } from '../session/types.js';
 import { scanSkills } from '../skills/scan.js';
 import { EXPLORE_TOOLS, READ_TOOLS, ROOT_ONLY_TOOLS, findTool, openaiTools, tools } from '../tools/index.js';
 import { SUBAGENT_CONCURRENCY, type ToolContext } from '../tools/types.js';
+import { subagentPrompt, type SubagentRole } from './subagent-prompt.js';
 import { existsSync } from 'node:fs';
 
 const MAX_STEPS = 32;
@@ -80,6 +81,11 @@ export interface RunTurnOptions {
   inbox?: SubagentInbox;
   /** 子代理 worktree 隔离的工作树仓库；省略时按需新建（isolation: worktree 才用到）。 */
   worktrees?: WorktreeStore;
+  /**
+   * 子代理角色。设置时在主系统提示词之后追加该角色的约束段（只读边界、扁平代理树、
+   * 产出格式、被拒出路）——子代理此前与主代理共用同一份提示词，缺这些边界。
+   */
+  subagentRole?: SubagentRole;
 }
 
 /** 极简计数信号量：并行 subagent 超过上限时排队。 */
@@ -134,9 +140,17 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     sandbox: options.sandbox.status.mode,
     skills: skills.catalog,
     mcpTools: mcp.listTools(),
+    // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
+    // 整段消失，而不是留下一句指向不存在工具的指令。
+    allowedTools: options.allowedTools,
     goal: options.goal,
     lastFailure: options.lastFailure,
   });
+  // 子代理角色段追加在末尾：主提示词在前、角色约束在后，父级主 turn 的前缀保持一致
+  // （缓存命中），且角色约束作为最后读到的一段不会被前面的通用规则盖过。
+  const systemPrompt = options.subagentRole
+    ? `${system}\n\n${subagentPrompt(options.subagentRole)}`
+    : system;
   options.session.appendMessage({ role: 'user', content: options.prompt, images: options.userImages });
   options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
 
@@ -313,6 +327,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         maxSubagentDepth,
         allowedTools: allowed,
         worktrees,
+        subagentRole: input.type,
         ...(input.mode === 'background' ? { inbox: childInbox } : {}),
       });
       const last = lastAssistantMessage(childSession.readMessages());
@@ -436,12 +451,13 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // 父级/模型发来的消息（send_subagent_message）在下一步顶部入列——投递到
     // 下一个安全点（grok 的 steer 语义），不打断当前 LLM 调用。
     for (const text of options.inbox?.drain() ?? []) {
-      appendMessage({ role: 'user', content: `[message from parent session]\n${text}` });
+      appendMessage({ role: 'user', content: `[message from parent session — steering input, not a new task assignment]\n${text}` });
     }
 
-    // 触碰到的嵌套指令在进入下一次 LLM 请求前入列。
+    // 触碰到的嵌套指令在进入下一次 LLM 请求前入列。措辞与逃逸同 system 里的项目指令一致，
+    // 否则模型会按两套规则对待同一类内容。
     for (const touch of memory.drain()) {
-      appendMessage({ role: 'user', content: `[instructions from ${touch.relPath}]\n${touch.text}` });
+      appendMessage({ role: 'user', content: touchInstructionBlock(touch.relPath, touch.text) });
     }
 
     // 投影 + 压缩落盘集中一处：超限重试要再走一遍同样的流程。
@@ -457,7 +473,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         lastUsage,
         lastUsageAnchor: usageAnchor,
         force,
-        system,
+        system: systemPrompt,
         ...(auxUsage ? { onUsage: (usage: TokenUsage) => auxUsage(usage, 'compaction') } : {}),
       });
       if (projection.compaction) {

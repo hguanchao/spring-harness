@@ -83,15 +83,24 @@ describe('代码档配色分工', () => {
   });
 
   it('方法与它的括号同色，且与注解色不同', () => {
-    const theme = getMarkdownTheme();
-    // foo(x)：方法名 + 左括号 + 参数 + 右括号
-    const codes = colorsOf(theme.code('foo(x)'));
+    const markdownTheme = getMarkdownTheme();
+    // foo(x)：方法名 + 左括号 + 参数 + 右括号。行内蓝收敛后参数也走同一档。
+    const codes = colorsOf(markdownTheme.code('foo(x)'));
     assert.equal(codes.length, 4, `expected 4 colored runs, got ${codes.join(',')}`);
     assert.equal(codes[0], codes[1], '方法名与左括号应同色');
     assert.equal(codes[0], codes[3], '右括号应与方法名同色');
-    assert.notEqual(codes[0], codes[2], '参数不该跟着方法上色');
-    // 方法色与注解色是两个角色，不能混用。
-    assert.notEqual(codes[0], colorsOf(theme.code('@Override'))[0]);
+    assert.equal(codes[0], codes[2], '标识符与方法共用行内蓝');
+    assert.notEqual(codes[0], colorsOf(markdownTheme.code('@Override'))[0]);
+  });
+
+  it('裸行内码用蓝色，和正文分开', () => {
+    const markdownTheme = getMarkdownTheme();
+    const inline = colorsOf(markdownTheme.code('Spring MVC'))[0];
+    const body = colorsOf(theme.fg('mdText', 'Spring MVC'))[0];
+    const method = colorsOf(markdownTheme.code('now()'))[0];
+    assert.ok(inline);
+    assert.notEqual(inline, body, '行内码不能再跟正文同色');
+    assert.equal(inline, method, '裸标识符与方法共用行内蓝');
   });
 });
 
@@ -106,8 +115,7 @@ describe('引用块里的行内代码', () => {
   });
 
   it('引用块外的行内代码仍然自带颜色', () => {
-    // 用带方法调用的行内码：裸标识符与正文同为 #cccccc，靠语法色才看得出差别。
-    const lines = markdownOf('prose with `now()` inside')
+    const lines = markdownOf('prose with `Spring MVC` inside')
       .render(60)
       .filter((line) => line.includes('prose'));
     assert.equal(lines.length, 1);
