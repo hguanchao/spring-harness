@@ -77,6 +77,12 @@ describe('applyResponsesEvent 工具调用', () => {
     assert.equal(calls[1]?.arguments, '{"pattern":"*"}');
   });
 
+  it('没有 completed 时 finish 保持空，交给 loop 再打一轮', () => {
+    const acc = newSseAcc();
+    applyResponsesEvent(JSON.stringify({ type: 'response.output_text.delta', delta: '正在看模块。' }), acc);
+    assert.equal(finishStream(acc).finishReason, undefined);
+  });
+
   it('从 output_item.done 收下 encrypted_content', () => {
     const acc = newSseAcc();
     applyResponsesEvent(

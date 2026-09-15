@@ -10,6 +10,10 @@ export interface ProtocolAdapter {
   buildBody(input: RequestBodyOptions): string;
   /** textDelta = 正文增量；thinkingDelta = 思考链增量（推理模型/扩展思考）。 */
   apply(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string };
+  /**
+   * 流读完后的协议校验。Responses 必须见到 completed，否则会把半截前言当成正常停轮。
+   */
+  afterStream?(acc: SseAcc): void;
 }
 
 export interface SseClientOptions {
@@ -76,6 +80,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             if (textDelta || thinkingDelta) wrapped?.({ text: textDelta, thinking: thinkingDelta });
           },
         });
+        adapter.afterStream?.(acc);
         return finishStream(acc);
       };
 

@@ -605,9 +605,16 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     const reasoning = reply.reasoning?.length ? { reasoning: reply.reasoning } : {};
     if (!reply.toolCalls?.length) {
       appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
-      options.session.appendEvent('turn_end', { depth });
-      options.listener?.({ type: 'done' });
-      return;
+      // OpenCode 会话环：只有明确的 stop/length/content-filter 且没有工具才退出。
+      // finish 缺失或 unknown = 流在 completed 前断了，再打一轮，不要当正常收工。
+      const finish = reply.finishReason;
+      const stopped = finish !== undefined && finish !== 'tool-calls' && finish !== 'unknown';
+      if (stopped) {
+        options.session.appendEvent('turn_end', { depth, finishReason: finish });
+        options.listener?.({ type: 'done' });
+        return;
+      }
+      continue;
     }
 
     const parseErrors = new Map<string, string>();
