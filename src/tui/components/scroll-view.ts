@@ -19,6 +19,20 @@ export interface ScrollViewScrollToOptions {
 	disableFollow?: boolean;
 }
 
+/**
+ * grok-build pin-reserve：回复还不满一屏时，在底部留白，让最新用户消息能停在视口顶。
+ * 回复一旦超出一屏，留白归零，跟真实内容底。
+ */
+export function pinReservePad(
+	contentHeight: number,
+	viewportHeight: number,
+	pinY: number | undefined,
+): number {
+	if (pinY === undefined || viewportHeight <= 0) return 0;
+	if (contentHeight - pinY > viewportHeight) return 0;
+	return Math.max(0, pinY + viewportHeight - contentHeight);
+}
+
 export class ScrollView extends Container {
 	private readonly child: Component;
 	readonly followEnd: boolean;
@@ -36,6 +50,8 @@ export class ScrollView extends Container {
 	private scrollbarActive = false;
 	/** 最新用户消息在内容中的 y；follow-end 时优先把它留在视口顶，答过长再贴底。 */
 	private pinY: number | undefined;
+	/** 为把 pinY 滚到视口顶而加在内容底的空行（grok pin-reserve）。 */
+	private pinPad = 0;
 
 	constructor(component: Component, options: ScrollViewOptions = {}) {
 		super();
@@ -71,7 +87,16 @@ export class ScrollView extends Container {
 
 	get isScrollbarVisible(): boolean {
 		if (this.scrollbar === "always") return this.currentViewportHeight > 0;
-		return this.scrollbar === "auto" && this.contentHeight > this.currentViewportHeight;
+		return this.scrollbar === "auto" && this.scrollHeight > this.currentViewportHeight;
+	}
+
+	/** 含 pin-reserve 留白的可滚高度，滚动条用这个。 */
+	get scrollHeight(): number {
+		return this.contentHeight + this.pinPad;
+	}
+
+	private maxScrollTop(): number {
+		return Math.max(0, this.scrollHeight - this.currentViewportHeight);
 	}
 
 	get isScrollbarActive(): boolean {
@@ -96,7 +121,7 @@ export class ScrollView extends Container {
 
 	scrollTo(scrollTop: number, options: ScrollViewScrollToOptions = {}): void {
 		const requested = Number.isFinite(scrollTop) ? Math.trunc(scrollTop) : this.currentScrollTop;
-		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		const maxScrollTop = this.maxScrollTop();
 		const next = Math.max(0, Math.min(maxScrollTop, requested));
 		const nextFollowSuppressedAtEnd = options.disableFollow === true && next === maxScrollTop;
 		const nextFollowingEnd = !nextFollowSuppressedAtEnd && this.followEnd && next === maxScrollTop;
@@ -116,7 +141,7 @@ export class ScrollView extends Container {
 	scrollBy(lines: number): number {
 		const requested = Number.isFinite(lines) ? Math.trunc(lines) : 0;
 		if (requested === 0) return 0;
-		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		const maxScrollTop = this.maxScrollTop();
 		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
 		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
 		const moved = next - start;
@@ -129,33 +154,42 @@ export class ScrollView extends Container {
 	}
 
 	scrollToStart(): void {
-		const changed =
-			this.currentScrollTop !== 0 ||
-			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
+		const atStartFollow = this.followEnd && this.scrollHeight <= this.currentViewportHeight;
+		const changed = this.currentScrollTop !== 0 || this.followingEnd !== atStartFollow;
 		this.currentScrollTop = 0;
-		this.followingEnd = this.followEnd && this.contentHeight <= this.currentViewportHeight;
+		this.followingEnd = atStartFollow;
 		this.followSuppressedAtEnd = false;
 		if (changed) this.requestRenderCallback?.();
 	}
 
 	scrollToEnd(): void {
-		const next = Math.max(0, this.contentHeight - this.currentViewportHeight);
-		const changed = this.currentScrollTop !== next || this.followingEnd !== this.followEnd;
-		this.currentScrollTop = next;
 		this.followingEnd = this.followEnd;
 		this.followSuppressedAtEnd = false;
+		const pin = this.pinY;
+		const next =
+			this.followEnd && pin !== undefined && this.contentHeight - pin <= this.currentViewportHeight
+				? Math.max(0, Math.min(pin, this.maxScrollTop()))
+				: this.maxScrollTop();
+		const changed = this.currentScrollTop !== next;
+		this.currentScrollTop = next;
 		if (changed) this.requestRenderCallback?.();
 	}
 
 	setPinY(y: number | undefined): void {
 		this.pinY = y === undefined ? undefined : Math.max(0, Math.floor(y));
+		// 新一轮用户消息要重新跟底：否则用户刚滚走过，第二条发出来仍停在旧位置。
+		if (this.pinY !== undefined && this.followEnd) {
+			this.followingEnd = true;
+			this.followSuppressedAtEnd = false;
+		}
 	}
 
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
-		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		this.pinPad = pinReservePad(this.contentHeight, this.currentViewportHeight, this.pinY);
+		const maxScrollTop = this.maxScrollTop();
 		if (this.followingEnd) {
 			const pin = this.pinY;
 			if (pin !== undefined && this.contentHeight - pin <= this.currentViewportHeight) {

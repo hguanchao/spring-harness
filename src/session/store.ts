@@ -98,25 +98,28 @@ export function createSession(dir: string, workspaceRoot: string, makeCurrent = 
   return new JsonlSession(dir, id);
 }
 
-export function resumeOrCreate(dir: string, workspaceRoot: string, forceNew: boolean): JsonlSession {
+/**
+ * 续用最近一次会话，或新建。
+ *
+ * 异步是因为「最近一次」必须靠 [`listSessions`] 判定：子代理会话与主会话躺在同一个目录里，
+ * 按文件名排序会随机挑中它们（会话 id 是随机 UUID，不是时间戳，排序结果没有时间含义）。
+ */
+export async function resumeOrCreate(dir: string, workspaceRoot: string, forceNew: boolean): Promise<JsonlSession> {
   mkdirSync(dir, { recursive: true });
   if (!forceNew && existsSync(metaPath(dir))) {
     const meta = JSON.parse(readFileSync(metaPath(dir), 'utf8')) as SessionMeta;
     const file = join(dir, `${meta.id}.jsonl`);
     if (existsSync(file)) return new JsonlSession(dir, meta.id);
   }
-  const latest = latestJsonl(dir);
-  if (!forceNew && latest) {
-    const id = latest.replace(/\.jsonl$/, '');
-    writeCurrentMeta(dir, { id, workspaceRoot, createdAt: new Date().toISOString() });
-    return new JsonlSession(dir, id);
+  if (!forceNew) {
+    // 只续主会话：listSessions 已按 mtime 降序，且跳过没有任何消息的残file。
+    const latest = (await listSessions(dir))[0];
+    if (latest) {
+      writeCurrentMeta(dir, { id: latest.id, workspaceRoot, createdAt: new Date().toISOString() });
+      return new JsonlSession(dir, latest.id);
+    }
   }
   return createSession(dir, workspaceRoot);
-}
-
-function latestJsonl(dir: string): string | undefined {
-  const files = readdirSync(dir).filter((name) => name.endsWith('.jsonl')).sort();
-  return files.at(-1);
 }
 
 export interface SessionInfo {
@@ -128,45 +131,109 @@ export interface SessionInfo {
   preview: string;
   /** --search 时的关键词命中消息条数；仅过滤模式存在。 */
   hits?: number;
+  /**
+   * 该会话派生的子代理会话数。
+   *
+   * 子代理会话是独立文件，但**只对主会话有意义**：它就是「主会话里那些 subagent 块」
+   * 的落盘实体。列表里带上这个数，用户看到的主会话条目才真的「包含」自己的子代理。
+   */
+  subagents: number;
+  /**
+   * 父会话 id；主会话为 undefined。
+   *
+   * 父子关系没有写在子会话自己的文件里（那会让子会话文件被提前创建），
+   * 而是从父会话的 `subagent` start 事件推导——那是唯一的权威来源，且对旧会话天然成立。
+   */
+  parentId?: string;
+}
+
+export interface ListSessionsOptions {
+  search?: string;
+  /**
+   * 连子代理会话一起返回（默认只返回主会话）。
+   *
+   * 默认关：`/sessions` 的语义是「选一个会话继续聊」，而子代理会话是主会话的产物，
+   * 直接切进去等于把内部转录当成一次独立对话。按 id 精确查找时需要打开它，
+   * 否则无法区分「不存在」和「是子代理会话」。
+   */
+  includeSubagents?: boolean;
+}
+
+/** 扫描期间累积的单文件统计；分类（主/子）要等所有文件扫完才能定。 */
+interface SessionScanEntry {
+  id: string;
+  file: string;
+  mtimeMs: number;
+  messages: number;
+  preview: string;
+  hits?: number;
+  subagents: number;
 }
 
 /**
  * 流式扫描会话目录：单文件可能几 MB，逐行 readline 只取统计与首条 user 预览，
  * 不把整个文件读进内存。带 search 时只返回命中会话并统计命中行数。
+ *
+ * 默认只返回主会话：子代理会话与主会话同目录，不过滤的话 `/sessions` 会被子代理刷屏。
  */
-export async function listSessions(dir: string, options?: { search?: string }): Promise<SessionInfo[]> {
+export async function listSessions(dir: string, options?: ListSessionsOptions): Promise<SessionInfo[]> {
   if (!existsSync(dir)) return [];
   const search = options?.search;
+  const includeSubagents = options?.includeSubagents === true;
   const files = readdirSync(dir)
     .filter((name) => name.endsWith('.jsonl'))
     .map((name) => join(dir, name));
-  const out: SessionInfo[] = [];
+
+  const scanned = new Map<string, SessionScanEntry>();
+  /** 子会话 id → 父会话 id。跨文件，所以扫完才能下结论。 */
+  const parentOf = new Map<string, string>();
+
   for (const file of files) {
-    const info: SessionInfo = {
+    const info: SessionScanEntry = {
       id: file.split(/[\\/]/).at(-1)!.replace(/\.jsonl$/, ''),
       file,
       mtimeMs: statSync(file).mtimeMs,
       messages: 0,
       preview: '',
+      subagents: 0,
     };
     const rl = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
     for await (const line of rl) {
       const record = parseSessionLine(line);
-      if (!record || record.type !== 'message') continue;
-      info.messages++;
-      if (search && record.content.includes(search)) {
-        info.hits = (info.hits ?? 0) + 1;
+      if (!record) continue;
+      if (record.type === 'message') {
+        info.messages++;
+        if (search && record.content.includes(search)) {
+          info.hits = (info.hits ?? 0) + 1;
+        }
+        if (!info.preview && record.role === 'user') {
+          info.preview = record.content.replace(/\s+/g, ' ').slice(0, 96);
+        }
+        continue;
       }
-      if (!info.preview && record.role === 'user') {
-        info.preview = record.content.replace(/\s+/g, ' ').slice(0, 96);
+      // 子代理会话的父子关系只落在父会话的 subagent start 事件里，顺手收下来。
+      if (record.kind === 'subagent' && record.data.phase === 'start') {
+        const child = record.data.childSessionId;
+        // 同一个子会话被多个父会话提及（不该发生）时只认第一个，计数不重复。
+        if (typeof child === 'string' && child !== '' && !parentOf.has(child)) {
+          parentOf.set(child, info.id);
+          info.subagents++;
+        }
       }
     }
-    if (search && !info.hits) continue;
-    // 只有 session_start、或建了文件却没对话的，不进列表。
-    if (info.messages === 0) continue;
-    out.push(info);
+    scanned.set(info.id, info);
   }
-  // mtime 相同（同毫秒批量创建）时按 id（ISO 时间戳前缀）保序，列表输出确定。
+
+  const out: SessionInfo[] = [];
+  for (const info of scanned.values()) {
+    if (search && !info.hits) continue;
+    // 建了文件却没有对话的（只有事件、或写了空行）：不进列表。
+    if (info.messages === 0) continue;
+    const parentId = parentOf.get(info.id);
+    if (parentId !== undefined && !includeSubagents) continue;
+    out.push(parentId === undefined ? { ...info } : { ...info, parentId });
+  }
+  // mtime 相同（同毫秒批量创建）时按 id 兜底，只为让输出确定——id 是随机 UUID，没有时间含义。
   return out.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.id < b.id ? 1 : -1));
 }
 

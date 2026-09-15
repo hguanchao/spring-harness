@@ -193,6 +193,25 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 }
 
 /**
+ * 解析 overlay 宽度：百分比 → 绝对值，套上 minWidth / maxWidth，最后夹进可用宽度。
+ *
+ * 抽成纯函数是为了可测：上限只在宽终端上生效（窄终端上百分比本来就小），
+ * 这种「只在一种终端尺寸下才起作用」的分支最容易在后续改动里被悄悄弄丢。
+ */
+export function resolveOverlayWidth(
+	width: SizeValue | undefined,
+	termWidth: number,
+	availWidth: number,
+	minWidth?: number,
+	maxWidth?: number,
+): number {
+	let resolved = parseSizeValue(width, termWidth) ?? Math.min(80, availWidth);
+	if (minWidth !== undefined) resolved = Math.max(resolved, minWidth);
+	if (maxWidth !== undefined) resolved = Math.min(resolved, maxWidth);
+	return Math.max(1, Math.min(resolved, availWidth));
+}
+
+/**
  * Options for overlay positioning and sizing.
  * Values can be absolute numbers or percentage strings (e.g., "50%").
  */
@@ -202,6 +221,11 @@ export interface OverlayOptions {
 	width?: SizeValue;
 	/** Minimum width in columns */
 	minWidth?: number;
+	/**
+	 * 宽度上限（列）。百分比宽度在超宽终端上会算出「整屏宽」的模态，
+	 * 正文行长失控、排版散架；上限让模态保持在可读宽度内。
+	 */
+	maxWidth?: number;
 	/** Maximum height in rows, or percentage of terminal height (e.g., "50%") */
 	maxHeight?: SizeValue;
 
@@ -1039,13 +1063,7 @@ export abstract class TuiBase extends Container implements TUI {
 		const availHeight = Math.max(1, termHeight - marginTop - marginBottom);
 
 		// === Resolve width ===
-		let width = parseSizeValue(opt.width, termWidth) ?? Math.min(80, availWidth);
-		// Apply minWidth
-		if (opt.minWidth !== undefined) {
-			width = Math.max(width, opt.minWidth);
-		}
-		// Clamp to available space
-		width = Math.max(1, Math.min(width, availWidth));
+		const width = resolveOverlayWidth(opt.width, termWidth, availWidth, opt.minWidth, opt.maxWidth);
 
 		// === Resolve maxHeight ===
 		let maxHeight = parseSizeValue(opt.maxHeight, termHeight);

@@ -5,13 +5,15 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。
  *
- * 前缀按状态：完成 `●`、进行中 `○`、失败 `×`。Subagent 进行中仍用 braille 转圈。
+ * 前缀按状态：完成 `●`、进行中 `○`、失败 `×`，进行与完成同色（品牌紫），只靠字形区分。
+ * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  */
 
 import { Container, MouseRegion, Text, truncateToWidth, type TUI, visibleWidth, wrapTextWithAnsi } from '../core/index.js';
 import { flattenWhitespace } from '../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
+import { handleSelectablePress, SELECTABLE_ROW } from './selectable-row.js';
 import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.js';
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
@@ -140,6 +142,7 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
 }
 
 export class ToolExecutionComponent extends Container {
+  readonly [SELECTABLE_ROW] = true as const;
   private readonly toolName: string;
   private readonly toolCallId: string;
   private args: Record<string, unknown>;
@@ -190,9 +193,12 @@ export class ToolExecutionComponent extends Container {
     this.content.addChild(this.titleText);
     this.content.addChild(this.bodyText);
     this.region = new MouseRegion(this.content, (event) => {
-      if (event.type !== 'click' || event.button !== 'left') return undefined;
+      if (event.button !== 'left') return undefined;
+      // press 钉住整行并挡住全屏选词；click 仍走双击展开。
+      const press = handleSelectablePress(this, event);
+      if (press) return press;
+      if (event.type !== 'click') return undefined;
       if (this.doubleClick.accept(event.x, event.y)) this.toggleDetail();
-      // 单击也要吃掉：否则同一个 click 会沿布局 box 链继续上冒，判定被重复触发而互相抵消。
       return { handled: true };
     });
     this.addChild(this.region);
@@ -318,19 +324,14 @@ export class ToolExecutionComponent extends Container {
     this.updateDisplay();
   }
 
-  /** 前缀颜色：失败红、进行中绿、完成灰。 */
+  /**
+   * 前缀颜色：失败红，其余（进行中 / 完成）都是品牌紫。
+   *
+   * 进行与完成靠字形区分（空心 `○` / 实心 `●`），不靠色相——同一批工具行在跑完之后
+   * 只应该「填实」，而不是整行换色，否则一轮收尾会有半屏颜色跳变。
+   */
   private glyphColor(status: ToolStatus): ThemeColor {
-    if (status === 'error') return 'error';
-    if (status === 'pending' || status === 'running') return 'primary';
-    return 'muted';
-  }
-
-  /** 子代理进行中用转圈，其余走 ● / ○ / ×。 */
-  private subagentMark(status: ToolStatus): { ch: string; color: ThemeColor } {
-    if (this.subagentMeta && (status === 'pending' || status === 'running')) {
-      return { ch: '⠏', color: 'primary' };
-    }
-    return { ch: toolMark(status), color: this.glyphColor(status) };
+    return status === 'error' ? 'error' : 'primary';
   }
 
   /** List 折叠行带 `(N entries)`，与 grok-build 的 List 标题同形。 */
@@ -360,9 +361,9 @@ export class ToolExecutionComponent extends Container {
         ? theme.fg('error', ` · ${this.activity.text}`)
         : theme.fg('muted', ` · ${this.activity.text}`)
       : '';
-    const mark = this.subagentMark(status);
+    const mark = toolMark(status);
     const titleColor: ThemeColor = status === 'error' ? 'error' : 'muted';
-    this.titleLine = `${theme.fg(mark.color, mark.ch)} ${theme.fg(titleColor, title)}`;
+    this.titleLine = `${theme.fg(this.glyphColor(status), mark)} ${theme.fg(titleColor, title)}`;
     this.countsLine = this.counts ? theme.fg('muted', ` · ${this.counts.text}`) : '';
     this.activityLine = activitySuffix;
     this.hintLine = '';

@@ -8,7 +8,7 @@
  */
 export type SubagentEvent =
   | { type: 'text'; text: string }
-  | { type: 'status'; text: string }
+  | { type: 'status'; text: string; level?: 'dim' | 'warn' | 'error' }
   | { type: 'thinking_start'; id: string }
   | { type: 'thinking_delta'; id: string; text: string }
   | { type: 'thinking_end'; id: string; content: string }
@@ -19,7 +19,7 @@ export type SubagentEvent =
   | { type: 'usage'; promptTokens: number; completionTokens: number };
 
 export type AgentEvent =
-  | { type: 'status'; text: string }
+  | { type: 'status'; text: string; level?: 'dim' | 'warn' | 'error' }
   | { type: 'text'; text: string }
   /** 一次 LLM 调用的思考期开始：TUI 在对话流中挂出对应的 thinking 行。 */
   | { type: 'thinking_start'; id: string }

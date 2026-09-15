@@ -19,10 +19,9 @@ export interface SelectListTheme {
 	description: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
-	/**
-	 * 选中行整行样式：入参是已按列表宽度补齐空格的**纯文本**行，
-	 * 实现负责上底色（如 selectedBg）——底色必须覆盖整行，不能在行内再嵌颜色码。
-	 */
+	/** 选中行左侧标记（`│`），与工具行选中条同一视觉。 */
+	selectedMark: (mark: string) => string;
+	/** 选中行主文案（纯文本，不含标记）。 */
 	selectedRow: (text: string) => string;
 }
 
@@ -131,13 +130,11 @@ export class SelectList implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.filteredItems.length === 0) return undefined;
-		if (event.type === "wheel" && event.wheelDelta) {
-			const delta = event.wheelDelta < 0 ? -1 : 1;
-			const previousIndex = this.selectedIndex;
-			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
-			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
-			return { handled: true, render: this.selectedIndex !== previousIndex };
-		}
+		// 滚轮不改选中项：选择只走键盘上下键。
+		//
+		// 仍然吞掉事件并声明「无需重绘」：可视区是以选中项为中心算出来的，单独滚视口没有意义；
+		// 放它穿过去只会让弹窗背后的转录跟着动。`render: false` 是为了不因为一次滚轮白重绘一帧。
+		if (event.type === "wheel") return { handled: true, render: false };
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 		const { startIndex, endIndex } = this.getVisibleRange();
@@ -210,15 +207,8 @@ export class SelectList implements Component {
 		descriptionSingleLine: string | undefined,
 		primaryColumnWidth: number,
 	): string {
-		const prefix = isSelected ? "→ " : "  ";
-		const prefixWidth = visibleWidth(prefix);
-		// 选中行整行上底色：内容按列表宽度补齐空格后整体交给主题，底色才可能覆盖整行
-		// （行内不能再嵌颜色码，否则其中的 reset 会把底色截断）。
-		const styledRow = (content: string): string => {
-			if (!isSelected) return content;
-			const pad = " ".repeat(Math.max(0, width - visibleWidth(content)));
-			return this.theme.selectedRow(content + pad);
-		};
+		const prefix = isSelected ? `${this.theme.selectedMark('│')} ` : '  ';
+		const prefixWidth = 2;
 
 		if (descriptionSingleLine && width > 40) {
 			const effectivePrimaryColumnWidth = Math.max(1, Math.min(primaryColumnWidth, width - prefixWidth - 4));
@@ -231,11 +221,10 @@ export class SelectList implements Component {
 
 			if (remainingWidth > MIN_DESCRIPTION_WIDTH) {
 				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "");
-				if (isSelected) {
-					return styledRow(`${prefix}${truncatedValue}${spacing}${truncatedDesc}`);
-				}
-
 				const descText = this.theme.description(spacing + truncatedDesc);
+				if (isSelected) {
+					return `${prefix}${this.theme.selectedRow(truncatedValue)}${descText}`;
+				}
 				return prefix + truncatedValue + descText;
 			}
 		}
@@ -243,7 +232,7 @@ export class SelectList implements Component {
 		const maxWidth = width - prefixWidth - 2;
 		const truncatedValue = this.truncatePrimary(item, isSelected, maxWidth, maxWidth);
 		if (isSelected) {
-			return styledRow(`${prefix}${truncatedValue}`);
+			return `${prefix}${this.theme.selectedRow(truncatedValue)}`;
 		}
 
 		return prefix + truncatedValue;

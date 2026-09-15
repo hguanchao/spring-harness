@@ -36,7 +36,8 @@ Usage:
   sph --resume <id>         Resume a specific session (see: sph sessions)
   sph -c, --continue        Continue the most recent session of this workspace
   sph --new                 Start a new session (default; explicit for scripts)
-  sph sessions [--search kw]        List (or keyword-filter) sessions of this workspace
+  sph sessions [--search kw]        List (or keyword-filter) main sessions of this workspace
+                                    (subagent transcripts are listed only under their main session)
   sph export [--format md|json] [--session id]   Export a session to stdout
   sph --model <model>       Override the configured model for this process
   sph --effort <level>      Reasoning effort: off | low | medium | high | xhigh | max
@@ -55,8 +56,10 @@ TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+L       clear the view
           Ctrl+C       abort the running turn; press twice to exit
           Ctrl+D       exit (when the input is empty)
-TUI commands: /help /new /sessions /status /goal /model /effort
+TUI commands: /help /new /sessions /recap /status /goal /model /effort
               /approval /todo /jobs /export /clear /quit
+              (/summarize is an alias of /recap; a recap is also generated
+              automatically when you come back after being away)
 
 OS sandbox: Windows restricted token + ACL, or Linux bwrap. macOS is unsupported.
 Enforcement is PARTIAL. Headless shell/web/mcp is denied unless --yolo is set.

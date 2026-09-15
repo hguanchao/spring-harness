@@ -49,6 +49,25 @@ export function toResponsesInput(messages: ChatMessage[]): InputItem[] {
   return items;
 }
 
+/**
+ * 思考链的请求侧参数。
+ *
+ * 这里**刻意只发 `effort`，不发 `summary`**——实测（同一 prompt × 5 组 × 3 种配置，
+ * 均带 tools）：
+ * - 只发 effort：每一步都有 18–20 字的可见前言，reasoning 事件 0 个；
+ * - 加 `summary: 'auto'` 或 `'detailed'`：可见文本变成 **0 字（5/5）**，reasoning 事件
+ *   仍然是 **0 个**。
+ *
+ * 也就是说，在**工具调用轮次**里该端点根本不推 reasoning 事件；而一旦申请摘要，
+ * 模型会把本来写在可见输出里的那句「我先看什么」挪进推理通道，于是用户两头都拿不到。
+ * 这是净回归，故不发。
+ *
+ * 纯生成轮次（无工具）下 `summary: 'auto'` 是有效的（实测 6/6 拿到摘要），
+ * 消费侧对 `response.reasoning_summary_text.delta` 的解析已按规范实现（字段是 `delta`），
+ * 所以哪天换个会推摘要的端点，打开这里就能用。
+ */
+const REQUEST_REASONING_SUMMARY = false;
+
 export function buildResponsesRequest(options: RequestBodyOptions): Record<string, unknown> {
   const effort = activeReasoningEffort(options.reasoningEffort);
   return {
@@ -59,7 +78,9 @@ export function buildResponsesRequest(options: RequestBodyOptions): Record<strin
     ...(options.tools.length > 0
       ? { tools: options.tools.map((tool) => ({ type: 'function', ...flattenToolSpec(tool) })) }
       : {}),
-    ...(effort ? { reasoning: { effort } } : {}),
+    ...(effort
+      ? { reasoning: REQUEST_REASONING_SUMMARY ? { effort, summary: 'auto' } : { effort } }
+      : {}),
     // 仅在显式配置时发送，未配置时输出上限由端点决定。
     ...(options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {}),
   };
@@ -73,6 +94,8 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
     type?: string;
     delta?: string;
     summary?: string;
+    summary_index?: number;
+    part?: { type?: string; text?: string };
     item?: { type?: string; call_id?: string; name?: string; arguments?: string };
     response?: {
       usage?: {
@@ -88,11 +111,16 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
   switch (data.type) {
     case 'response.output_text.delta':
       return data.delta ? appendStreamDelta(acc, data.delta) : {};
-    // 推理模型的思考链：reasoning_text.delta 是完整思考增量；summary 事件（摘要）在其自己的 summary 字段里。
+    // 推理模型的思考链。三类事件的增量文本都在 `delta` 字段里——`summary` 是
+    // `reasoning_summary_text.done` 才有的整段文本，不能拿来当增量读。
     case 'response.reasoning_text.delta':
-      return data.delta ? appendStreamDelta(acc, undefined, data.delta) : {};
     case 'response.reasoning_summary_text.delta':
-      return data.summary ? appendStreamDelta(acc, undefined, data.summary) : {};
+      return data.delta ? appendStreamDelta(acc, undefined, data.delta) : {};
+    // 一次推理可能分多段摘要；不补分隔符两段会挤成一行。
+    case 'response.reasoning_summary_part.added':
+      return data.summary_index !== undefined && data.summary_index > 0
+        ? appendStreamDelta(acc, undefined, '\n\n')
+        : {};
     case 'response.output_item.added':
       if (data.item?.type === 'function_call') {
         const index = acc.tools.size;

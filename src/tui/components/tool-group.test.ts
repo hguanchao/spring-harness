@@ -1,0 +1,133 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import type { TUI } from '../core/index.js';
+import { TOOL_DETAIL_INDENT, TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from './tool-execution.js';
+import { ToolGroupComponent } from './tool-group.js';
+
+const ui = { requestRender: () => {}, requestViewportRender: () => {} } as unknown as TUI;
+const STRIP = /\x1b\[[0-9;]*m/g;
+
+function indentOf(line: string): number {
+  const plain = line.replace(STRIP, '');
+  return plain.length - plain.trimStart().length;
+}
+
+function rowsOf(group: ToolGroupComponent): string[] {
+  return group
+    .render(100)
+    .map((line) => line.replace(STRIP, '').trim())
+    .filter((text) => text !== '');
+}
+
+/** 思考段的展开态在 UI 里靠双击切换；布局测试直接置位。 */
+function expandThinkings(group: ToolGroupComponent, indexes: readonly number[]): void {
+  const members = (
+    group as unknown as { members: Array<{ kind: string; thinking?: { expanded: boolean } }> }
+  ).members;
+  let seen = 0;
+  for (const member of members) {
+    if (member.kind !== 'thinking' || !member.thinking) continue;
+    member.thinking.expanded = indexes.includes(seen++);
+  }
+}
+
+/**
+ * 模拟一次 run：三个迭代，每个迭代 = 一段思考 + 一个工具。
+ * 组只在助手正文处断开，所以这三轮会并进同一个组。
+ */
+function buildThreeIterationGroup(): ToolGroupComponent {
+  const group = new ToolGroupComponent(ui);
+  let n = 0;
+  const addTool = (name: string): void => {
+    const tool = new ToolExecutionComponent(name, `c${++n}`, { path: 'a.java' }, ui);
+    group.addTool(tool);
+    tool.markExecutionStarted();
+    tool.updateResult({ content: 'ok', isError: false });
+  };
+  const rounds: Array<[string, string]> = [
+    ['第一轮：先看目录结构。', 'list_dir'],
+    ['第二轮：读构建脚本。', 'read_file'],
+    ['第三轮：跑一次编译。', 'shell'],
+  ];
+  for (const [thinking, tool] of rounds) {
+    group.beginThinking();
+    group.setThinking(thinking, false, 1000);
+    addTool(tool);
+  }
+  return group;
+}
+
+describe('ToolGroupComponent 思考段的保留与交错', () => {
+  it('同一组里多段思考互不覆盖', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    expandThinkings(group, [0, 1, 2]);
+    const text = rowsOf(group).join('\n');
+    for (const marker of ['第一轮', '第二轮', '第三轮']) {
+      assert.ok(text.includes(marker), `${marker} 的思考正文丢了`);
+    }
+    // 旧实现只有一个 thinking 槽位，后一段会把前一段覆盖掉——这条就是那个回归点。
+    assert.equal(rowsOf(group).filter((row) => row.includes('Thought for')).length, 3);
+  });
+
+  it('思考段与工具行按发生顺序交错，不堆在工具列表之前', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    const rows = rowsOf(group);
+    assert.ok(rows[0]?.startsWith('● Listed'), `汇总行应在最前，实际: ${rows[0]}`);
+    assert.deepEqual(
+      rows.slice(1).map((row) => (row.includes('Thought for') ? 'T' : 'X')),
+      ['T', 'X', 'T', 'X', 'T', 'X'],
+      `每段思考应紧跟在自己的工具之前，实际: ${rows.slice(1).join(' | ')}`,
+    );
+  });
+
+  it('组折叠时思考段随组收起，只剩汇总行', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(false, false);
+    const rows = rowsOf(group);
+    assert.equal(rows.length, 1, `折叠态只该有汇总行，实际: ${rows.join(' | ')}`);
+    assert.ok(rows[0]?.startsWith('● Listed'));
+  });
+});
+
+describe('ToolGroupComponent 缩进分层', () => {
+  it('组头 / 成员 / 详情各占一级', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    expandThinkings(group, [0]);
+    const lines = group.render(100);
+    const indentOfText = (needle: string): number => {
+      const hit = lines.find((line) => line.replace(STRIP, '').includes(needle));
+      assert.ok(hit !== undefined, `没找到含「${needle}」的行`);
+      return indentOf(hit);
+    };
+    assert.equal(indentOfText('Listed'), TOOL_GROUP_INDENT, '汇总行在组级');
+    assert.equal(indentOfText('Thought for'), TOOL_MEMBER_INDENT, '思考行是成员，与工具行同级');
+    assert.equal(indentOfText('List a.java'), TOOL_MEMBER_INDENT, '工具行在成员级');
+    assert.equal(indentOfText('第一轮'), TOOL_DETAIL_INDENT, '思考正文在详情级');
+    // 关键回归一：思考行不能和组头同级，否则看起来像「第二个汇总行」。
+    assert.notEqual(indentOfText('Thought for'), indentOfText('Listed'));
+    // 关键回归二：思考正文不能和工具行同级，否则一段散文会读成工具列表的第一项。
+    assert.notEqual(indentOfText('第一轮'), indentOfText('List a.java'));
+  });
+});
+
+describe('ToolGroupComponent 思考段的独立展开', () => {
+  it('展开某一段不牵动其他段', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    expandThinkings(group, [0]);
+    const text = rowsOf(group).join('\n');
+    assert.ok(text.includes('第一轮'), '被展开的那段正文应可见');
+    assert.ok(!text.includes('第二轮') && !text.includes('第三轮'), '其他段不该被带开');
+  });
+
+  it('折叠组不渲染任何思考正文', () => {
+    const group = buildThreeIterationGroup();
+    expandThinkings(group, [0, 1, 2]);
+    group.setExpanded(false, false);
+    const text = rowsOf(group).join('\n');
+    assert.ok(!text.includes('第一轮') && !text.includes('第二轮') && !text.includes('第三轮'));
+  });
+});

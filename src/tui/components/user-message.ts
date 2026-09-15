@@ -13,7 +13,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '../core/index.js';
-import { wrapOsc133Zones } from '../core/utils.js';
+import { truncateToWidth, visibleWidth, wrapOsc133Zones } from '../core/utils.js';
 import { getMarkdownTheme, theme } from '../theme/theme.js';
 import { STICKY_USER_MESSAGE } from './sticky-user-message.js';
 
@@ -61,10 +61,33 @@ export class UserMessageComponent extends Container {
     this.markdown.setText(text);
   }
 
-  /** 吸顶只钉气泡，不带块前的 BLOCK_GAP，避免视口顶上先空一行。 */
-  renderSticky(width: number): string[] {
+  /**
+   * 吸顶只钉气泡，不带块前的 BLOCK_GAP。
+   * `maxHeight` 小于全文时按 Box 的上下 pad 截正文，末行加省略号——钉的是提示开头。
+   */
+  renderSticky(width: number, maxHeight?: number): string[] {
     const bubble = this.children[this.children.length - 1];
-    return bubble ? bubble.render(width) : [];
+    if (!bubble) return [];
+    const lines = bubble.render(width);
+    if (maxHeight === undefined || lines.length <= maxHeight) return lines;
+    const height = Math.max(0, Math.floor(maxHeight));
+    if (height === 0) return [];
+
+    // LeftRuleBox > Box(paddingY=1)：首/末行是灰底 pad，中间才是正文。
+    const pad = 1;
+    const top = lines.slice(0, Math.min(pad, height));
+    if (height <= pad) return top;
+    const keepBottom = height > pad * 2;
+    const bottom = keepBottom ? lines.slice(Math.max(pad, lines.length - pad)) : [];
+    const contentBudget = height - top.length - bottom.length;
+    const content = lines.slice(pad, Math.max(pad, lines.length - pad));
+    const clipped = content.slice(0, contentBudget);
+    if (content.length > clipped.length && clipped.length > 0) {
+      const last = clipped[clipped.length - 1]!;
+      const lineWidth = Math.max(1, visibleWidth(last) || width);
+      clipped[clipped.length - 1] = truncateToWidth(last, lineWidth, ' …', true);
+    }
+    return [...top, ...clipped, ...bottom];
   }
 
   override render(width: number): string[] {

@@ -14,8 +14,21 @@
 
 import { join } from 'node:path';
 import type { AgentListener, SubagentEvent } from '../agent/events.js';
+import { loadCompaction } from '../agent/compact.js';
 import { runTurn } from '../agent/loop.js';
 import { TouchMemory } from '../agent/memory.js';
+import { buildSystemPrompt } from '../agent/prompt.js';
+import {
+  AUTO_RECAP_RETRY_MS,
+  RECAP_IDLE_MS,
+  RECAP_WATCH_INTERVAL_MS,
+  generateRecap,
+  mainTurnCount,
+  recapGate,
+  shouldSuppressAutoRecapDisplay,
+  type RecapContext,
+} from '../agent/recap.js';
+import { scanSkills } from '../skills/scan.js';
 import { createLlmClassifier } from '../approval/auto.js';
 import { APPROVAL_MODES, type ApprovalMode, type ApprovalRequest } from '../approval/policy.js';
 import { updateConfigFile } from '../config/save.js';
@@ -78,6 +91,7 @@ import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, toolDisp
 import { SubagentTaskComponent } from './components/subagent-task.js';
 import { ToolGroupComponent } from './components/tool-group.js';
 import { UserMessageComponent } from './components/user-message.js';
+import { RecapMessageComponent } from './components/recap.js';
 import { getEditorTheme, getMarkdownTheme, theme } from './theme/theme.js';
 import { errorMessage, flattenWhitespace, formatDuration } from '../util.js';
 import { readVersion } from '../version.js';
@@ -140,6 +154,7 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'help', label: '/help', hint: 'List commands and key bindings' },
   { id: 'new', label: '/new', hint: 'Start a new session' },
   { id: 'sessions', label: '/sessions', hint: 'Browse sessions, or switch by id' },
+  { id: 'recap', label: '/recap', hint: 'Summarize the session so far' },
   { id: 'status', label: '/status', hint: 'Show the full status panel' },
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
@@ -152,7 +167,14 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'quit', label: '/quit', hint: 'Quit' },
 ];
 
-const COMMAND_NAMES = new Set<string>([...COMMANDS.map((command) => command.id), 'exit']);
+/** 命令别名（对齐 grok-build 的 `/summarize`）：只影响输入，不进命令面板。 */
+const COMMAND_ALIASES: Readonly<Record<string, string>> = { summarize: 'recap' };
+
+const COMMAND_NAMES = new Set<string>([
+  ...COMMANDS.map((command) => command.id),
+  ...Object.keys(COMMAND_ALIASES),
+  'exit',
+]);
 
 function message(error: unknown): string {
   return errorMessage(error);
@@ -281,6 +303,24 @@ class InteractiveMode implements ApprovalUi {
   private contextTokens?: number;
   private readonly history: string[] = [];
 
+  /**
+   * Recap 状态。
+   *
+   * `lastRecapMainTurn` 是水印（上次 recap 覆盖到第几个主轮次），来自会话事件折叠——
+   * 必须活过持久化，否则重启一次就会把同一段会话再 recap 一遍。
+   * `lastActivityAt` 是空闲计时起点（轮次收尾时刷新）：sph 的输入层没有终端焦点上报，
+   * 「用户离开过」用空闲时长近似（参考实现用 FocusTracker 的 lost_at）。
+   * `recapEpoch` 在每轮开始时自增：生成期间来了新 prompt 就丢弃这次 recap 的展示。
+   */
+  private lastRecapMainTurn = 0;
+  private lastActivityAt = Date.now();
+  private recapInFlight = false;
+  private recapEpoch = 0;
+  private recapTimer?: NodeJS.Timeout;
+  /** 自动 recap 的下一次尝试时间（退避）；闸门常被拒，不该每轮轮询都重读会话文件。 */
+  private recapRetryAfter = 0;
+  private pendingRecap?: RecapMessageComponent;
+
   constructor(deps: TuiDeps) {
     this.deps = deps;
     this.session = deps.session;
@@ -334,6 +374,7 @@ class InteractiveMode implements ApprovalUi {
     if (!this.deps.ui) this.ui.start();
     this.ui.setFocus(this.editor);
     this.ui.requestRender();
+    this.startRecapWatch();
 
     await new Promise<void>((resolve) => {
       this.quitResolve = resolve;
@@ -455,6 +496,7 @@ class InteractiveMode implements ApprovalUi {
     const folded = foldSessionState(records);
     this.goal = folded.goal;
     this.lastFailure = folded.failures.at(-1);
+    this.lastRecapMainTurn = folded.lastRecapMainTurn;
     // 持久化深度下限：resume 出的子代理会话不能伪装成顶层继续派生（ds 的 delegationDepth 语义）。
     this.sessionDepth = folded.depth;
 
@@ -513,6 +555,14 @@ class InteractiveMode implements ApprovalUi {
       this.applyUsage(data);
       return;
     }
+    if (kind === 'recap') {
+      // 未上屏的 recap（自动长尾输出）只留档，回放时跳过——否则用户会在恢复后
+      // 看到一条当时被刻意压下去的跑飞摘要。
+      if (data.shown === false) return;
+      const summary = typeof data.summary === 'string' ? data.summary : '';
+      if (summary !== '') this.addRecap(summary);
+      return;
+    }
     if (kind === 'subagent' && data.phase === 'start') {
       // 回放与实时路径同构：按 toolCallId 归位到 Task 工具行，聚合活动无法恢复
       // （子工具调用不落主会话），只恢复行首文案与 (type, background) 元信息；不建实时行。
@@ -569,6 +619,9 @@ class InteractiveMode implements ApprovalUi {
     this.pinLatestUserMessage();
     this.ui.requestRender();
 
+    // 新轮次开始：正在生成的 recap 即使回来了也不再上屏（迟到的摘要会插在新一轮中间）。
+    this.recapEpoch++;
+
     const controller = new AbortController();
     this.abort = controller;
     this.running = true;
@@ -611,6 +664,8 @@ class InteractiveMode implements ApprovalUi {
       this.finalizeStreaming();
       this.running = false;
       this.abort = undefined;
+      // 空闲计时从轮次收尾算起：一轮跑两分钟不该把那两分钟算成「用户离开」。
+      this.lastActivityAt = Date.now();
       this.setStatusIndicator(undefined);
       this.pendingTools.clear();
       // 轮次结束但后台子代理仍在跑（foreground 的 end 事件在工具返回前就已到）：
@@ -683,7 +738,8 @@ class InteractiveMode implements ApprovalUi {
         // 思考链并入工具分组：它和同一步的工具调用共享折叠语义（grok-build 的
         //「run claims finished thoughts」）。这一步先开组，稍后的 tool_start 会复用同一个组。
         this.thinkingGroup = this.ensureToolGroup();
-        this.thinkingGroup.setThinking('', true);
+        // 一次 LLM 调用一段思考：显式开新段，同组内多段各留其位，不再互相覆盖。
+        this.thinkingGroup.beginThinking();
         break;
       }
       case 'thinking_delta': {
@@ -741,7 +797,7 @@ class InteractiveMode implements ApprovalUi {
         break;
       }
       case 'status': {
-        this.addNotice(event.text, 'dim');
+        this.addNotice(event.text, event.level ?? 'dim');
         break;
       }
       case 'error': {
@@ -1054,6 +1110,9 @@ class InteractiveMode implements ApprovalUi {
     this.quitting = true;
     this.abort?.abort();
     if (this.lastSigintTimer) clearTimeout(this.lastSigintTimer);
+    // 轮询定时器必须显式停掉，否则进程会被它一直吊住（与状态指示器的动画定时器同因）。
+    if (this.recapTimer) clearInterval(this.recapTimer);
+    this.recapTimer = undefined;
     this.setStatusIndicator(undefined);
     this.ui.stop({ preserveScreen: true });
     this.quitResolve?.();
@@ -1136,7 +1195,7 @@ class InteractiveMode implements ApprovalUi {
 
   private async handleCommand(input: string): Promise<void> {
     const [rawName, ...rest] = input.slice(1).split(/\s+/);
-    const name = rawName.toLowerCase();
+    const name = COMMAND_ALIASES[rawName.toLowerCase()] ?? rawName.toLowerCase();
     const argument = rest.join(' ').trim();
 
     if (!COMMAND_NAMES.has(name)) {
@@ -1153,6 +1212,9 @@ class InteractiveMode implements ApprovalUi {
         break;
       case 'sessions':
         await this.commandSessions(argument);
+        break;
+      case 'recap':
+        await this.commandRecap(false);
         break;
       case 'status':
         await this.commandStatus();
@@ -1217,17 +1279,32 @@ class InteractiveMode implements ApprovalUi {
     this.clearChat();
     this.goal = undefined;
     this.lastFailure = undefined;
+    this.resetRecapState();
     this.refreshCounters();
     this.addNotice(`Started session ${this.session.id}`, 'success');
   }
 
-  /** `/sessions [id]`：带 id 前缀匹配直接切换，不带 id 打开选择器。 */
+  /**
+   * `/sessions [id]`：带 id 前缀匹配直接切换，不带 id 打开选择器。
+   *
+   * 只有主会话可选。子代理会话是主会话跑出来的内部转录（同一个目录、独立文件），
+   * 切进去等于把某次 subagent 的中间过程当成一段独立对话继续，语义上不成立；
+   * 按 id 精确查找时要把它们一起捞出来，才能区分「不存在」和「是子代理会话」，
+   * 否则用户从工具详情里抄来的子会话 id 只会得到一句「没有匹配的会话」。
+   */
   private async commandSessions(id: string): Promise<void> {
     if (id !== '') {
-      const sessions = await listSessions(this.deps.sessionDir);
+      const sessions = await listSessions(this.deps.sessionDir, { includeSubagents: true });
       const match = sessions.find((info) => info.id === id || info.id.startsWith(id));
       if (!match) {
         this.addNotice(`No session matching "${id}".`, 'warn');
+        return;
+      }
+      if (match.parentId !== undefined) {
+        this.addNotice(
+          `Session ${match.id} is a subagent session of ${match.parentId} — /sessions ${match.parentId} opens the main session.`,
+          'warn',
+        );
         return;
       }
       if (match.id === this.session.id) {
@@ -1246,11 +1323,16 @@ class InteractiveMode implements ApprovalUi {
     const items: SelectItem[] = sessions.map((info) => ({
       value: info.id,
       label: `${info.id}${info.id === this.session.id ? '  (current)' : ''}`,
-      description: `${new Date(info.mtimeMs).toISOString().replace('T', ' ').slice(0, 16)} · ${info.messages} msgs · ${info.preview}`,
+      description: `${new Date(info.mtimeMs).toISOString().replace('T', ' ').slice(0, 16)} · ${info.messages} msgs${this.subagentCountLabel(info.subagents)} · ${info.preview}`,
     }));
     const selected = await this.editor.showInlineMenu({ title: 'Sessions', items, maxVisible: 12 });
     if (!selected || selected.value === this.session.id) return;
     this.switchSession(selected.value);
+  }
+
+  /** 列表里主会话的副标题后缀：让「这个会话派过几个子代理」可见。 */
+  private subagentCountLabel(count: number): string {
+    return count === 0 ? '' : ` · ${count} subagent${count === 1 ? '' : 's'}`;
   }
 
   /** 切到指定会话并把状态从日志回放出来；调用方负责过滤「已在该会话」。 */
@@ -1258,9 +1340,164 @@ class InteractiveMode implements ApprovalUi {
     this.session = new JsonlSession(this.deps.sessionDir, id);
     setCurrentSession(this.deps.sessionDir, id, this.deps.workspaceRoot);
     this.clearChat();
+    this.resetRecapState();
     this.restoreSession();
     this.refreshCounters();
     this.addNotice(`Switched to session ${id}`, 'success');
+  }
+
+  /**
+   * 换会话/新建时的 recap 状态复位：水印由回放重新折叠（新会话为 0），
+   * 空闲计时归零，否则换过去的第一秒就可能被判定成「离开过」。
+   */
+  private resetRecapState(): void {
+    this.lastRecapMainTurn = 0;
+    this.lastActivityAt = Date.now();
+    this.pendingRecap = undefined;
+    this.recapEpoch++;
+  }
+
+  // ------------------------------------------------------------------ Recap
+
+  /** 空闲轮询：离开够久就预生成一次 recap，用户回来时它已经在那儿了。 */
+  private startRecapWatch(): void {
+    if (this.recapTimer) return;
+    this.recapTimer = setInterval(() => {
+      void this.maybeAutoRecap();
+    }, RECAP_WATCH_INTERVAL_MS);
+  }
+
+  /**
+   * 自动 recap 的资格判定。
+   *
+   * 参考实现靠终端焦点事件判断「用户离开过」；sph 的输入层没有焦点上报，改用空闲时长近似
+   * ——效果一致（离开期间就绪），代价是不必给整条输入解析链加焦点协议。
+   * 真正的条件（轮次下限、距上次 recap 有新轮次、空闲够久）都在 recapGate 里，
+   * 这里只负责「现在能不能安全地发这一次调用」。
+   */
+  private async maybeAutoRecap(): Promise<void> {
+    if (this.quitting || this.running || this.recapInFlight) return;
+    // 空闲没到就直接返回：下面要读整个会话文件，轮询每 30s 一次不该白白付这份 IO。
+    if (Date.now() - this.lastActivityAt < RECAP_IDLE_MS) return;
+    if (this.ui.hasOverlay()) return;
+    // 后台子代理还在跑时不 recap：它会继续写会话，摘要马上就过时。
+    if (this.subagentLines.size > 0) return;
+    if (Date.now() < this.recapRetryAfter) return;
+    // 退避在**派发前**记下：闸门被拒也算一次尝试，否则会退化成每 30s 一次的全量读盘。
+    this.recapRetryAfter = Date.now() + AUTO_RECAP_RETRY_MS;
+    await this.commandRecap(true);
+  }
+
+  /**
+   * 生成一次 recap。`auto` 只影响三处：闸门更严、不显示 pending 占位、长尾输出可被抑制。
+   * 生成过程对会话只读——成功才落一条 `recap` 事件（既是留档也是水印）。
+   */
+  private async commandRecap(auto: boolean): Promise<void> {
+    const messages = this.session.readMessages();
+    const mainTurns = mainTurnCount(messages);
+    const idleOk = Date.now() - this.lastActivityAt >= RECAP_IDLE_MS;
+
+    const gate = recapGate(mainTurns, this.lastRecapMainTurn, auto, idleOk);
+    if (!gate.ok) {
+      if (!auto) this.addNotice(this.recapGateNotice(gate.reason), 'dim');
+      return;
+    }
+    if (this.recapInFlight) {
+      if (!auto) this.addNotice('A recap is already being generated.', 'dim');
+      return;
+    }
+
+    this.recapInFlight = true;
+    const epoch = this.recapEpoch;
+    // 手动路径先挂 pending 行：生成要几秒，没有反馈用户会以为命令没生效。
+    const block = auto ? undefined : this.startRecapBlock();
+    try {
+      const result = await generateRecap(this.recapContext(messages), {
+        // 用会话模型而不是压缩小模型：recap 的全部价值就在于复用主轮次的提示词前缀，
+        // 换模型等于换缓存，省下的钱还不够丢掉命中缓存的差价。
+        client: this.client,
+        onUsage: (usage) => this.recordAuxUsage(usage, 'recap'),
+      });
+
+      if (this.recapEpoch !== epoch) {
+        // 生成期间用户又发了一轮：整块丢弃，**不推进水印**——这一轮之后自动 recap
+        // 仍然可以再试（对齐 grok-build：只有成功或被抑制的自动 recap 才算提交）。
+        this.dropRecapBlock(block);
+        if (!auto) this.addNotice('Recap dropped — a new turn started while it was generating.', 'dim');
+        return;
+      }
+
+      // 自动 recap 的长尾输出（跑飞/被硬截断）只留档不上屏；手动 recap 始终展示。
+      if (auto && shouldSuppressAutoRecapDisplay(result.raw, result.summary)) {
+        this.commitRecap(result.summary, auto, mainTurns, false);
+        this.dropRecapBlock(block);
+        return;
+      }
+
+      this.commitRecap(result.summary, auto, mainTurns, true);
+      if (block) block.setSummary(result.summary);
+      else this.addRecap(result.summary);
+    } catch (error) {
+      // recap 是旁路功能：失败只提示，绝不打断会话，也不推进水印（下次还能再试）。
+      this.dropRecapBlock(block);
+      if (!auto) this.addNotice(`Recap failed: ${message(error)}`, 'error');
+    } finally {
+      this.recapInFlight = false;
+      this.ui.requestRender();
+    }
+  }
+
+  /** 闸门拒绝的原因 → 用户可读的一句话（只在手动路径展示，自动路径静默）。 */
+  private recapGateNotice(reason: string): string {
+    if (reason === 'no main turns yet') return 'Nothing to recap yet — send a message first.';
+    return 'Nothing new to recap yet.';
+  }
+
+  /** 组装 recap 的只读上下文。系统提示词必须与 runTurn 的同参构造，前缀缓存才命中。 */
+  private recapContext(messages: ReturnType<JsonlSession['readMessages']>): RecapContext {
+    return {
+      messages,
+      compaction: loadCompaction(this.session),
+      system: buildSystemPrompt({
+        workspaceRoot: this.deps.workspaceRoot,
+        sandbox: this.deps.sandbox.status.mode,
+        skills: scanSkills(this.deps.workspaceRoot).catalog,
+        mcpTools: this.deps.mcp.listTools(),
+        goal: this.goal,
+        lastFailure: this.lastFailure,
+      }),
+      contextWindow: this.contextWindow,
+    };
+  }
+
+  /** 落一条 recap 事件：既是留档（/status、回放），也是自动 recap 的水印。 */
+  private commitRecap(summary: string, auto: boolean, mainTurns: number, shown: boolean): void {
+    this.session.appendEvent('recap', sessionEventData.recap({ summary, auto, mainTurns, shown }));
+    this.lastRecapMainTurn = mainTurns;
+  }
+
+  /** 手动 recap 的 pending 行：拿到结果后原地换正文，失败/取消时整块撤掉。 */
+  private startRecapBlock(): RecapMessageComponent {
+    this.breakToolGroup();
+    const block = new RecapMessageComponent('', true);
+    this.chatContainer.addChild(block);
+    this.pendingRecap = block;
+    this.ui.requestRender();
+    return block;
+  }
+
+  private dropRecapBlock(block: RecapMessageComponent | undefined): void {
+    if (!block) return;
+    this.chatContainer.removeChild(block);
+    if (this.pendingRecap === block) this.pendingRecap = undefined;
+    this.ui.requestRender();
+  }
+
+  /** 把一行 recap 摘要挂进对话流。 */
+  private addRecap(summary: string): void {
+    this.breakToolGroup();
+    this.chatContainer.addChild(new RecapMessageComponent(summary));
+    this.ui.requestRender();
   }
 
   private async commandStatus(): Promise<void> {
@@ -1273,9 +1510,20 @@ class InteractiveMode implements ApprovalUi {
       `- **sandbox**: \`${this.deps.sandbox.status.mode}\``,
       `- **context window**: \`${this.contextWindow}\``,
       `- **goal**: \`${this.goal ?? '(none)'}\``,
+      `- **last recap**: \`${this.lastRecapPreview() ?? '(none)'}\``,
       `- **tokens**: ↑${this.usage.promptTokens} ↓${this.usage.completionTokens} R${this.usage.cachedTokens}`,
     ];
     await showMessageDialog(this.ui, { title: 'Status', text: lines.join('\n') });
+  }
+
+  /**
+   * 最近一次 recap 的短预览。
+   * 从会话日志折叠而来而不是内存字段：`/status` 在 resume 之后也要给出同样的答案。
+   */
+  private lastRecapPreview(): string | undefined {
+    const summary = foldSessionState(this.session.readAll()).lastRecap;
+    if (summary === undefined) return undefined;
+    return summary.length > 120 ? `${summary.slice(0, 120)}…` : summary;
   }
 
   private async commandGoal(argument: string): Promise<void> {
@@ -1475,6 +1723,7 @@ class InteractiveMode implements ApprovalUi {
     this.activeToolGroup = undefined;
     this.pendingTools.clear();
     this.streamingAssistant = undefined;
+    this.pendingRecap = undefined;
     this.chatContainer.addChild(new Spacer(1));
     this.chatContainer.addChild(new DynamicBorder());
     this.chatContainer.addChild(

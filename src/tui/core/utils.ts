@@ -1216,6 +1216,8 @@ export interface RoundedBoxOptions {
 	lines: readonly string[];
 	bottomInfo?: string;
 	frame: (text: string) => string;
+	/** 只给标题上色；省略则跟边框同一套 frame。 */
+	titlePaint?: (text: string) => string;
 	/**
 	 * 底边信息占宽。省略时用 visibleWidth(bottomInfo)。
 	 * 编辑器补全菜单沿用 string.length，与历史绘制一致。
@@ -1227,10 +1229,11 @@ export interface RoundedBoxOptions {
 export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 	const { width, title, lines, frame } = options;
 	const inner = Math.max(1, width - 2);
+	const titlePaint = options.titlePaint ?? frame;
 	const top =
 		width >= visibleWidth(`╭─${title}─╮`)
-			? frame(`╭─${title}${"─".repeat(width - visibleWidth(`╭─${title}╮`))}╮`)
-			: frame(`╭${"─".repeat(Math.max(1, inner))}╮`);
+			? frame('╭─') + titlePaint(title) + frame(`${'─'.repeat(width - visibleWidth(`╭─${title}╮`))}╮`)
+			: frame(`╭${'─'.repeat(Math.max(1, inner))}╮`);
 	const result: string[] = [top];
 	for (const line of lines) {
 		const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));

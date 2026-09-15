@@ -30,8 +30,11 @@ const messageSizeCache = new WeakMap<ChatMessage, number>();
  * 粗算 token：只对初次见到的消息做 JSON.stringify，其余走缓存。
  * 旧实现对整个上下文重复 stringify——一个 turn 内最多触发 4 次
  * （projectContext 两次 + compactMessages 两次），长会话下是纯 CPU 浪费。
+ *
+ * 导出给 recap 的只读预算复用：两边必须用同一把尺子，否则「估算不超窗」
+ * 与「provider 不判超窗」会漂移。
  */
-function estimateTokens(messages: readonly ChatMessage[]): number {
+export function estimateTokens(messages: readonly ChatMessage[]): number {
   let chars = 0;
   for (const message of messages) {
     let size = messageSizeCache.get(message);
@@ -171,8 +174,13 @@ function latestCompaction(session: JsonlSession): CompactionEvent | undefined {
   }
   return undefined;
 }
-/** session 记录 → wire 消息。工具段产生的图片以一条 user 消息跟在同段工具消息之后（OpenAI 协议 tool 消息只能带文本）。 */
-function toChatMessages(messages: SessionMessage[], compaction?: CompactionEvent): ChatMessage[] {
+/**
+ * session 记录 → wire 消息。工具段产生的图片以一条 user 消息跟在同段工具消息之后（OpenAI 协议 tool 消息只能带文本）。
+ *
+ * 导出给 recap 复用：recap 的前缀必须与主轮次逐字一致，缓存才命中，
+ * 所以投影这一步不允许有第二份实现。
+ */
+export function toChatMessages(messages: SessionMessage[], compaction?: CompactionEvent): ChatMessage[] {
   const from = compaction ? compaction.covered : 0;
   const slice = messages.slice(from);
   const wire: ChatMessage[] = [];

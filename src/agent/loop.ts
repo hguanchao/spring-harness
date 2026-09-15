@@ -532,6 +532,15 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       });
     }
 
+    if (reply.finishReason === 'length') {
+      // 不当成异常抛出：半截正文已经上屏。不提示的话 TUI 只是静默空闲，像模型自己停了。
+      options.listener?.({
+        type: 'status',
+        level: 'warn',
+        text: 'Output truncated (hit max_tokens). Raise max_tokens, or send another message to continue.',
+      });
+    }
+
     if (!reply.toolCalls?.length) {
       appendMessage({ role: 'assistant', content: reply.text ?? '' });
       options.session.appendEvent('turn_end', { depth });

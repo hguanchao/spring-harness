@@ -40,10 +40,20 @@ export interface FoldedSessionState {
   depth: number;
   /** 最近的工具失败（最旧在前）。 */
   failures: SessionFailure[];
+  /**
+   * 上次 recap 覆盖到第几个主轮次（水印）。
+   *
+   * 自动 recap 靠它判断「距上次 recap 有没有新轮次」，所以必须活过持久化：
+   * 只看内存的话，重启一次就会把同一段会话再 recap 一遍。
+   * 手动与自动 recap 提交时都会推进它（对齐 grok-build 的 last_recap_main_turn）。
+   */
+  lastRecapMainTurn: number;
+  /** 最近一次 recap 的正文（含未上屏的长尾输出），供 /status 展示。 */
+  lastRecap?: string;
 }
 
 export function emptySessionState(): FoldedSessionState {
-  return { todos: [], failures: [], depth: 0 };
+  return { todos: [], failures: [], depth: 0, lastRecapMainTurn: 0 };
 }
 
 function parseTodoItems(value: unknown): TodoItem[] | undefined {
@@ -69,6 +79,7 @@ function asFiniteNumber(value: unknown): number | undefined {
  * 语义：
  * - `todo` 是整表快照（last-wins），与工具本身的「整体替换」语义一致；
  * - `model_selection` / `goal` 都是 last-wins；
+ * - `recap` 的 mainTurns 是水印（last-wins，只在提交时写入），正文保留最近一次；
  * - `tool_result` 只记失败，滑动保留最近 MAX_TRACKED_FAILURES 条。
  * 旧会话里的 `plan_mode` 事件忽略（plan mode 已移除）。
  */
@@ -109,6 +120,15 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
         }
         break;
       }
+      case 'recap': {
+        const mainTurns = asFiniteNumber(data.mainTurns);
+        // 只有「提交过」的 recap 才推进水印：失败/取消的 recap 不写事件，
+        // 但坏数据可能带负数或小数，夹到非负整数。
+        if (mainTurns !== undefined && mainTurns >= 0) state.lastRecapMainTurn = Math.floor(mainTurns);
+        const summary = typeof data.summary === 'string' ? data.summary.trim() : '';
+        if (summary !== '') state.lastRecap = summary;
+        break;
+      }
       case 'tool_result': {
         // 只保留失败：成功记录对恢复没有价值，却会让日志和内存都翻倍。
         if (data.ok !== false) break;
@@ -134,6 +154,16 @@ export const sessionEventData = {
     maxTokens: input.maxTokens,
   }),
   goal: (text: string): Record<string, unknown> => ({ text }),
+  /**
+   * recap 落盘：正文 + 触发方式 + 水印 + 是否上屏。
+   * `shown: false` 是自动 recap 的长尾输出（落盘留档但没展示），回放时据此跳过。
+   */
+  recap: (input: { summary: string; auto: boolean; mainTurns: number; shown: boolean }): Record<string, unknown> => ({
+    summary: input.summary,
+    auto: input.auto,
+    mainTurns: input.mainTurns,
+    shown: input.shown,
+  }),
   toolFailure: (tool: string, content: string): Record<string, unknown> => ({
     tool,
     ok: false,

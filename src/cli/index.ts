@@ -25,11 +25,13 @@ function printSessionInfos(infos: SessionInfo[]): void {
   for (const info of infos) {
     const when = new Date(info.mtimeMs).toISOString().replace('T', ' ').slice(0, 16);
     const hits = info.hits !== undefined ? ` hits=${info.hits}` : '';
-    process.stdout.write(`${info.id}  ${when}  msgs=${info.messages}${hits}  ${info.preview}\n`);
+    // 子代理会话数是主会话才有的信息：它那些 subagent 块各自是一个独立文件。
+    const subs = info.subagents > 0 ? ` subs=${info.subagents}` : '';
+    process.stdout.write(`${info.id}  ${when}  msgs=${info.messages}${subs}${hits}  ${info.preview}\n`);
   }
 }
 
-/** sessions 子命令：列表或关键词过滤，不进入 agent 运行时。 */
+/** sessions 子命令：列出本工作区的主会话（或按关键词过滤），不进入 agent 运行时。 */
 async function runSessionsCommand(workspaceRoot: string, search?: string): Promise<void> {
   const dir = sessionDirFor(workspaceRoot);
   const infos = await listSessions(dir, { search });

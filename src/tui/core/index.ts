@@ -87,6 +87,7 @@ export {
 	type Focusable,
 	isFocusable,
 	isViewportTUI,
+	resolveOverlayWidth,
 	type OverlayAnchor,
 	type OverlayBounds,
 	type OverlayHandle,

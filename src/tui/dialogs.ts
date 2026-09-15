@@ -56,7 +56,7 @@ function chromeRows(bodyHeight: number, minContentRows: number): { content: numb
 
 /**
  * 弹窗的圆角边框盒:顶部边框嵌标题,内部竖排子组件,每行包上侧边框。
- * 边框统一 borderMuted 灰,与输入框上方补全/内联菜单盒同一视觉语言。
+ * 边框仍是 borderMuted 灰；标题单独用主色加粗，避免标题和装饰混成一块灰。
  */
 class RoundedDialogBox extends Container {
 	private readonly label: string;
@@ -78,6 +78,7 @@ class RoundedDialogBox extends Container {
 			lines: super.render(inner),
 			bottomInfo: this.bottomInfo(),
 			frame: (text) => theme.fg('borderMuted', text),
+			titlePaint: (text) => theme.bold(theme.fg('primary', text)),
 		});
 	}
 
@@ -384,11 +385,23 @@ function settleOnce<T>(handle: OverlayHandle, resolve: (value: T) => void): (val
 	};
 }
 
+/**
+ * 弹窗宽度上限（列）。
+ *
+ * 弹窗按终端百分比取宽，但百分比在宽终端上会算出接近整屏的模态：正文行长失控、
+ * 标题与选项左右拉散，排版反而难看。上限按内容类型给——窄终端上百分比仍然胜出，
+ * 只有宽终端才会被夹住（终端 147 列时，选择框从 117 列收到 88 列）。
+ */
+const SELECT_MAX_WIDTH = 88;
+const INPUT_MAX_WIDTH = 76;
+const MESSAGE_MAX_WIDTH = 96;
+
 function overlayOptions(
 	width: SizeValue,
 	maxHeight: SizeValue,
-): { width: SizeValue; maxHeight: SizeValue; anchor: 'center'; margin: number } {
-	return { width, maxHeight, anchor: 'center', margin: 1 };
+	maxWidth: number,
+): { width: SizeValue; maxHeight: SizeValue; maxWidth: number; anchor: 'center'; margin: number } {
+	return { width, maxHeight, maxWidth, anchor: 'center', margin: 1 };
 }
 
 /** 选择列表对话框；返回选中项的 value，取消返回 undefined。 */
@@ -414,7 +427,7 @@ export function showSelectDialog(
 			options.bodyText,
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '80%', maxHeight));
+		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '80%', maxHeight, SELECT_MAX_WIDTH));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSelect((item) => finish(item.value));
 		dialog.onCancel(() => finish(undefined));
@@ -434,7 +447,7 @@ export function showInputDialog(
 			options.hint ?? 'Enter confirm · Esc cancel',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '70%', maxHeight));
+		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '70%', maxHeight, INPUT_MAX_WIDTH));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSubmit((value) => finish(value));
 		dialog.setCloseHandler(() => finish(undefined));
@@ -472,7 +485,7 @@ export function showMessageDialog(
 			options.hint ?? 'Esc close',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '86%', maxHeight));
+		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '86%', maxHeight, MESSAGE_MAX_WIDTH));
 		const finish = settleOnce<void>(handle, resolve);
 		dialog.setCloseHandler(() => finish());
 	});

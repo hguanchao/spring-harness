@@ -164,8 +164,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     throw error;
   }
 
-  // 会话选择与 pi 对齐：默认新建；只有 `-c/--continue` 才续用最近一次。
-  let session = resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
+  // 会话选择与 pi 对齐：默认新建；只有 `-c/--continue` 才续用最近一次主会话。
+  let session = await resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
   if (options.resumeId) {
     const file = join(sessionDir, `${options.resumeId}.jsonl`);
     if (!existsSync(file)) {

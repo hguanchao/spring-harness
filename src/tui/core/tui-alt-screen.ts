@@ -1,5 +1,6 @@
 import { AltScreenFlashContainer } from "../components/alt-screen-flash.js";
 import { ScrollView } from "../components/scroll-view.js";
+import { compositeRowSelection, selectRow } from "../components/selectable-row.js";
 import { compositeStickyUserMessages } from "../components/sticky-user-message.js";
 import { getKeybindings } from "./keybindings.js";
 import { isKeyRelease } from "./keys.js";
@@ -255,6 +256,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.altScreenActive = true;
 		this.lastDocument = [];
 		this.clearSelectionState();
+		selectRow(undefined);
 		this.lastClick = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
@@ -618,6 +620,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		if (this.handleRightClickCopy(raw)) return;
+		if (type === "press" && this.decodeMouseButton(raw.button) === "left" && selectRow(undefined)) {
+			this.requestRender();
+		}
 		this.handleSelectionMouseEvent(raw);
 	}
 
@@ -1256,6 +1261,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		);
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = compositeStickyUserMessages(screen, nextLayout, width);
+		screen = compositeRowSelection(screen, nextLayout, width);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);

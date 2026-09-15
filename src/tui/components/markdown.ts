@@ -140,6 +140,13 @@ export interface MarkdownOptions {
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
+	/**
+	 * 行内代码（codespan）的着色；缺省用主题的 code。
+	 *
+	 * 引用块里要换成「不自己上色」——codespan 自带的前景色会在 `\x1b[39m` 之后把颜色
+	 * 交还给终端默认值，于是同一行里引用是灰的、行内码是白的，从灰底里跳出来。
+	 */
+	codeStyle?: (text: string) => string;
 }
 
 export class Markdown implements Component {
@@ -438,6 +445,8 @@ export class Markdown implements Component {
 				const quoteInlineStyleContext: InlineStyleContext = {
 					applyText: (text: string) => text,
 					stylePrefix: quoteStylePrefix,
+					// 行内码跟着引用一起压暗：返回原文即不自己上色，颜色由外层引用样式提供。
+					codeStyle: (text: string) => text,
 				};
 				const quoteTokens = token.tokens || [];
 				const renderedQuoteLines: string[] = [];
@@ -534,7 +543,7 @@ export class Markdown implements Component {
 				}
 
 				case "codespan":
-					result += this.theme.code(token.text) + stylePrefix;
+					result += (resolvedStyleContext.codeStyle ?? this.theme.code)(token.text) + stylePrefix;
 					break;
 
 				case "link": {

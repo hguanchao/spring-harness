@@ -7,8 +7,9 @@
  * `Read 3 files, Searched 2 patterns`，有失败成员时在尾部追加 ` · N failed`。
  *
  * 思考链（thinking）作为成员并入本组：流式中露一行 `Thinking…`，结束后随组一起折叠，
- * 与参考实现「run claims finished thoughts」同语义。汇总行只统计工具——思考从不进汇总
- * 文案，否则标签会名不副实地描述它藏起来的东西。
+ * 与参考实现「run claims finished thoughts」同语义。**一次 LLM 调用一段**，同一组可以有多段
+ * （组只在助手正文处断开，所以一次 run 常跨多个迭代），各段按发生顺序与工具行交错排列、
+ * 互不覆盖。汇总行只统计工具——思考从不进汇总文案，否则标签会名不副实地描述它藏起来的东西。
  *
  * 分组的边界由调度层决定：出现助手正文、系统提示或轮次结束时断开，
  * 因此「连续调用」在视觉上就是一件事。
@@ -27,11 +28,19 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
   visibleWidth,
+  VStack,
 } from '../core/index.js';
 import { formatDuration } from '../../util.js';
 import { getMarkdownTheme, theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
-import { TOOL_GROUP_INDENT, TOOL_MARK, TOOL_MEMBER_INDENT, ToolExecutionComponent } from './tool-execution.js';
+import { asSelectableRow, handleSelectablePress } from './selectable-row.js';
+import {
+  TOOL_DETAIL_INDENT,
+  TOOL_GROUP_INDENT,
+  TOOL_MARK,
+  TOOL_MEMBER_INDENT,
+  ToolExecutionComponent,
+} from './tool-execution.js';
 
 /** 汇总行用的动词/名词词表（对齐 grok-build 的 VerbGroupKind）。 */
 type VerbKind =
@@ -124,24 +133,51 @@ function summarize(tools: readonly ToolExecutionComponent[]): GroupSummary {
   return { text, failed, running };
 }
 
-export class ToolGroupComponent extends Container {
+/**
+ * 组内一段思考。同一组可以有多段——每次 LLM 调用一份，按发生顺序与工具行交错排列。
+ *
+ * 每段自带展开态：双击它的行只开合它自己的正文，不牵动分组、也不牵动别的思考段。
+ */
+class ThinkingMember {
+  text = '';
+  running = true;
+  durationMs: number | undefined;
+  expanded = false;
+  readonly row = new Text('', 0, 0);
+  readonly body = new Container();
+  readonly region: MouseRegion;
+  readonly click = new DoubleClickTracker();
+  markdown?: Markdown;
+
+  constructor(onToggle: (self: ThinkingMember, event: TuiMouseEvent) => TuiMouseEventResult | undefined) {
+    this.region = asSelectableRow(new MouseRegion(this.row, (event) => onToggle(this, event)));
+  }
+}
+
+/** 组内成员：思考段或工具行，按发生顺序排列。 */
+type GroupMember =
+  | { kind: 'thinking'; thinking: ThinkingMember }
+  | { kind: 'tool'; tool: ToolExecutionComponent };
+
+export class ToolGroupComponent extends VStack {
   private readonly ui: TUI;
   private readonly tools: ToolExecutionComponent[] = [];
+  /**
+   * 有序成员表：思考段与工具行按真实发生顺序交错。
+   *
+   * 旧实现只存一个 thinking 槽位，`setThinking` 直接覆盖——同一组跨多个迭代时
+   * （组只在助手正文处断开），只有最后一份思考活下来。改成有序表后每段各留其位。
+   */
+  private readonly members: GroupMember[] = [];
+  /** 当前正在流式写入的那一段；收尾后置空由下一次 beginThinking 另起。 */
+  private currentThinking?: ThinkingMember;
   private readonly markdownTheme: MarkdownTheme = getMarkdownTheme();
 
   private readonly headerText = new Text('', 0, 0);
   private readonly headerRegion: MouseRegion;
-  private readonly thinkingText = new Text('', 0, 0);
-  private readonly thinkingRegion: MouseRegion;
-  private readonly thinkingBody = new Container();
-  private readonly body = new Container();
   private readonly headerClick = new DoubleClickTracker();
-  private readonly thinkingClick = new DoubleClickTracker();
-  private thinkingMarkdown?: Markdown;
 
   private expanded = false;
-  private thinkingExpanded = false;
-  private thinking?: { text: string; running: boolean; durationMs?: number };
   /**
    * 脏标记：setter 只标脏，重建推迟到 render(width)。
    *
@@ -155,8 +191,7 @@ export class ToolGroupComponent extends Container {
   constructor(ui: TUI) {
     super();
     this.ui = ui;
-    this.headerRegion = new MouseRegion(this.headerText, (event) => this.handleHeaderMouse(event));
-    this.thinkingRegion = new MouseRegion(this.thinkingText, (event) => this.handleThinkingMouse(event));
+    this.headerRegion = asSelectableRow(new MouseRegion(this.headerText, (event) => this.handleHeaderMouse(event)));
   }
 
   /** 追加一个工具调用；调用方负责先 setCompact(true)。 */
@@ -167,18 +202,36 @@ export class ToolGroupComponent extends Container {
       this.ui.requestRender();
     };
     this.tools.push(tool);
-    this.body.addChild(tool);
+    this.members.push({ kind: 'tool', tool });
     this.markDirty();
   }
 
+  /** 新开一段思考（每次 LLM 调用一份）。同一组内多段按发生顺序保留，互不覆盖。 */
+  beginThinking(): void {
+    this.startThinking();
+    this.markDirty();
+    this.ui.requestRender();
+  }
+
+  private startThinking(): ThinkingMember {
+    const thinking = new ThinkingMember((self, event) => this.handleThinkingMouse(self, event));
+    this.members.push({ kind: 'thinking', thinking });
+    this.currentThinking = thinking;
+    return thinking;
+  }
+
   /**
-   * 更新思考链成员。running 时 text 是流式累积值，收尾时传权威全文与耗时。
+   * 更新当前思考段。running 时 text 是流式累积值，收尾时传权威全文与耗时。
    *
    * 收尾的思考随组折叠（组收起时不占行）——组里没有工具时是例外，那时没有别的行能代表
    * 它，留着才不会让整段推理凭空消失。
    */
   setThinking(text: string, running: boolean, durationMs?: number): void {
-    this.thinking = { text, running, durationMs };
+    // 没先 beginThinking 就更新（旧调用序）时补一段，别把已经流出的增量丢掉。
+    const thinking = this.currentThinking ?? this.startThinking();
+    thinking.text = text;
+    thinking.running = running;
+    thinking.durationMs = durationMs;
     this.markDirty();
     this.ui.requestRender();
   }
@@ -197,11 +250,15 @@ export class ToolGroupComponent extends Container {
     this.ui.requestRender();
   }
 
-  /** 分组不在渲染树里时（折叠态），正文容器仍要收到失效通知。 */
+  /** 分组不在渲染树里时（折叠态），成员仍要收到失效通知。 */
   override invalidate(): void {
     super.invalidate();
-    this.body.invalidate();
-    this.thinkingBody.invalidate();
+    for (const tool of this.tools) tool.invalidate();
+    for (const member of this.members) {
+      if (member.kind !== 'thinking') continue;
+      member.thinking.row.invalidate();
+      member.thinking.body.invalidate();
+    }
     this.markDirty();
   }
 
@@ -210,7 +267,10 @@ export class ToolGroupComponent extends Container {
   }
 
   private handleHeaderMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (event.type !== 'click' || event.button !== 'left') return undefined;
+    if (event.button !== 'left') return undefined;
+    const press = handleSelectablePress(this.headerRegion, event);
+    if (press) return press;
+    if (event.type !== 'click') return undefined;
     if (this.headerClick.accept(event.x, event.y)) {
       // 展开时不动各工具：它们各自的输出仍由双击单独打开。
       this.setExpanded(!this.expanded, false);
@@ -218,21 +278,31 @@ export class ToolGroupComponent extends Container {
     return { handled: true };
   }
 
-  /** 思考行的双击：只开合推理正文，不牵动分组。 */
-  private handleThinkingMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (event.type !== 'click' || event.button !== 'left') return undefined;
-    if (this.thinkingClick.accept(event.x, event.y)) {
-      this.thinkingExpanded = !this.thinkingExpanded;
+  /** 思考行的双击：只开合这一段推理的正文，不牵动分组、也不牵动别的思考段。 */
+  private handleThinkingMouse(
+    member: ThinkingMember,
+    event: TuiMouseEvent,
+  ): TuiMouseEventResult | undefined {
+    if (event.button !== 'left') return undefined;
+    const press = handleSelectablePress(member.region, event);
+    if (press) return press;
+    if (event.type !== 'click') return undefined;
+    if (member.click.accept(event.x, event.y)) {
+      member.expanded = !member.expanded;
       this.markDirty();
       this.ui.requestRender();
     }
     return { handled: true };
   }
 
-  /** 汇总行：字形颜色跟随组状态（有失败→错误色，有成员在跑→accent，否则 dim）。 */
+  /**
+   * 汇总行：字形颜色与成员行同一套——有失败→错误色，否则品牌紫（进行中 / 完成同色，
+   * 只靠空心 `○` 与实心 `●` 区分）。汇总行和它下面的成员行是同一个视觉块，
+   * 两边配色不一致会让「跑完」看起来像换了半屏颜色。
+   */
   private updateHeader(summary: GroupSummary, width: number): void {
     const mark = summary.failed > 0 ? TOOL_MARK.fail : summary.running ? TOOL_MARK.running : TOOL_MARK.done;
-    const glyphColor: ThemeColor = summary.failed > 0 ? 'error' : summary.running ? 'primary' : 'dim';
+    const glyphColor: ThemeColor = summary.failed > 0 ? 'error' : 'primary';
     // 超宽时截断而不是折行：汇总行是「一行读一段」，折出来的续行没有字形前缀，读起来像另一条。
     // 失败后缀优先保留——它比多列一个 kind 重要。预算扣掉汇总行左缩进与前缀两列。
     const suffix = summary.failed > 0 ? ` · ${summary.failed} failed` : '';
@@ -243,68 +313,76 @@ export class ToolGroupComponent extends Container {
     this.headerText.setText(text);
   }
 
-  private updateThinking(): void {
-    const state = this.thinking;
-    if (!state) return;
-
-    const caret = state.running ? TOOL_MARK.running : TOOL_MARK.done;
+  /** 重算一段思考的行文案；正文只在它自己展开时挂上。 */
+  private updateThinking(member: ThinkingMember): void {
+    const caret = member.running ? TOOL_MARK.running : TOOL_MARK.done;
     // 收尾文案对齐参考实现：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。
-    const label = state.running
+    const label = member.running
       ? 'Thinking…'
-      : state.durationMs === undefined
+      : member.durationMs === undefined
         ? 'Thought'
-        : `Thought for ${formatDuration(state.durationMs)}`;
-    const markColor: ThemeColor = state.running ? 'primary' : 'thinkingText';
-    this.thinkingText.setText(
-      `${' '.repeat(TOOL_GROUP_INDENT)}${theme.fg(markColor, caret)} ${theme.fg('thinkingText', label)}`,
+        : `Thought for ${formatDuration(member.durationMs)}`;
+    const markColor: ThemeColor = member.running ? 'primary' : 'thinkingText';
+    // 缩进用成员级：思考链是「并入本组的成员」（见文件头注释），和组头同级会让它看起来
+    // 像第二个汇总行、像是该并进汇总文案——而汇总行只统计工具，思考从不进汇总文案。
+    member.row.setText(
+      `${' '.repeat(TOOL_MEMBER_INDENT)}${theme.fg(markColor, caret)} ${theme.fg('thinkingText', label)}`,
     );
 
-    this.thinkingBody.clear();
-    const detail = state.text.trim();
-    if (!this.thinkingExpanded || detail === '') return;
-    this.thinkingBody.addChild(new Spacer(1));
-    if (this.thinkingMarkdown) {
-      this.thinkingMarkdown.setText(detail);
+    member.body.clear();
+    const detail = member.text.trim();
+    if (!member.expanded || detail === '') return;
+    member.body.addChild(new Spacer(1));
+    // 正文下沉到「详情」那一级（TOOL_DETAIL_INDENT）：思考行在成员级，正文若与工具行同级，
+    // 一段散文会读成工具列表的第一项。
+    if (member.markdown) {
+      member.markdown.setText(detail);
     } else {
-      this.thinkingMarkdown = new Markdown(detail, TOOL_MEMBER_INDENT, 0, this.markdownTheme, {
+      member.markdown = new Markdown(detail, TOOL_DETAIL_INDENT, 0, this.markdownTheme, {
         color: (content: string) => theme.fg('thinkingText', content),
         italic: true,
       });
     }
-    this.thinkingBody.addChild(this.thinkingMarkdown);
+    member.body.addChild(member.markdown);
   }
 
   /**
    * 重建组件树：统一间距 → 汇总行 → 思考行 → 展开的成员。
    *
-   * 思考链**有内容才算成员**：不是所有模型都吐推理内容，但 `thinking_start/end` 在每次
+   * 思考段**有内容才算成员**：不是所有模型都吐推理内容，但 `thinking_start/end` 在每次
    * LLM 调用前都会广播（`loop.ts`），不过滤就会给每个工具组挂一行永远展开不出东西的
    * `Thought`。运行中但还没有增量时也不占位——输入框上方的状态行已经在说 `Thinking…`。
    *
-   * 有内容时，思考行可见的三个条件是：组已展开、思考还在跑、或本组没有工具。前两个保证
+   * 有内容时，思考行可见的三个条件是：组已展开、这一段还在跑、或本组没有工具。前两个保证
    * 「随组折叠」，第三个保证纯思考的组不会渲染成一片空白。汇总行只在有工具时出现。
    */
   private rebuild(width: number): void {
-    const thinking = this.thinking;
-    const thinkingVisible =
-      thinking !== undefined &&
-      thinking.text.trim() !== '' &&
-      (this.expanded || thinking.running || this.tools.length === 0);
+    const visible = (member: ThinkingMember): boolean =>
+      member.text.trim() !== '' && (this.expanded || member.running || this.tools.length === 0);
+    const thinkings = this.members.flatMap((entry) => (entry.kind === 'thinking' ? [entry.thinking] : []));
+    const anyThinkingVisible = thinkings.some(visible);
 
     if (this.tools.length > 0) this.updateHeader(summarize(this.tools), width);
-    if (thinkingVisible) this.updateThinking();
+    for (const member of thinkings) {
+      if (visible(member)) this.updateThinking(member);
+    }
 
     this.clear();
     // 一个成员都渲染不出来时不占位：组可能是 thinking_start 提前开的，那一步既没有工具、
     // 也没有推理内容，留一行空白只会在转录里凿出一个洞。
-    if (this.tools.length === 0 && !thinkingVisible) return;
+    if (this.tools.length === 0 && !anyThinkingVisible) return;
     this.addChild(new Spacer(BLOCK_GAP));
     if (this.tools.length > 0) this.addChild(this.headerRegion);
-    if (thinkingVisible) {
-      this.addChild(this.thinkingRegion);
-      if (this.thinkingExpanded) this.addChild(this.thinkingBody);
+    // 按发生顺序交错：思考段与工具行各留其位，不再把思考全堆在工具列表之前。
+    for (const entry of this.members) {
+      if (entry.kind === 'thinking') {
+        if (!visible(entry.thinking)) continue;
+        this.addChild(entry.thinking.region);
+        if (entry.thinking.expanded) this.addChild(entry.thinking.body);
+        continue;
+      }
+      if (this.expanded) this.addChild(entry.tool);
     }
-    if (this.expanded) this.addChild(this.body);
   }
 
   override render(width: number): string[] {
