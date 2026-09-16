@@ -23,7 +23,11 @@ export function resolveShellBinary(): { command: string; prefixArgs: string[] } 
   }
   const found = lookOnPath('pwsh') ?? lookOnPath('powershell');
   if (!found) throw new Error('pwsh/powershell not found on PATH');
-  return { command: found, prefixArgs: ['-NoProfile', '-NonInteractive', '-Command'] };
+  // Bypass：机器 ExecutionPolicy 常拦 npm.ps1 / npx.ps1，那是宿主策略，不是命令写错。
+  return {
+    command: found,
+    prefixArgs: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'],
+  };
 }
 
 /** 一次性命令的 argv：shell 二进制 + 前缀 + 脚本。loop 与 shell 工具共用，避免两处各拼一遍。 */

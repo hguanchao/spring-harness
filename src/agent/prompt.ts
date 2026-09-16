@@ -25,7 +25,7 @@ import { planModeSection } from './plan.js';
 function sandboxLine(mode: SandboxMode): string {
   if (mode === 'off') return 'Sandbox: off (no OS confinement).';
   if (process.platform === 'win32') {
-    return `Sandbox: ${mode} on Windows (partial: restricted token + ACL; reads/network/hardlinks not confined).`;
+    return `Sandbox: ${mode} on Windows (partial: restricted token + ACL; reads/network/hardlinks not confined). Nested process creation often fails with spawn EPERM — that is the token, not a broken test command; do not retry the same spawn, and say so if a test runner or compiler cannot start child processes.`;
   }
   if (process.platform === 'linux') return `Sandbox: ${mode} on Linux (partial: bwrap bind mounts).`;
   return `Sandbox: ${mode} is unsupported on this OS; startup should have failed.`;
@@ -73,7 +73,7 @@ const TOOL_SECTIONS: ReadonlyArray<{ tool: string; text: string }> = [
   {
     tool: 'shell',
     text:
-      `Use shell for work that genuinely needs a shell — builds, tests, package managers, git, and other real system commands. Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result before moving on.`,
+      `Use shell for work that genuinely needs a shell — builds, tests, package managers, git, and other real system commands. Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result before moving on. On Windows prefer npm.cmd / npx.cmd / node over bare npm / npx: PowerShell will otherwise resolve the .ps1 shims.`,
   },
   {
     tool: 'subagent',

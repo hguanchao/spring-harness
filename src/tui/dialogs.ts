@@ -138,7 +138,9 @@ class ScrollableTextBody extends DialogBody {
 
 	constructor(text: string, budget: () => number, hint: string) {
 		super(budget);
-		this.markdown = new Markdown(text, 1, 0, getMarkdownTheme());
+		this.markdown = new Markdown(text, 1, 0, getMarkdownTheme(), {
+			color: (content: string) => theme.fg('mdText', content),
+		});
 		this.hint = hint;
 	}
 

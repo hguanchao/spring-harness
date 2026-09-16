@@ -361,9 +361,9 @@ export class ToolGroupComponent extends VStack {
     // 成员行与汇总行都是「紫点灰字」，思考行连点一起转灰就断了这条惯例。
     // 标签文字才是状态色：执行中紫、完成后灰。
     const labelColor: ThemeColor = member.running ? 'primary' : 'toolTitle';
-    // 缩进随组态：折叠时与汇总行对齐（3，折叠态可见的就是这两行）；
-    // 展开时降一级（5），与工具成员行对齐——此时思考行是成员之一。
-    const rowIndent = this.expanded ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
+    // 组里有汇总行时，思考永远是成员：缩进一级，避免和汇总行并排读成两件并列的事。
+    // 纯思考组没有汇总行，思考行就是组头，仍停在组级。
+    const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
     member.row.setText(
       `${' '.repeat(rowIndent)}${theme.fg('primary', caret)} ${theme.fg(labelColor, label)}`,
     );

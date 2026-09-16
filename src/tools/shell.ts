@@ -8,6 +8,7 @@ export const shellTool: ToolSpec = {
     'Run a shell command in the workspace root — pwsh on Windows, sh elsewhere, so bash-only syntax may not apply.'
     + ' Each call is one-shot: no cwd, variable, or function survives between calls, so pass explicit paths'
     + ' instead of relying on an earlier cd. Check the exit-code marker on every result before moving on.'
+    + ' On Windows prefer npm.cmd / npx.cmd / node over bare npm / npx.'
     + ' A write denied by the workspace sandbox is policy, not a command bug: restate the path inside the'
     + ' workspace rather than reaching for another way to write it.',
   schema: {

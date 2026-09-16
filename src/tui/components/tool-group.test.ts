@@ -101,7 +101,7 @@ describe('ToolGroupComponent 思考段的保留与交错', () => {
 });
 
 describe('ToolGroupComponent 缩进分层', () => {
-  it('纯思考组（无工具）思考行在组级；展开组思考行降为成员级，正文再下一级', () => {
+  it('纯思考组（无工具）思考行在组级；有汇总行时思考行永远是成员级', () => {
     // 纯思考组：没有汇总行，思考行是唯一行——与其它组头同列。
     const solo = new ToolGroupComponent(ui);
     solo.beginThinking();
@@ -111,7 +111,7 @@ describe('ToolGroupComponent 缩进分层', () => {
     assert.ok(soloRow, '纯思考组应显示思考行');
     assert.equal(indentOf(soloRow), TOOL_GROUP_INDENT, '纯思考组的思考行在组级');
 
-    // 带工具的组展开：思考行降为成员级，与工具行同级；正文在它下面再缩 2。
+    // 带工具的组：思考行永远缩进一级，和汇总行并排会读成两件并列的事。
     const group = buildThreeIterationGroup();
     group.setExpanded(true, false);
     expandThinkings(group, [0]);
@@ -122,11 +122,30 @@ describe('ToolGroupComponent 缩进分层', () => {
       return indentOf(hit);
     };
     assert.equal(indentOfText('Listed'), TOOL_GROUP_INDENT, '汇总行在组级');
-    assert.equal(indentOfText('Thought for'), TOOL_MEMBER_INDENT, '展开态思考行与工具行同级');
+    assert.equal(indentOfText('Thought for'), TOOL_MEMBER_INDENT, '思考行与工具行同级');
     assert.equal(indentOfText('List a.java'), TOOL_MEMBER_INDENT, '工具行在成员级');
     assert.equal(indentOfText('第一轮'), TOOL_MEMBER_INDENT + 2, '思考正文跟自己的行再缩 2');
     // 关键回归：思考正文不能和工具行同级，否则一段散文会读成工具列表的第一项。
     assert.notEqual(indentOfText('第一轮'), indentOfText('List a.java'));
+  });
+
+  it('折叠态进行中的思考也缩进，不和汇总行并排', () => {
+    const group = new ToolGroupComponent(ui);
+    const tool = new ToolExecutionComponent('list_dir', 'c1', { path: 'a.java' }, ui);
+    group.addTool(tool);
+    tool.markExecutionStarted();
+    group.beginThinking();
+    group.setThinking('正在想下一步', true);
+    group.setExpanded(false, false);
+    const lines = group.render(100);
+    const indentOfText = (needle: string): number => {
+      const hit = lines.find((line) => line.replace(STRIP, '').includes(needle));
+      assert.ok(hit !== undefined, `没找到含「${needle}」的行`);
+      return indentOf(hit);
+    };
+    assert.equal(indentOfText('Listing'), TOOL_GROUP_INDENT, '汇总行在组级');
+    assert.equal(indentOfText('Thinking'), TOOL_MEMBER_INDENT, '折叠态思考行仍是成员级');
+    assert.ok(indentOfText('Thinking') > indentOfText('Listing'), '思考行应缩进到汇总行内部');
   });
 });
 

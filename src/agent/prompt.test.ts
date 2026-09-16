@@ -44,6 +44,14 @@ describe('主系统提示词的结构', () => {
     assert.ok(p.includes('Sandbox: workspace'));
   });
 
+  it('Windows 沙箱说明嵌套 spawn EPERM 是 token 策略，不许当命令写错来重试', {
+    skip: process.platform === 'win32' ? false : '这条约束只对 Windows 沙箱文案有意义',
+  }, () => {
+    const p = base();
+    assert.ok(p.includes('spawn EPERM'));
+    assert.ok(p.includes('do not retry the same spawn'));
+  });
+
   it('身份段声明「本提示词不是要执行的任务」', () => {
     // 没有这句，模型会把系统提示词里的示例路径当任务去做。
     assert.ok(base().includes('this prompt is background rather than something to carry out'));
@@ -74,6 +82,12 @@ describe('工作策略与边界', () => {
 
   it('沙箱拒付不许绕道重试', () => {
     assert.ok(base().includes('do not retry the same operation through a different tool or a different path'));
+  });
+
+  it('Windows 上提示用 npm.cmd 而不是裸 npm', {
+    skip: process.platform === 'win32' ? false : '这条约束只对 Windows 文案有意义',
+  }, () => {
+    assert.ok(base().includes('npm.cmd'));
   });
 
   it('审批：不许绕到聊天里先问，但被拒也不禁止后续其他操作', () => {

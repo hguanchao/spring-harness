@@ -6,6 +6,8 @@ import { describe, it } from 'node:test';
 import { TuiAltScreen } from './core/tui-alt-screen.js';
 import type { Terminal } from './core/terminal.js';
 import { showMessageDialog } from './dialogs.js';
+import { PALETTE } from './theme/palettes.js';
+import { theme } from './theme/theme.js';
 import { renderMcpReport, renderSkillsReport } from './reports.js';
 import { runTui, type TuiDeps } from './interactive-mode.js';
 import { McpHub } from '../mcp/hub.js';
@@ -105,6 +107,16 @@ describe('上报弹窗的真实渲染', () => {
     assert.match(screen, /MCP servers/);
     assert.match(screen, /broken/);
     assert.match(screen, /not connected/);
+  });
+
+  it('帮助正文走主题白 #c6c6c6，不落到终端默认 #cccccc', async () => {
+    const screen = await renderInDialog('Help', '- `/help` — List commands and key bindings');
+    assert.equal(PALETTE.mdText, '#c6c6c6');
+    const painted = theme.fg('mdText', 'x');
+    const seq = painted.slice(0, painted.indexOf('x'));
+    assert.ok(seq.length > 0, 'mdText 应产出前景色序列');
+    assert.ok(screen.includes(seq), '弹窗正文应使用主题白，而不是终端默认前景');
+    assert.doesNotMatch(screen, /\x1b\[38;2;204;204;204m/);
   });
 
   it('Esc 能关掉弹窗（Promise 会 resolve，不会挂住界面）', async () => {

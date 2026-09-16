@@ -131,14 +131,29 @@ describe('引用块里的行内代码', () => {
 });
 
 describe('画布底色', () => {
-  it('主色是 Material Deep Purple 300，不是 TokyoNight 品红', () => {
-    assert.equal(PALETTE.primary, '#9575cd');
+  it('主色是 OpenCode 紫，不是 Material / TokyoNight 品红', () => {
+    assert.equal(PALETTE.primary, '#9d7cd8');
+    assert.notEqual(PALETTE.primary, '#9575cd');
     assert.notEqual(PALETTE.primary, '#bb9af7');
   });
 
-  it('语法蓝是 Material Blue 300，不是 TokyoNight 亮蓝', () => {
-    assert.equal(PALETTE.syntaxKeyword, '#64b5f6');
+  it('语法蓝是 OpenCode 蓝，不是 Material / TokyoNight 亮蓝', () => {
+    assert.equal(PALETTE.syntaxKeyword, '#5c9cf5');
+    assert.notEqual(PALETTE.syntaxKeyword, '#64b5f6');
     assert.notEqual(PALETTE.syntaxKeyword, '#7aa2f7');
+  });
+
+  it('红黄绿与 OpenCode 默认暗色主题一致', () => {
+    assert.equal(PALETTE.error, '#e06c75');
+    assert.equal(PALETTE.warning, '#f5a742');
+    assert.equal(PALETTE.success, '#7fd88f');
+  });
+
+  it('正文白是 #c6c6c6，不是终端默认 #cccccc', () => {
+    assert.equal(PALETTE.text, '#c6c6c6');
+    assert.equal(PALETTE.mdText, '#c6c6c6');
+    const t = new Theme(PALETTE, 'truecolor');
+    assert.equal(t.fg('text', 'x'), '\x1b[38;2;198;198;198mx\x1b[39m');
   });
 
   it('与 GrokNight bg_base 一致，OSC 11 用真 hex', () => {
