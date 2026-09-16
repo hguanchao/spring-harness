@@ -26,6 +26,8 @@ export interface CliArgs {
   search?: string;
   format: 'md' | 'json';
   sessionId?: string;
+  /** headless 输出格式：text 给人看，json 是逐行事件（NDJSON）给脚本用。 */
+  outputFormat: 'text' | 'json';
 }
 
 export const HELP = `Spring Harness (sph)
@@ -47,6 +49,9 @@ Usage:
   sph --yolo                Shortcut for --approval yolo
   sph --trust               Remember this workspace as trusted (required for untrusted -p)
   sph --sandbox MODE        off | workspace | read-only  (default: workspace)
+  sph -p "<prompt>" --output-format json        Emit one JSON event per line
+                                                (NDJSON) on stdout instead of text;
+                                                the last line is {"type":"result",...}
 
 TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+K       all actions (sessions, model, approval, export, ...)
@@ -56,10 +61,18 @@ TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+L       clear the view
           Ctrl+C       abort the running turn; press twice to exit
           Ctrl+D       exit (when the input is empty)
-TUI commands: /help /new /sessions /recap /goal /model /effort
-              /approval
-              (/summarize is an alias of /recap; a recap is also generated
-              automatically when you come back after being away)
+TUI commands: /help /new /sessions /skills /mcps /plan /goal
+              /model /effort /approval
+              (a recap is generated automatically when you come back
+              after being away)
+              /mcps manages servers (enable/disable, add, remove, reload)
+
+MCP sources: ~/.sph/config.toml, <repo>/.sph/config.toml (closest to cwd wins),
+             ~/.claude.json, ~/.codex/config.toml (user and project), .mcp.json.
+             Later tools in that list lose to earlier ones on a name clash.
+             External files are never written to: enable/disable is recorded in
+             [mcp] disabled_servers / enabled_servers in ~/.sph/config.toml.
+             Only stdio servers run; HTTP entries are listed but not started.
 
 OS sandbox: Windows restricted token + ACL, or Linux bwrap. macOS is unsupported.
 Enforcement is PARTIAL. Headless shell/web/mcp is denied unless --yolo is set.
@@ -76,6 +89,7 @@ export function parseArgs(argv: string[]): CliArgs {
     yolo: false,
     trust: false,
     format: 'md',
+    outputFormat: 'text',
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -132,6 +146,10 @@ export function parseArgs(argv: string[]): CliArgs {
       const value = argv[++i];
       if (value !== 'md' && value !== 'json') throw new Error(`--format must be md | json, got: ${value}`);
       out.format = value;
+    } else if (arg === '--output-format') {
+      out.outputFormat = parseOutputFormat(argv[++i]);
+    } else if (arg.startsWith('--output-format=')) {
+      out.outputFormat = parseOutputFormat(arg.slice('--output-format='.length));
     } else if (arg === '--session') {
       out.sessionId = argv[++i];
       if (!out.sessionId) throw new Error('--session requires a session id');
@@ -148,6 +166,10 @@ export function parseArgs(argv: string[]): CliArgs {
     }
   }
   if (out.newSession && out.continueSession) throw new Error('--new cannot be combined with --continue');
+  // 报错而不是静默忽略：TUI 没有机器可读输出，写错了应当立刻知道。
+  if (out.outputFormat === 'json' && out.prompt === undefined) {
+    throw new Error('--output-format json requires -p/--prompt (only the headless path emits events)');
+  }
   return out;
 }
 
@@ -156,4 +178,11 @@ function parseMaxTokens(value: string | undefined): number {
   const n = value && /^\d+$/.test(value) ? Number(value) : Number.NaN;
   if (!Number.isSafeInteger(n) || n < 1) throw new Error('--max-tokens must be a positive integer');
   return n;
+}
+
+function parseOutputFormat(value: string | undefined): 'text' | 'json' {
+  if (value !== 'text' && value !== 'json') {
+    throw new Error(`--output-format must be text | json, got: ${value ?? '(missing)'}`);
+  }
+  return value;
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { applyResponsesEvent, buildResponsesRequest, toResponsesInput } from './responses.js';
+import { DEFAULT_REQUEST_CAPS } from './compat.js';
 import { finishStream, newSseAcc } from './openai.js';
 import type { ChatMessage } from './openai.js';
 
@@ -30,15 +31,23 @@ describe('buildResponsesRequest', () => {
     assert.equal(body.tool_choice, 'auto');
   });
 
-  it('不向网关回传 encrypted_content：zen Console 会 400', () => {
+  it('默认发 store: false：无状态调用用不上服务端留存，也与「跑在本机」的定位相悖', () => {
     const body = buildResponsesRequest({
       model: 'm',
       messages: [user('hi')],
       tools: [],
       reasoningEffort: 'xhigh',
     });
-    assert.equal(body.store, undefined);
+    assert.equal(body.store, false);
     assert.equal(body.include, undefined);
+  });
+
+  it('端点不认 store 时整条摘掉该字段，而不是硬失败', () => {
+    const body = buildResponsesRequest(
+      { model: 'm', messages: [user('hi')], tools: [] },
+      { ...DEFAULT_REQUEST_CAPS, sendStore: false },
+    );
+    assert.equal(body.store, undefined);
   });
 });
 
@@ -183,18 +192,37 @@ describe('toResponsesInput', () => {
     assert.equal(items[4]?.type, 'function_call_output');
   });
 
-  it('不把 encrypted reasoning 写进 input：该字段绑定签发方，转手会 400', () => {
+  it('默认回传 reasoning，且排在它引用的 function_call 之前', () => {
     const items = toResponsesInput([
       user('hi'),
       {
         role: 'assistant',
         content: '看目录',
-        reasoning: [{ id: 'rs_1', encryptedContent: 'enc' }],
+        reasoning: [{ id: 'rs_1', encryptedContent: 'enc', summary: '先列目录' }],
         tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }],
       },
     ]);
+    assert.equal(items[1]?.type, 'reasoning');
+    assert.equal(items[1]?.id, 'rs_1');
+    assert.equal(items[1]?.encrypted_content, 'enc');
+    assert.deepEqual(items[1]?.summary, [{ type: 'summary_text', text: '先列目录' }]);
+    assert.equal(items[2]?.role, 'assistant');
+    assert.equal(items[3]?.type, 'function_call');
+  });
+
+  it('没有 encrypted_content 的推理项不回传：空壳重建不了状态', () => {
+    const items = toResponsesInput([
+      user('hi'),
+      { role: 'assistant', content: 'x', reasoning: [{ id: 'rs_1' }] },
+    ]);
     assert.equal(items.some((item) => item.type === 'reasoning'), false);
-    assert.equal(items[1]?.role, 'assistant');
-    assert.equal(items[2]?.type, 'function_call');
+  });
+
+  it('端点拒绝后（sendReasoning: false）不再回传 reasoning', () => {
+    const items = toResponsesInput(
+      [user('hi'), { role: 'assistant', content: 'x', reasoning: [{ id: 'rs_1', encryptedContent: 'enc' }] }],
+      { ...DEFAULT_REQUEST_CAPS, sendReasoning: false },
+    );
+    assert.equal(items.some((item) => item.type === 'reasoning'), false);
   });
 });

@@ -1,3 +1,4 @@
+import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
 import { llmError } from './errors.js';
 import type { ChatMessage, ContentPart, ReasoningEffort, RequestBodyOptions } from './openai.js';
 import { appendStreamDelta, flattenToolSpec, parseSseJson, writeUsage, type SseAcc } from './openai.js';
@@ -26,6 +27,14 @@ interface AnthropicBlock {
   [key: string]: unknown;
 }
 
+/**
+ * prompt-cache 断点。Anthropic 允许最多 4 个，这里用 3 个覆盖三段前缀
+ * （工具定义 → 系统提示词 → 已有对话），把 agent 每步重发的大头都变成缓存命中。
+ *
+ * 不加 `anthropic-beta` 头：prompt caching 已 GA，beta 头反而会被部分网关拒绝。
+ */
+const CACHE_BREAKPOINT = { type: 'ephemeral' } as const;
+
 /** data URL 转 Anthropic base64 source；http(s) URL 走 url source。 */
 function imageBlock(part: Extract<ContentPart, { type: 'image_url' }>): AnthropicBlock {
   const url = part.image_url.url;
@@ -36,18 +45,72 @@ function imageBlock(part: Extract<ContentPart, { type: 'image_url' }>): Anthropi
   return { type: 'image', source: { type: 'url', url } };
 }
 
-/** 正文文本 + 图片 part → Anthropic content blocks（tool / user 两条路径共用）。 */
+/**
+ * 正文文本 + 图片 part → Anthropic content blocks（tool / user 两条路径共用）。
+ *
+ * 空正文不推 text 块：Anthropic 拒收空 text（"text content blocks must be non-empty"），
+ * 而空结果在工具侧是真会出现的（例如 headless 下 ask_user 无输入通道）。
+ */
 function textAndImageBlocks(message: ChatMessage): AnthropicBlock[] {
-  const blocks: AnthropicBlock[] = [{ type: 'text', text: message.content }];
-  if (message.parts) {
-    for (const part of message.parts) {
-      if (part.type === 'image_url') blocks.push(imageBlock(part));
-    }
+  const blocks: AnthropicBlock[] = [];
+  if (message.content) blocks.push({ type: 'text', text: message.content });
+  for (const part of message.parts ?? []) {
+    if (part.type === 'image_url') blocks.push(imageBlock(part));
   }
   return blocks;
 }
 
-export function toAnthropicRequest(options: RequestBodyOptions): Record<string, unknown> {
+/** tool_result 的 content 不能为空数组，兜一个占位块，免得整段历史被判 400。 */
+function toolResultContent(message: ChatMessage): AnthropicBlock[] {
+  const blocks = textAndImageBlocks(message);
+  return blocks.length > 0 ? blocks : [{ type: 'text', text: '(no output)' }];
+}
+
+/**
+ * 断点在消息侧的落点：**上一次请求的结束位置**，即最后一条 assistant 消息。
+ *
+ * 为什么不落在绝对末尾：agent 每步把 assistant 回复与 tool result 追加到末尾，断点跟着
+ * 滑动。锚在最后一条 assistant 消息上，锚点每步只前进一个来回（两条消息），永远在
+ * cache lookback 窗口够得着的范围内；而当前步的 tool result 留在断点之后，本步按原价
+ * 读取、下一步起进入缓存前缀——写入点只比旧行为晚一步，却少占一个断点槽位
+ * （4 个槽只用 3 个，留 1 个给网关注入自己的断点）。
+ *
+ * thinking / redacted_thinking 块不承载 cache_control（API 直接拒绝挂点），选块时跳过。
+ */
+const CACHEABLE_BLOCK_TYPES = new Set(['text', 'image', 'document', 'tool_use', 'tool_result']);
+
+function lastCacheableBlock(content: readonly AnthropicBlock[]): AnthropicBlock | undefined {
+  for (let i = content.length - 1; i >= 0; i--) {
+    const block = content[i]!;
+    if (block.type === 'thinking' || block.type === 'redacted_thinking') continue;
+    if (CACHEABLE_BLOCK_TYPES.has(block.type)) return block;
+  }
+  return undefined;
+}
+
+function markMessagesForCaching(
+  messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>,
+): void {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role !== 'assistant') continue;
+    const block = lastCacheableBlock(messages[i]!.content);
+    if (block) {
+      block.cache_control = CACHE_BREAKPOINT;
+      return;
+    }
+    // 最后一条 assistant 整个是 thinking（无正文无工具调用）时不再往前找：
+    // 断点丢进更早的历史会让最近几个来回永远出不了缓存，宁可退回末尾消息。
+    break;
+  }
+  // 新会话的第一步还没有任何 assistant 消息：退回最后一条消息。
+  const block = lastCacheableBlock(messages.at(-1)?.content ?? []);
+  if (block) block.cache_control = CACHE_BREAKPOINT;
+}
+
+export function toAnthropicRequest(
+  options: RequestBodyOptions,
+  caps: RequestCaps = DEFAULT_REQUEST_CAPS,
+): Record<string, unknown> {
   const system: string[] = [];
   const messages: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = [];
   // Anthropic 协议里 tool_result 是 user 消息的 content 块；连续多条 tool 消息并入同一条 user。
@@ -64,11 +127,10 @@ export function toAnthropicRequest(options: RequestBodyOptions): Record<string, 
       continue;
     }
     if (message.role === 'tool') {
-      const blocks = textAndImageBlocks(message);
       pendingToolResults.push({
         type: 'tool_result',
         tool_use_id: message.tool_call_id,
-        content: blocks,
+        content: toolResultContent(message),
       });
       continue;
     }
@@ -89,7 +151,9 @@ export function toAnthropicRequest(options: RequestBodyOptions): Record<string, 
       }
       blocks.push({ type: 'tool_use', id: call.id, name: call.function.name, input });
     }
-    messages.push({ role: 'assistant', content: blocks });
+    // 空 content 数组会被 Anthropic 拒：只在真的有块时推这条 assistant 消息。
+    // 只有「既无正文也无工具调用」的空轮会落进这里——它对历史没有任何信息量。
+    if (blocks.length > 0) messages.push({ role: 'assistant', content: blocks });
   }
   flushToolResults();
 
@@ -99,20 +163,32 @@ export function toAnthropicRequest(options: RequestBodyOptions): Record<string, 
     : undefined;
   // 输出上限：显式配置优先，未配置时用 8192；thinking 预算必须小于 max_tokens，因此仍在基数上叠加预算。
   const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
+
+  const tools: Array<Record<string, unknown>> = options.tools.map((tool) => {
+    const fn = flattenToolSpec(tool);
+    return { name: fn.name, description: fn.description, input_schema: fn.parameters };
+  });
+  if (caps.promptCache && tools.length > 0) {
+    // 断点打在最后一个工具上：Anthropic 缓存「到断点为止」的整段前缀，一个就够覆盖整批工具定义。
+    tools[tools.length - 1].cache_control = CACHE_BREAKPOINT;
+  }
+  if (caps.promptCache) markMessagesForCaching(messages);
+
+  const systemText = system.join('\n\n');
   return {
     model: options.model,
     stream: true,
     max_tokens: thinking ? maxTokens + THINKING_BUDGET[effort as Exclude<ReasoningEffort, 'off'>] : maxTokens,
-    ...(system.length > 0 ? { system: system.join('\n\n') } : {}),
+    // 缓存断点要求 system 是块数组而不是裸字符串。
+    ...(systemText === ''
+      ? {}
+      : {
+          system: caps.promptCache
+            ? [{ type: 'text', text: systemText, cache_control: CACHE_BREAKPOINT }]
+            : systemText,
+        }),
     ...(thinking ? { thinking } : {}),
-    ...(options.tools.length > 0
-      ? {
-          tools: options.tools.map((tool) => {
-            const fn = flattenToolSpec(tool);
-            return { name: fn.name, description: fn.description, input_schema: fn.parameters };
-          }),
-        }
-      : {}),
+    ...(tools.length > 0 ? { tools } : {}),
     messages,
   };
 }
@@ -187,6 +263,7 @@ export const anthropicAdapter: ProtocolAdapter = {
     authorization: `Bearer ${apiKey}`,
     'anthropic-version': '2023-06-01',
   }),
-  buildBody: (input) => JSON.stringify(toAnthropicRequest(input)),
+  buildBody: (input, caps) => JSON.stringify(toAnthropicRequest(input, caps)),
   apply: applyAnthropicEvent,
+  degrade: degradeRequestCaps,
 };

@@ -17,7 +17,8 @@ import type { LlmClient } from '../llm/openai.js';
 import { responsesAdapter } from '../llm/responses.js';
 import { createSseClient } from '../llm/stream-client.js';
 import { readModelMeta } from '../llm/model-cache.js';
-import { McpHub } from '../mcp/hub.js';
+import { McpHub, type McpReloadResult } from '../mcp/hub.js';
+import { discoverMcpServers, type McpPreferences, type McpSourceReport } from '../mcp/sources.js';
 import { JobBoard } from '../runtime/jobs.js';
 import { TodoList } from '../runtime/todos.js';
 import { WorktreeStore } from '../runtime/worktrees.js';
@@ -26,7 +27,7 @@ import { SandboxError, type SandboxMode } from '../sandbox/types.js';
 import { acquireSessionLock, SessionLockedError } from '../session/lock.js';
 import { sessionDirFor } from '../session/path.js';
 import { resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
-import { ConfigError, loadConfig, type ApiProtocol, type SphConfig } from '../config/load.js';
+import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
 import { applyProxy } from '../net/proxy.js';
 import { sphConfigPath } from '../home.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
@@ -50,12 +51,20 @@ export interface ClientOptions {
   maxTokens?: number;
   /** 附加静态请求头：穿透到 createSseClient，与协议默认头同名时以它为准。 */
   headers?: Record<string, string>;
+  /** Anthropic prompt-cache 断点开关；省略视作开。 */
+  promptCache?: boolean;
+  /**
+   * 会话身份：OpenAI 系的 `prompt_cache_key` 与亲和头都从它来。
+   * 辅助 client 也传同一个 id——缓存路由按「桶」分机，不影响按前缀判定的缓存本身，
+   * 反而让主对话与压缩摘要尽量落在同一台机器上。
+   */
+  sessionId?: string;
 }
 
 /** 按上游协议构造 client；三种协议共享同一 LlmClient 面，loop 无感知。 */
 export function createClient(options: ClientOptions): LlmClient {
   const { api, ...conn } = options;
-  // 三分支只在 adapter 上不同,连接参数(含 headers)原样透传,故先选 adapter 再构造一次。
+  // 三分支只在 adapter 上不同,连接参数(含 headers / promptCache)原样透传,故先选 adapter 再构造一次。
   const adapter = api === 'anthropic-messages'
     ? anthropicAdapter
     : api === 'responses' ? responsesAdapter : openaiAdapter;
@@ -64,6 +73,13 @@ export function createClient(options: ClientOptions): LlmClient {
 
 export interface BootstrapOptions {
   workspaceRoot: string;
+  /**
+   * 项目级 MCP 配置的查找起点，向上走到 `workspaceRoot`（含）。
+   *
+   * `workspaceRoot` 通常已经是 git 根，但启动目录可能在它下面的某个子目录里，而
+   * 「最近的配置优先」要靠这一段查找链。省略则用 `process.cwd()`。
+   */
+  startDir?: string;
   /** 沙箱档位覆盖（`--sandbox`）。 */
   sandboxOverride?: SandboxMode;
   /** `--trust`：先记下信任再检查。 */
@@ -94,13 +110,40 @@ export interface Runtime {
   sandbox: SandboxHandle;
   session: JsonlSession;
   mcp: McpHub;
+  /** 可变容器：`/mcps` 刷新后就地替换内容，持有者无需重新取。 */
   mcpWarnings: string[];
+  /** 重新发现并装载 MCP server；启动时首次调用与 `/mcps` 的刷新走同一条路径。 */
+  reloadMcp(): Promise<McpReloadResult>;
+  /** 重新读 `[mcp]` 偏好段（TUI 写回 config.toml 之后调用）。 */
+  refreshMcpPreferences(): void;
+  /** 最近一次发现里各候选来源文件的读取结果。 */
+  readonly mcpSources: McpSourceReport[];
+  /** 生效中的 MCP 启停偏好（写回后由 refreshMcpPreferences 更新）。 */
+  readonly mcpPreferences: McpPreferences;
   todos: TodoList;
   jobs: JobBoard;
   /** 子代理 worktree 隔离的工作树仓库；cleanup 负责清退。 */
   worktrees: WorktreeStore;
   /** 按覆盖参数重建 client（TUI 的 /model、/effort 用）。 */
-  makeClient(overrides: { model: string; api: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
+  makeClient(overrides: {
+    model: string;
+    api: ApiProtocol;
+    effort?: ReasoningEffort;
+    maxTokens?: number;
+    /** 省略用主端点；辅助模型跨厂商时由 makeAuxClient 传入。 */
+    baseUrl?: string;
+    apiKey?: string;
+  }): LlmClient;
+  /**
+   * 辅助调用（压缩摘要 / auto 审批审查器）的 client。
+   *
+   * 模型名省略时返回 undefined，调用方据此回退主 client。配置了 `[aux]` 就用它的端点，
+   * 否则复用主端点——「便宜的辅助模型」因此跨厂商也成立。
+   *
+   * 收敛在这一个方法里，是因为 headless 与 TUI 各写一遍正是 TUI 那侧漏接线、
+   * 让 `compact_model` 静默失效的原因。
+   */
+  makeAuxClient(model: string | undefined): LlmClient | undefined;
   /** 幂等清理：所有退出路径都调它。 */
   cleanup(): void;
 }
@@ -128,6 +171,10 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       };
     }
   }
+
+  // 有效主协议：`--api` 覆盖配置。辅助端点没显式声明协议时沿用它——辅助模型与主模型
+  // 通常同源，协议不一致会直接发错端点。
+  const mainApi: ApiProtocol = options.api ?? config.api;
 
   if (options.trust) rememberTrustedWorkspace(options.workspaceRoot);
   if (!isWorkspaceTrusted(options.workspaceRoot)) {
@@ -178,7 +225,32 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   }
 
   const mcp = new McpHub();
-  const mcpWarnings = await mcp.connect(config.mcpServers);
+  // 可变容器：`/mcps` 刷新后警告要就地替换，任何持有它的地方都看到最新一批。
+  const mcpWarnings: string[] = [];
+  // 握手已改为后台完成（启动不为此阻塞），失败不再走 reload 的返回值——接到这个回调里，
+  // 警告容器与 /mcps 弹窗才能看见「server 没起来」。刷新会清空容器重填，过期的失败警告
+  // 不会永久残留；TUI 不为此弹 toast，状态以 /mcps 为准。
+  mcp.onProblem = (message) => {
+    if (!mcpWarnings.includes(message)) mcpWarnings.push(message);
+  };
+  let mcpReports: McpSourceReport[] = [];
+  const preferences = { ...config.mcpPreferences };
+
+  const reloadMcp = async (): Promise<McpReloadResult> => {
+    const discovery = discoverMcpServers({
+      workspaceRoot: options.workspaceRoot,
+      fromDir: options.startDir ?? process.cwd(),
+      preferences,
+    });
+    mcpReports = discovery.reports;
+    const result = await mcp.reload(discovery.servers);
+    // 顺序即因果：先有来源读取的问题，再有装载的问题，最后是 `[mcp]` 偏好的提示。
+    mcpWarnings.length = 0;
+    mcpWarnings.push(...discovery.warnings, ...result.warnings);
+    return result;
+  };
+  await reloadMcp();
+
   const todos = new TodoList();
   const jobs = new JobBoard();
   const worktrees = new WorktreeStore();
@@ -223,14 +295,49 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     worktrees,
     makeClient(overrides) {
       return createClient({
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
+        baseUrl: overrides.baseUrl ?? config.baseUrl,
+        apiKey: overrides.apiKey ?? config.apiKey,
         model: overrides.model,
         api: overrides.api,
         reasoningEffort: overrides.effort,
         maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
         headers: config.httpHeaders,
+        promptCache: config.promptCache,
+        sessionId: session.id,
       });
+    },
+    makeAuxClient(model) {
+      if (model === undefined) return undefined;
+      // 没配 [aux].base_url 就是与主端点同源：此时协议跟随主配置（含 --api 覆盖）。
+      const sharesMainEndpoint = config.aux?.baseUrl === undefined;
+      return createClient({
+        baseUrl: config.aux?.baseUrl ?? config.baseUrl,
+        apiKey: config.aux?.apiKey ?? config.apiKey,
+        model,
+        api: config.aux?.api ?? mainApi,
+        reasoningEffort: config.reasoningEffort,
+        // max_tokens 只在同源时继承：不同厂商的输出上限不同，把主模型的限额发给别人的模型
+        // 会直接 400。跨端点时交给端点默认值（anthropic 适配层自带 8192 兜底）。
+        maxTokens: sharesMainEndpoint ? config.maxTokens : undefined,
+        headers: config.httpHeaders,
+        promptCache: config.promptCache,
+        sessionId: session.id,
+      });
+    },
+    reloadMcp,
+    refreshMcpPreferences() {
+      const fresh = readMcpPreferences(sphConfigPath());
+      // 读不回来就保持旧值：偏好刚写完，此时解析失败意味着文件被别的东西弄坏了，
+      // 用空偏好覆盖会让用户刚做的开关凭空消失。
+      if (fresh === undefined) return;
+      preferences.disabledServers = fresh.disabledServers;
+      preferences.enabledServers = fresh.enabledServers;
+    },
+    get mcpSources() {
+      return mcpReports;
+    },
+    get mcpPreferences() {
+      return preferences;
     },
     cleanup,
   };

@@ -56,6 +56,25 @@ function scanRoot(root: string, warnings: string[], byName: Map<string, SkillEnt
   }
 }
 
+/**
+ * 技能根目录，按扫描顺序排列：**后者覆盖前者**（同名技能以靠后的为准）。
+ *
+ * 单独导出是给 `/skills` 用的：它要把「技能该放哪」显示给用户，不能让展示与实现
+ * 各写一份目录清单——那种两份清单迟早会对不上，而用户会照着错的那份放文件。
+ */
+export function skillRoots(
+  workspaceRoot: string,
+  home = sphHome(),
+  userHome = process.env.USERPROFILE ?? process.env.HOME ?? '',
+): string[] {
+  return [
+    join(userHome, '.agents', 'skills'),
+    join(home, 'skills'),
+    join(workspaceRoot, '.agents', 'skills'),
+    join(workspaceRoot, '.sph', 'skills'),
+  ];
+}
+
 /** 四个根后者覆盖前者；只认 skills/<name>/SKILL.md。 */
 export function scanSkills(
   workspaceRoot: string,
@@ -64,12 +83,6 @@ export function scanSkills(
 ): SkillScan {
   const warnings: string[] = [];
   const byName = new Map<string, SkillEntry>();
-  const roots = [
-    join(userHome, '.agents', 'skills'),
-    join(home, 'skills'),
-    join(workspaceRoot, '.agents', 'skills'),
-    join(workspaceRoot, '.sph', 'skills'),
-  ];
-  for (const root of roots) scanRoot(root, warnings, byName);
+  for (const root of skillRoots(workspaceRoot, home, userHome)) scanRoot(root, warnings, byName);
   return { catalog: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)), warnings };
 }

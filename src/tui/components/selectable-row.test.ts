@@ -20,9 +20,20 @@ function blank(rows: number, cols: number): string[] {
   return Array.from({ length: rows }, () => ' '.repeat(cols));
 }
 
+/**
+ * 只当身份标记用的假组件。
+ *
+ * 这两条用例关心的是「选择标记画在哪一行、滚出裁剪区要不要画」，组件自身行为无关紧要，
+ * 所以给一个最小可用实现——`Component` 要求 `render` 与 `invalidate` 两个成员，
+ * 少了 `invalidate` 编译期就不成立（此前靠 tsx 不做类型检查才漏过去）。
+ */
+function stubRow(): Component {
+  return { render: () => [''], invalidate() {} };
+}
+
 describe('compositeRowSelection', () => {
   it('只在标题行画 │，不顺着展开后的正文往下铺', () => {
-    const row = asSelectableRow({ render: () => [''] });
+    const row = asSelectableRow(stubRow());
     selectRow(row);
     const screen = blank(8, 20);
     const out = compositeRowSelection(
@@ -39,7 +50,7 @@ describe('compositeRowSelection', () => {
   });
 
   it('标题滚出裁剪区时不画', () => {
-    const row = asSelectableRow({ render: () => [''] });
+    const row = asSelectableRow(stubRow());
     selectRow(row);
     const root = box(row, { x: 0, y: 0, width: 20, height: 4 });
     root.clip = { x: 0, y: 2, width: 20, height: 2 };

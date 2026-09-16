@@ -7,7 +7,12 @@
  *   1. 命中未注释的同名键 → 只换值，行尾注释与前后空白原样保留；
  *   2. 只命中被注释掉的模板行（如 `# reasoning_effort = "medium"   # off | low | ...`）
  *      → 就地取消注释并换值，模板里的说明自动变成行尾注释；
- *   3. 都没有 → 追加到文件末尾。
+ *   3. 都没有 → 追加到**第一个表头之前**。
+ *
+ * 第 3 条的落点是有讲究的：TOML 里表头之后的键属于该表，追加到文件末尾会把
+ * `approval = "yolo"` 写成 `[mcp]` 的 `approval`——解析成功、值也在文件里，但顶层读不到，
+ * 表现为「设置明明写进去了却不生效」。同理，查找已有键时也只认表头之前的部分，
+ * 否则表体里一个同名键会把值写错地方。
  *
  * 写入用「临时文件 + rename」：rename 在同一文件系统上是原子的，写到一半失败也不会
  * 把用户的配置截断成半截。
@@ -15,6 +20,7 @@
 
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { escapeRegExp } from '../util.js';
+import { firstTableHeaderLine, trailingComment } from './toml-lines.js';
 
 export type ConfigValue = string | number;
 
@@ -22,7 +28,7 @@ export interface SaveResult {
   path: string;
   /** 本次确保生效的键（值本来就相同也会列出——调用方据此说「已写入」）。 */
   keys: string[];
-  /** 其中原本文件中不存在、被追加到末尾的键。 */
+  /** 其中原本文件中不存在、被追加的键。 */
   added: string[];
 }
 
@@ -39,8 +45,13 @@ export function updateConfigFile(path: string, patch: Readonly<Record<string, Co
   // split 会在结尾换行后多出一个空元素；append 前必须去掉，否则新增键顶上会多一个空行。
   if (endsWithNewline) lines.pop();
 
+  // 顶层标量只可能出现在第一个表头之前，查找范围就限定在这里。
+  const header = firstTableHeaderLine(lines);
+  const scalarEnd = header < 0 ? lines.length : header;
+
   const keys: string[] = [];
   const added: string[] = [];
+  const appended: string[] = [];
   for (const [key, value] of Object.entries(patch)) {
     const rendered = renderValue(value);
     // 三个匹配用的正则只与 key 有关,预编译一次,避免在 findIndex 的每行回调里反复 new RegExp。
@@ -48,21 +59,30 @@ export function updateConfigFile(path: string, patch: Readonly<Record<string, Co
     const activeRe = new RegExp(`^\\s*${keyRe}\\s*=`);
     const commentedRe = new RegExp(`^\\s*#\\s*${keyRe}\\s*=`);
     const replaceRe = new RegExp(`^(\\s*${keyRe}\\s*=\\s*)(.*)$`);
-    const active = lines.findIndex((line) => activeRe.test(line));
+    const active = lines.findIndex((line, index) => index < scalarEnd && activeRe.test(line));
     if (active >= 0) {
-      lines[active] = replaceValue(lines[active], replaceRe, rendered);
+      lines[active] = replaceValue(lines[active]!, replaceRe, rendered);
       keys.push(key);
       continue;
     }
-    const commented = lines.findIndex((line) => commentedRe.test(line));
+    const commented = lines.findIndex((line, index) => index < scalarEnd && commentedRe.test(line));
     if (commented >= 0) {
-      lines[commented] = activateCommented(lines[commented], replaceRe, rendered);
+      lines[commented] = activateCommented(lines[commented]!, replaceRe, rendered);
       keys.push(key);
       continue;
     }
-    lines.push(`${key} = ${rendered}`);
+    appended.push(`${key} = ${rendered}`);
     keys.push(key);
     added.push(key);
+  }
+
+  if (appended.length > 0) {
+    // 表头前的空行是留给表头的：回退到那一段空行之前再插，两个区块之间的空行数才不变。
+    let at = scalarEnd;
+    while (at > 0 && lines[at - 1]!.trim() === '') at -= 1;
+    // 回退后若正好停在已有的空行上，它本身就是分隔，再补一个就成了双空行。
+    const needsBlank = at < lines.length && lines[at]!.trim() !== '';
+    lines.splice(at, 0, ...appended, ...(needsBlank ? [''] : []));
   }
 
   const text = `${lines.join(eol)}${eol}`;
@@ -91,7 +111,7 @@ function writeAtomically(path: string, text: string): void {
 function replaceValue(line: string, replaceRe: RegExp, rendered: string): string {
   const match = replaceRe.exec(line);
   if (!match) return line;
-  return `${match[1]}${rendered}${trailingComment(match[2])}`;
+  return `${match[1]}${rendered}${trailingComment(match[2]!)}`;
 }
 
 /** 去掉注释符号后按同一套规则换值,于是模板里的说明自然成了新值的行尾注释。 */
@@ -99,30 +119,6 @@ function activateCommented(line: string, replaceRe: RegExp, rendered: string): s
   const match = /^(\s*)#\s*(.*)$/.exec(line);
   if (!match) return line;
   return replaceValue(`${match[1]}${match[2]}`, replaceRe, rendered);
-}
-
-/**
- * 取出值后面的行尾注释（含前导空白）。要跳过引号内的 `#`——
- * 路径、URL 里带 # 完全正常，不能当成注释起点。
- */
-function trailingComment(text: string): string {
-  let inQuote = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuote && ch === '\\') {
-      i++;
-      continue;
-    }
-    if (ch === '"') {
-      inQuote = !inQuote;
-      continue;
-    }
-    if (ch === '#' && !inQuote) {
-      const space = /\s*$/.exec(text.slice(0, i))?.[0] ?? '';
-      return `${space || ' '}${text.slice(i)}`;
-    }
-  }
-  return '';
 }
 
 function renderValue(value: ConfigValue): string {

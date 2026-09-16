@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { TUI } from '../core/index.js';
-import { TOOL_DETAIL_INDENT, TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from './tool-execution.js';
+import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from './tool-execution.js';
 import { ToolGroupComponent } from './tool-group.js';
 
 let renderCount = 0;
@@ -101,7 +101,17 @@ describe('ToolGroupComponent 思考段的保留与交错', () => {
 });
 
 describe('ToolGroupComponent 缩进分层', () => {
-  it('组头 / 成员 / 详情各占一级', () => {
+  it('纯思考组（无工具）思考行在组级；展开组思考行降为成员级，正文再下一级', () => {
+    // 纯思考组：没有汇总行，思考行是唯一行——与其它组头同列。
+    const solo = new ToolGroupComponent(ui);
+    solo.beginThinking();
+    solo.setThinking('纯思考段的内容', false, 1200);
+    const soloLines = solo.render(100);
+    const soloRow = soloLines.find((line) => line.replace(STRIP, '').includes('Thought for'));
+    assert.ok(soloRow, '纯思考组应显示思考行');
+    assert.equal(indentOf(soloRow), TOOL_GROUP_INDENT, '纯思考组的思考行在组级');
+
+    // 带工具的组展开：思考行降为成员级，与工具行同级；正文在它下面再缩 2。
     const group = buildThreeIterationGroup();
     group.setExpanded(true, false);
     expandThinkings(group, [0]);
@@ -112,12 +122,10 @@ describe('ToolGroupComponent 缩进分层', () => {
       return indentOf(hit);
     };
     assert.equal(indentOfText('Listed'), TOOL_GROUP_INDENT, '汇总行在组级');
-    assert.equal(indentOfText('Thought for'), TOOL_MEMBER_INDENT, '思考行是成员，与工具行同级');
+    assert.equal(indentOfText('Thought for'), TOOL_MEMBER_INDENT, '展开态思考行与工具行同级');
     assert.equal(indentOfText('List a.java'), TOOL_MEMBER_INDENT, '工具行在成员级');
-    assert.equal(indentOfText('第一轮'), TOOL_DETAIL_INDENT, '思考正文在详情级');
-    // 关键回归一：思考行不能和组头同级，否则看起来像「第二个汇总行」。
-    assert.notEqual(indentOfText('Thought for'), indentOfText('Listed'));
-    // 关键回归二：思考正文不能和工具行同级，否则一段散文会读成工具列表的第一项。
+    assert.equal(indentOfText('第一轮'), TOOL_MEMBER_INDENT + 2, '思考正文跟自己的行再缩 2');
+    // 关键回归：思考正文不能和工具行同级，否则一段散文会读成工具列表的第一项。
     assert.notEqual(indentOfText('第一轮'), indentOfText('List a.java'));
   });
 });
@@ -163,5 +171,28 @@ describe('ToolGroupComponent 流式思考的绘制通道', () => {
     group.setThinking('逐步思考', true);
     assert.ok(renderCount >= 1, `流式思考应 bump 转录 generation，实际 requestRender=${renderCount}`);
     assert.equal(viewportCount, 0);
+  });
+});
+
+describe('思考正文统一中性灰', () => {
+  const colorsOf = (text: string): string[] => text.match(/\x1b\[38;(?:5;\d+|2;\d+;\d+;\d+)m/g) ?? [];
+
+  it('详情里的标题/列表/序号/行内码全部压成 toolTitle 灰', async () => {
+    // 思考内容是 markdown：全局主题会给列表序号上紫、行内码上蓝——
+    // 推理记录是过程层，用户要求整体退成中性灰，一个彩字都不留。
+    const { theme } = await import('../theme/theme.js');
+    const gray = colorsOf(theme.fg('toolTitle', 'x'))[0];
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    group.setThinking('#### 注意\n- 项目 `x`\n1. 序号 `y`', false, 500);
+    group.setExpanded(true, false);
+    expandThinkings(group, [0]);
+    const lines = group.render(100);
+    const content = lines.filter((line) => /注意|项目|序号/.test(line.replace(STRIP, '')));
+    assert.ok(content.length >= 3, '应有标题/列表/序号内容行');
+    for (const line of content) {
+      const colors = [...new Set(colorsOf(line))];
+      assert.deepEqual(colors, [gray], '思考内容行应只有中性灰，实际: ' + colors.join(',') + ' — ' + line.replace(STRIP, ''));
+    }
   });
 });

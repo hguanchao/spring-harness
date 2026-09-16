@@ -13,6 +13,7 @@ import { TouchMemory, touchInstructionBlock } from './memory.js';
 import { PLAN_BLOCKED_TOOLS, planBlockedReason } from './plan.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runToolBatch } from './tool-run.js';
+import { CacheMissTracker, describeCacheMiss } from '../llm/cache-stats.js';
 import { ContextOverflowError } from '../llm/errors.js';
 import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
 import { McpHub } from '../mcp/hub.js';
@@ -24,7 +25,7 @@ import type { SandboxHandle } from '../sandbox/open.js';
 import { shellArgv } from '../sandbox/shell-bin.js';
 import { errorMessage } from '../util.js';
 import { createSession, JsonlSession } from '../session/store.js';
-import { sessionEventData, type SessionFailure } from '../session/fold.js';
+import { foldSessionState, sessionEventData, type SessionFailure } from '../session/fold.js';
 import { lastAssistantMessage } from '../session/query.js';
 import { repairDanglingTools } from '../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../session/types.js';
@@ -35,6 +36,9 @@ import { subagentPrompt, type SubagentRole } from './subagent-prompt.js';
 import { existsSync } from 'node:fs';
 
 const MAX_STEPS = 32;
+
+/** 预算用掉多少就打一条 warn：留出「收尾并交付已有成果」的余地。 */
+const BUDGET_WARN_RATIO = 0.8;
 
 /**
  * 活跃子代理 session id（进程级）：resume 校验「不在运行中」用。必须跨 runTurn 实例
@@ -103,6 +107,14 @@ export interface RunTurnOptions {
    * 产出格式、被拒出路）——子代理此前与主代理共用同一份提示词，缺这些边界。
    */
   subagentRole?: SubagentRole;
+  /**
+   * 会话累计 token 预算（config.max_session_tokens）；0 或省略表示不限制。
+   *
+   * 计数不靠调用方传入：预算开启时本函数自己从会话记录折叠一次，因此 headless / TUI /
+   * 子代理三条入口都自动生效，也不会因为调用方忘了传而静默失效。关闭时不折叠（不为一个
+   * 没用上的功能付一次全文件读）。
+   */
+  maxSessionTokens?: number;
 }
 
 /** 极简计数信号量：并行 subagent 超过上限时排队。 */
@@ -152,8 +164,13 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const memory = options.memory ?? new TouchMemory(options.workspaceRoot);
   const worktrees = options.worktrees ?? new WorktreeStore();
 
-  // 每步重读 planMode：enter/exit 发生在工具批里，下一步请求必须带上新引导。
-  const currentSystem = (): string => {
+  // 系统提示词在**一轮内冻结**，而不是每步重读。原因：它经 projectContext 的 withSystem
+  // 注入为 message 0，正处在缓存前缀的最前面——enter_plan_mode 之类发生在工具批里的
+  // 状态变化若在这里生效，本轮后续每一步连同整段历史都会重新计费。
+  // 冻结不损失行为正确性：计划模式的进出引导由工具结果自带（tools/plan.ts 的返回文案），
+  // 读写限制在执行层强制（PLAN_BLOCKED_TOOLS）；跨轮重建是刻意的，轮与轮之间本来就要
+  // 追加新消息，此时反映状态变化不带来额外的缓存损失。
+  const systemPrompt = ((): string => {
     const system = buildSystemPrompt({
       workspaceRoot: options.workspaceRoot,
       sandbox: options.sandbox.status.mode,
@@ -171,9 +188,42 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     return options.subagentRole
       ? `${system}\n\n${subagentPrompt(options.subagentRole)}`
       : system;
-  };
+  })();
   options.session.appendMessage({ role: 'user', content: options.prompt, images: options.userImages });
   options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
+
+  // token 预算：整棵代理树的累计量（自己的 usage + 各子代理 end 事件里的 tokens）。
+  const budget = Math.max(0, Math.floor(options.maxSessionTokens ?? 0));
+  const budgetWarnAt = budget > 0 ? Math.floor(budget * BUDGET_WARN_RATIO) : 0;
+  let sessionTokens = budget > 0 ? foldSessionState(options.session.readAll()).tokensUsed : 0;
+  let budgetWarned = false;
+  /**
+   * 记账。
+   *
+   * 警告放在**扣费之后**而不是步首的检查里：越过 80% 的那一步通常在步首检查时还没到阈值，
+   * 等下一步再查就正好被「超限即中止」抢先，那条提醒永远不会发出。提醒的用处正是
+   * 让用户/模型在这轮还能收尾并交付已有成果。
+   */
+  const chargeTokens = (prompt: number, completion: number): void => {
+    sessionTokens += Math.max(0, prompt) + Math.max(0, completion);
+    if (budget > 0 && !budgetWarned && sessionTokens >= budgetWarnAt) {
+      budgetWarned = true;
+      options.listener?.({
+        type: 'status',
+        level: 'warn',
+        text: `Session token budget ${Math.round((sessionTokens / budget) * 100)}% used (${sessionTokens}/${budget}).`,
+      });
+    }
+  };
+  /** 超预算就在发起下一次请求**之前**停：已经花掉的钱换不回，但下一笔可以不花。 */
+  const assertBudget = (): void => {
+    if (budget > 0 && sessionTokens >= budget) {
+      throw new Error(
+        `session token budget exhausted: ${sessionTokens} >= max_session_tokens ${budget}. `
+        + 'Raise max_session_tokens, or start a new session (`--new`).',
+      );
+    }
+  };
 
   // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。
   const mirror: SessionMessage[] = options.session.readMessages();
@@ -181,8 +231,15 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   let compaction: CompactionEvent | undefined = loadCompaction(options.session);
   let wire: WireState = wireFromMessages(mirror, compaction);
   let lastUsage: TokenUsage | undefined;
+  // stub 级压缩的冻结边界（session 坐标）：一旦生效就不再随轮次前移，摘要落地时重置。
+  let stubFromSession: number | undefined;
   /** lastUsage 覆盖到的镜像位置：之后追加的消息没算进那份 prompt，估算时要补上。 */
   let usageAnchor = mirror.length;
+  /**
+   * 提示缓存命中观测。一次 turn 一个实例：它在内存里握着「上一轮请求」的基线，
+   * 跨 turn 的累计由 `foldSessionState` 按同样口径重放会话事件得出。
+   */
+  const cacheTracker = new CacheMissTracker();
   /** todo 上次落盘的样子：只有真的变了才写事件，避免每步都往 JSONL 塞一份重复快照。 */
   let todoSnapshot = JSON.stringify(todos.list());
   const appendMessage = (message: Omit<SessionMessage, 'type' | 'ts'>): void => {
@@ -483,6 +540,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (options.signal?.aborted) throw new Error('aborted');
+    assertBudget();
 
     // 后台任务完成推送（grok-build 语义：完成唤醒父级）：轮次进行中收到即注入下一步。
     // 已收尾的轮次由 TUI 在 finally 里 drain 并自动开后续轮次；delivered 标记保证不重不漏。
@@ -517,15 +575,30 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         lastUsage,
         lastUsageAnchor: usageAnchor,
         force,
-        system: currentSystem(),
-        ...(auxUsage ? { onUsage: (usage: TokenUsage) => auxUsage(usage, 'compaction') } : {}),
+        system: systemPrompt,
+        // stub 边界冻结：首次由投影回报，之后不再随轮次前移——前移一格就是一次
+        // 历史中段改写，缓存从切点起全部作废。摘要落地时重置（摘要即新边界）。
+        stubFromSession,
+        // 压缩摘要的花费也是真花钱，一样计入预算（未配 onAuxUsage 时也要计）。
+        onUsage: (usage: TokenUsage) => {
+          chargeTokens(usage.promptTokens, usage.completionTokens);
+          auxUsage?.(usage, 'compaction');
+        },
       });
+      if (projection.stubbedFromSession !== undefined && stubFromSession === undefined) {
+        stubFromSession = projection.stubbedFromSession;
+      }
       if (projection.compaction) {
         const next = projection.compaction;
         if (next.covered !== (compaction?.covered ?? 0)) {
           options.session.appendEvent('compaction', { summary: next.summary, covered: next.covered });
           compaction = next;
           wire = wireFromMessages(mirror, compaction);
+          // 摘要重写了历史：提示词从此是新内容，缓存基线必须一起丢掉，
+          // 否则压缩后的第一轮会被算成一整段未命中。
+          cacheTracker.reset();
+          // 摘要覆盖了冻结边界所在的区间：旧边界失去意义，以 covered 为新系列起点。
+          stubFromSession = undefined;
           options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
         }
       }
@@ -584,6 +657,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     if (reply.usage) {
       lastUsage = reply.usage;
       usageAnchor = anchorAt;
+      chargeTokens(reply.usage.promptTokens, reply.usage.completionTokens);
       options.session.appendEvent('usage', { ...reply.usage });
       options.listener?.({
         type: 'usage',
@@ -591,6 +665,22 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         completionTokens: reply.usage.completionTokens,
         ...(reply.usage.cachedTokens === undefined ? {} : { cachedTokens: reply.usage.cachedTokens }),
       });
+      // 提示缓存未命中：不打扰界面（一次性的 best-effort 缓存抖动不值得打断阅读），
+      // 落成会话事件留痕——反复出现时在会话文件里看得到规律，sph export 也能带出来。
+      const miss = cacheTracker.observe({
+        promptTokens: reply.usage.promptTokens,
+        ...(reply.usage.cachedTokens === undefined ? {} : { cachedTokens: reply.usage.cachedTokens }),
+        at: Date.now(),
+      });
+      if (miss) {
+        options.session.appendEvent('cache_miss', {
+          missedTokens: miss.missedTokens,
+          modelChanged: miss.modelChanged,
+          likelyExpired: miss.likelyExpired,
+          ...(miss.idleMs === undefined ? {} : { idleMs: miss.idleMs }),
+          text: describeCacheMiss(miss),
+        });
+      }
     }
 
     if (reply.finishReason === 'length') {
@@ -606,7 +696,10 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     if (!reply.toolCalls?.length) {
       appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
       // OpenCode 会话环：只有明确的 stop/length/content-filter 且没有工具才退出。
-      // finish 缺失或 unknown = 流在 completed 前断了，再打一轮，不要当正常收工。
+      //
+      // 这条 `finish !== undefined` 就是**截断流的唯一防线**（例如 Responses 流没等到
+      // response.completed、网关半途掐断）：此时不能当正常收工，再打一轮。协议层曾经留过一个
+      // `afterStream` 钩子想做同一件事，但三个 adapter 都没实现，实际保护一直在这里，故已删除该钩子。
       const finish = reply.finishReason;
       const stopped = finish !== undefined && finish !== 'tool-calls' && finish !== 'unknown';
       if (stopped) {
@@ -614,6 +707,12 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         options.listener?.({ type: 'done' });
         return;
       }
+      // 静默继续会让「模型自己停了」无从排查，所以每次都留一条痕迹。
+      options.listener?.({
+        type: 'status',
+        level: 'warn',
+        text: `Stream ended without a finish reason (${finish ?? 'none'}) — continuing the turn.`,
+      });
       continue;
     }
 

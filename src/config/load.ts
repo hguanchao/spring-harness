@@ -4,6 +4,7 @@ import { APPROVAL_MODES, type ApprovalMode } from '../approval/policy.js';
 import { sphConfigPath } from '../home.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
 import type { McpServerConfig } from '../mcp/hub.js';
+import type { McpPreferences } from '../mcp/sources.js';
 import { DEFAULT_SPILL_THRESHOLD } from '../runtime/spill.js';
 import type { SandboxMode } from '../sandbox/types.js';
 
@@ -12,6 +13,21 @@ export type McpServerConfigFile = McpServerConfig;
 /** 上游 API 协议形态；决定请求端点、鉴权头与消息编码方式。 */
 export const API_PROTOCOLS = ['chat-completions', 'responses', 'anthropic-messages'] as const;
 export type ApiProtocol = (typeof API_PROTOCOLS)[number];
+
+/**
+ * 辅助调用（压缩摘要 / auto 审批审查器）可选的独立端点。
+ *
+ * 动因：主模型可能是某个贵的旗舰，而压缩摘要与安全审查器只需要一个便宜模型——它们只读不写、
+ * 输出格式固定。此前辅助调用只能复用主配置的 base_url / api_key / api，「便宜的辅助模型」
+ * 于是只在同一端点内成立，跨厂商做不到。
+ *
+ * 三个字段都可省，各自回退主配置。
+ */
+export interface AuxConfig {
+  baseUrl?: string;
+  apiKey?: string;
+  api?: ApiProtocol;
+}
 
 export interface SphConfig {
   baseUrl: string;
@@ -30,6 +46,8 @@ export interface SphConfig {
   compactModel?: string;
   /** auto 审批审查器专用模型；省略则用主模型。 */
   reviewModel?: string;
+  /** 辅助调用可选的独立端点；省略则复用主端点。 */
+  aux?: AuxConfig;
   /** 工具结果超过这个字符数就落盘，上下文只留预览与路径；0 表示关闭。 */
   spillThreshold: number;
   /** 附加到每个 LLM 请求的静态头；api_key 为空时由它承担免鉴权会话标识。 */
@@ -41,6 +59,25 @@ export interface SphConfig {
   proxy?: string;
   /** 子代理嵌套深度预算：0 禁止派生，默认 1 层（对齐 grok-build 的扁平代理树）。 */
   subagentMaxDepth: number;
+  /**
+   * Anthropic 协议打 prompt-cache 断点，默认开。
+   * agent 每步都重发完整历史，缓存收益远大于一次性写入成本；端点不认这个字段时会在运行时
+   * 自动降级（见 llm/compat.ts），所以只在明确要省掉缓存写入时才需要关掉。
+   */
+  promptCache: boolean;
+  /**
+   * 会话累计 token 预算（prompt + completion，含子代理与压缩调用）。0 表示不限制（默认）。
+   * 计数在会话折叠里，因此活过 resume；超限时在发起下一次调用**之前**中止本轮。
+   */
+  maxSessionTokens: number;
+  /**
+   * MCP 的本地启停偏好（`[mcp]` 段）。
+   *
+   * 来自外部工具配置（Claude / Codex / `.mcp.json`）的 server 一概不写回原文件，启停只在
+   * 这里叠一层覆盖。这样「读别人的配置」和「改别人的配置」被彻底分开——后者会带来意料
+   * 之外的副作用，而且很难撤销。
+   */
+  mcpPreferences: McpPreferences;
 }
 
 export const CONFIG_EXAMPLE = `base_url = "https://api.example.com/v1"
@@ -54,8 +91,15 @@ sandbox = "workspace"
 # approval = "ask"              # ask | auto | yolo（/approval 的选择会写回这里）
 # compact_model = ""            # 压缩摘要用的便宜模型；留空用主模型
 # review_model = ""             # auto 审批审查器用的模型；留空用主模型
+# [aux]                         # 辅助调用（压缩摘要 / auto 审查器）走另一个端点；
+#                               # 整段省略则复用主配置。三个字段都可单独省略。
+# base_url = "https://api.deepseek.com/v1"
+# api_key = "..."
+# api = "chat-completions"      # chat-completions | responses | anthropic-messages
 # spill_threshold = 8192        # 工具结果超过该字符数就落盘，0 关闭
 # subagent_max_depth = 1        # 子代理嵌套深度预算；0 禁止派生，默认 1（扁平，子代理不再派生）
+# prompt_cache = true           # Anthropic 打 prompt-cache 断点，默认开；端点不认时自动降级
+# max_session_tokens = 0        # 会话累计 token 预算（含子代理/压缩调用）；0 = 不限制
 # proxy = "http://127.0.0.1:7890"  # 出站代理；显式 "" = 强制直连，缺省回退 HTTP(S)_PROXY 环境变量
 # [http_headers]                # 附加到每个 LLM 请求的静态头；api_key = ""（显式空）时免鉴权
 # "User-Agent" = "opencode/1.4.3"
@@ -64,6 +108,11 @@ sandbox = "workspace"
 # name = "demo"
 # command = "npx"
 # args = ["-y", "demo-mcp"]
+# [mcp]                         # MCP 本地启停偏好；外部来源（Claude/Codex/.mcp.json）只读，
+#                               # 开关记在这里，不改那些文件
+# disabled_servers = ["demo"]   # 本地关掉；对任何来源都生效
+# enabled_servers = []          # 本地打开某个来源自己声明关掉的 server
+#                               # 其余来源按优先级读取：Claude > Codex > .mcp.json
 `;
 
 export class ConfigError extends Error {
@@ -156,12 +205,101 @@ export function loadConfig(options?: {
   const mcpServers = parseMcpServers(file.mcp_servers);
   const compactModel = parseOptionalModel(file.compact_model, 'compact_model');
   const reviewModel = parseOptionalModel(file.review_model, 'review_model');
+  const aux = parseAux(file.aux);
   const spillThreshold = parseSpillThreshold(file.spill_threshold);
   const subagentMaxDepth = parseSubagentMaxDepth(file.subagent_max_depth);
+  const promptCache = parsePromptCache(file.prompt_cache);
+  const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
+  const mcpPreferences = parseMcpPreferences(file.mcp);
   return {
     baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
-    compactModel, reviewModel, spillThreshold, httpHeaders, proxy, subagentMaxDepth,
+    compactModel, reviewModel, aux, spillThreshold, httpHeaders, proxy, subagentMaxDepth, promptCache,
+    maxSessionTokens, mcpPreferences,
   };
+}
+
+/**
+ * `[mcp]` 表：只认两个名字列表，缺省即空。
+ *
+ * 名字列表里出现不存在的 server 不算错误：配置可能来自别的机器或还没导入，静默忽略比
+ * 拒绝启动合理。写成非数组才是真的写错了，那时候报错更省事。
+ */
+function parseMcpPreferences(value: unknown): McpPreferences {
+  if (value === undefined) return { disabledServers: [], enabledServers: [] };
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('mcp must be a table');
+  }
+  const row = value as Record<string, unknown>;
+  return {
+    disabledServers: parseServerNameList(row.disabled_servers, 'mcp.disabled_servers'),
+    enabledServers: parseServerNameList(row.enabled_servers, 'mcp.enabled_servers'),
+  };
+}
+
+function parseServerNameList(value: unknown, key: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of server names`);
+  return value.map((item, index) => {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new ConfigError(`${key}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+}
+
+/**
+ * 单独读 `[mcp]` 段。
+ *
+ * `/mcps` 写完启停偏好后需要就地刷新内存里的那份，而重新 `loadConfig` 会顺带重跑
+ * 一堆与 MCP 无关的校验（缺 key 直接抛错），在一次交互中途是不合适的。
+ *
+ * 读不回来（文件没了/被改坏）返回 undefined，调用方保持旧值——偏好刚写完，此时用空值
+ * 覆盖只会让用户刚做的开关凭空消失。
+ */
+export function readMcpPreferences(path: string): McpPreferences | undefined {
+  if (!existsSync(path)) return { disabledServers: [], enabledServers: [] };
+  try {
+    const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return parseMcpPreferences((parsed as Record<string, unknown>).mcp);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `[aux]` 表：三个字段全可选，全缺时返回 undefined（等价于「复用主端点」）。
+ *
+ * `api` 要区分「没写」与「写了默认值」：`parseApiProtocol` 对缺省会回填
+ * chat-completions，那会让 aux 悄悄锁死协议而不跟随主配置，所以这里只在显式给出时才取值。
+ */
+function parseAux(value: unknown): AuxConfig | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('aux must be a table');
+  }
+  const row = value as Record<string, unknown>;
+  const aux: AuxConfig = {};
+  const baseUrl = asString(row.base_url, 'aux.base_url');
+  if (baseUrl !== undefined) aux.baseUrl = baseUrl;
+  // 与顶层 api_key 同一套三态语义：显式空串 = 该端点免鉴权。
+  const apiKey = asOptionalKey(row.api_key, 'aux.api_key');
+  if (apiKey !== undefined) aux.apiKey = apiKey;
+  if (row.api !== undefined && row.api !== '') aux.api = parseApiProtocol(row.api);
+  return Object.keys(aux).length > 0 ? aux : undefined;
+}
+
+/** 会话 token 预算：非负整数，0 = 不限制（默认）。 */
+function parseMaxSessionTokens(value: unknown): number {
+  if (value === undefined) return 0;
+  return requireInt(value, 0, 'max_session_tokens must be a non-negative integer (0 disables the budget)');
+}
+
+/** prompt-cache 断点开关：默认开，只有显式 false 才关。 */
+function parsePromptCache(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== 'boolean') throw new ConfigError('prompt_cache must be a boolean');
+  return value;
 }
 
 /**

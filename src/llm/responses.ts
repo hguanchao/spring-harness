@@ -1,4 +1,6 @@
+import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
 import { llmError } from './errors.js';
+import { clampPromptCacheKey, PROMPT_CACHE_RETENTION } from './prompt-cache.js';
 import type { ChatMessage, RequestBodyOptions } from './openai.js';
 import {
   activeReasoningEffort,
@@ -20,7 +22,10 @@ import type { ProtocolAdapter } from './stream-client.js';
 
 type InputItem = Record<string, unknown>;
 
-export function toResponsesInput(messages: ChatMessage[]): InputItem[] {
+export function toResponsesInput(
+  messages: ChatMessage[],
+  caps: RequestCaps = DEFAULT_REQUEST_CAPS,
+): InputItem[] {
   const items: InputItem[] = [];
   for (const message of messages) {
     if (message.role === 'system') {
@@ -39,8 +44,23 @@ export function toResponsesInput(messages: ChatMessage[]): InputItem[] {
       items.push({ role: 'user', content });
       continue;
     }
-    // 不回传 reasoning.encrypted_content：它绑定签发密钥。zen Console 转手会 400
-    // `encrypted_content was not issued to this caller`。
+    // 推理项必须排在它引用的输出项之前：服务端按序重建那一轮的推理状态。
+    //
+    // 默认回传，因为**无状态调用下这是唯一保住跨步推理状态的手段**（本项目每次把完整
+    // input 重发，不用 previous_response_id）。但部分转手中转站会以
+    // `encrypted_content was not issued to this caller` 拒绝——那是端点属性，不该拿来
+    // 全局牺牲质量，所以改为「先发，被拒后按报文降级」（见 compat.ts）。
+    if (caps.sendReasoning) {
+      for (const item of message.reasoning ?? []) {
+        if (!item.encryptedContent) continue;
+        items.push({
+          type: 'reasoning',
+          id: item.id,
+          encrypted_content: item.encryptedContent,
+          ...(item.summary ? { summary: [{ type: 'summary_text', text: item.summary }] } : {}),
+        });
+      }
+    }
     if (message.content) {
       items.push({ role: 'assistant', content: [{ type: 'output_text', text: message.content }] });
     }
@@ -70,12 +90,15 @@ export function toResponsesInput(messages: ChatMessage[]): InputItem[] {
  */
 const REQUEST_REASONING_SUMMARY = false;
 
-export function buildResponsesRequest(options: RequestBodyOptions): Record<string, unknown> {
+export function buildResponsesRequest(
+  options: RequestBodyOptions,
+  caps: RequestCaps = DEFAULT_REQUEST_CAPS,
+): Record<string, unknown> {
   const effort = activeReasoningEffort(options.reasoningEffort);
   return {
     model: options.model,
     stream: true,
-    input: toResponsesInput(options.messages),
+    input: toResponsesInput(options.messages, caps),
     // Responses 的工具定义是扁平结构，openaiTools() 产出的是嵌套 function 形态，这里摊平。
     ...(options.tools.length > 0
       ? {
@@ -89,6 +112,15 @@ export function buildResponsesRequest(options: RequestBodyOptions): Record<strin
       : {}),
     // 仅在显式配置时发送，未配置时输出上限由端点决定。
     ...(options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {}),
+    // 缓存路由与保留时间和 chat.completions 同名同义；被端点拒绝时同样由 degrade 摘掉。
+    ...(caps.promptCacheKey && options.sessionId !== undefined
+      ? { prompt_cache_key: clampPromptCacheKey(options.sessionId) }
+      : {}),
+    ...(caps.promptCacheRetention ? { prompt_cache_retention: PROMPT_CACHE_RETENTION } : {}),
+    // 显式关掉服务端留存：本项目每次把完整 input 重发（不用 previous_response_id），
+    // 留存对功能毫无帮助，却与「跑在用户自己机器上」的定位相悖。端点不认这个参数时由
+    // degrade 摘掉——那是拿隐私换兼容，但好过硬失败。
+    ...(caps.sendStore ? { store: false } : {}),
   };
 }
 
@@ -255,6 +287,7 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
 export const responsesAdapter: ProtocolAdapter = {
   path: '/responses',
   headers: bearerJsonHeaders,
-  buildBody: (input) => JSON.stringify(buildResponsesRequest(input)),
+  buildBody: (input, caps) => JSON.stringify(buildResponsesRequest(input, caps)),
   apply: applyResponsesEvent,
+  degrade: degradeRequestCaps,
 };

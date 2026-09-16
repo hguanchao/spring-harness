@@ -1,3 +1,6 @@
+// 流类型显式从 node:stream/web 取：新版 @types/node 收紧了全局 DOM 流类型，
+// 依赖 lock 重算后全局名不再可用（教训：类型别依赖传递全局）。
+import type { ReadableStreamDefaultReader, ReadableStreamReadResult } from 'node:stream/web';
 import { errorMessage, flattenWhitespace } from '../util.js';
 import { llmError } from './errors.js';
 import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
@@ -82,27 +85,35 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
   let buffer = '';
   let sawData = false;
   let sample = '';
-  for (;;) {
-    const { value, done } = await readIdle(reader, idleMs);
-    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-    const lines = buffer.split(/\r?\n/);
-    buffer = done ? '' : (lines.pop() ?? '');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) {
-        // 保留开头非 SSE 样本，流结束仍无 data: 时用于报错。
-        if (!sawData && sample.length < 240) sample += `${trimmed}\n`;
-        continue;
+  try {
+    for (;;) {
+      const { value, done } = await readIdle(reader, idleMs);
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      const lines = buffer.split(/\r?\n/);
+      buffer = done ? '' : (lines.pop() ?? '');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) {
+          // 保留开头非 SSE 样本，流结束仍无 data: 时用于报错。
+          if (!sawData && sample.length < 240) sample += `${trimmed}\n`;
+          continue;
+        }
+        const payload = trimmed.slice(5).trim();
+        if (!payload) continue;
+        sawData = true;
+        params.onData(payload);
       }
-      const payload = trimmed.slice(5).trim();
-      if (!payload) continue;
-      sawData = true;
-      params.onData(payload);
+      if (done) break;
     }
-    if (done) break;
-  }
-  if (!sawData) {
-    const hint = flattenWhitespace(sample) || '(empty body)';
-    throw new Error(`LLM stream produced no SSE data events (${contentType || 'unknown content-type'}): ${hint.slice(0, 400)}`);
+    if (!sawData) {
+      const hint = flattenWhitespace(sample) || '(empty body)';
+      throw new Error(`LLM stream produced no SSE data events (${contentType || 'unknown content-type'}): ${hint.slice(0, 400)}`);
+    }
+  } finally {
+    // 提前退出（idle 超时 / onData 抛错 / 取消）时流还没读完：不 cancel 的话 undici 会把这条
+    // 连接一直占着直到超时。重试与参数降级都可能连发多次请求，泄漏会按请求数累积。
+    void reader.cancel().catch(() => {
+      // 流已出错时 cancel 也会 reject，这里只关心释放连接。
+    });
   }
 }

@@ -9,6 +9,7 @@ import {
   pairingBalancedCut,
   pushSessionMessage,
   toChatMessages,
+  projectContext,
 } from './compact.js';
 
 function session(partial: Omit<SessionMessage, 'type' | 'ts'>): SessionMessage {
@@ -82,5 +83,74 @@ describe('estimateTokens', () => {
     const bytes = Buffer.byteLength(json, 'utf8');
     assert.ok(bytes > json.length);
     assert.equal(estimateTokens([message]), Math.ceil(bytes / 4));
+  });
+});
+
+describe('stub 边界冻结', () => {
+  const TOOL_BYTES = 40_000;
+  const CONTEXT_WINDOW = 68_750; // 水位线 = 55_000 tokens：6 轮全量超线、4 轮完好低于线
+
+  /** 一轮 = user + assistant(tool_calls) + 大号 tool result。 */
+  function turn(index: number): SessionMessage[] {
+    return [
+      session({ role: 'user', content: `turn ${index}` }),
+      session({
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: `c${index}`, name: 'read_file', arguments: { path: `f${index}` } }],
+      }),
+      session({
+        role: 'tool',
+        content: 'x'.repeat(TOOL_BYTES),
+        toolCallId: `c${index}`,
+        toolName: 'read_file',
+      }),
+    ];
+  }
+
+  const explodingClient = {
+    complete: async (): Promise<never> => {
+      throw new Error('summary path must not run');
+    },
+  } as unknown as Parameters<typeof projectContext>[0]['client'];
+
+  it('冻结后跨轮追加，投影前缀逐字节不变；不冻结则边界前移（对照）', async () => {
+    const mirror1 = [1, 2, 3, 4, 5, 6].flatMap(turn);
+    const first = await projectContext({
+      messages: mirror1,
+      contextWindow: CONTEXT_WINDOW,
+      client: explodingClient,
+    });
+    assert.equal(first.compaction, undefined, 'stub级足够时不应触发摘要');
+    assert.notEqual(first.stubbedFromSession, undefined, '首次 stub 应回报边界');
+    const turn3InFirst = first.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c3');
+    assert.equal(turn3InFirst?.content.includes('[compacted tool result]'), false, '边界之后的轮保持原文');
+
+    // 下一轮：追加第 7 轮，带上冻结边界。
+    const mirror2 = [...mirror1, ...turn(7)];
+    const second = await projectContext({
+      messages: mirror2,
+      contextWindow: CONTEXT_WINDOW,
+      client: explodingClient,
+      stubFromSession: first.stubbedFromSession,
+    });
+    assert.equal(
+      JSON.stringify(second.messages.slice(0, first.messages.length)),
+      JSON.stringify(first.messages),
+      '冻结生效：前一步的投影是本轮前缀的逐字节复制，缓存全额命中',
+    );
+
+    // 对照组：同一会话不冻结，窗口前移，第 3 轮的 tool result 被改写成 stub。
+    const sliding = await projectContext({
+      messages: mirror2,
+      contextWindow: CONTEXT_WINDOW,
+      client: explodingClient,
+    });
+    const turn3Sliding = sliding.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c3');
+    assert.equal(
+      turn3Sliding?.content.includes('[compacted tool result]'),
+      true,
+      '不冻结时边界随轮次前移——这正是要消除的历史中段改写',
+    );
   });
 });

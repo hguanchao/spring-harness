@@ -28,10 +28,11 @@ import {
   shouldSuppressAutoRecapDisplay,
   type RecapContext,
 } from '../agent/recap.js';
-import { scanSkills } from '../skills/scan.js';
+import { scanSkills, skillRoots } from '../skills/scan.js';
 import { createLlmClassifier } from '../approval/auto.js';
 import { APPROVAL_MODES, type ApprovalMode, type ApprovalRequest } from '../approval/policy.js';
 import { updateConfigFile } from '../config/save.js';
+import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
 import type { ApiProtocol } from '../config/load.js';
 import {
   REASONING_EFFORTS,
@@ -41,7 +42,8 @@ import {
 } from '../llm/openai.js';
 import { displayNameForModel } from '../llm/models.js';
 import { readModelCache, writeModelCache } from '../llm/model-cache.js';
-import type { McpHub } from '../mcp/hub.js';
+import type { McpHub, McpReloadResult } from '../mcp/hub.js';
+import type { McpPreferences, McpSourceReport } from '../mcp/sources.js';
 import type { JobBoard } from '../runtime/jobs.js';
 import { jobNotificationText } from '../runtime/jobs.js';
 import type { WorktreeStore } from '../runtime/worktrees.js';
@@ -82,6 +84,7 @@ import {
 import { matchesAppKey } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './approver.js';
 import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
+import { mcpStateLabel, renderMcpReport, renderMcpTools, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
 import { AssistantMessageComponent } from './components/assistant-message.js';
 import { CustomEditor } from './components/custom-editor.js';
@@ -111,7 +114,19 @@ export interface TuiDeps {
   sandbox: SandboxHandle;
   session: JsonlSession;
   mcp: McpHub;
-  mcpServerCount: number;
+  /**
+   * 重新发现并装载 MCP server（`/mcps` 里按 r、改完启停、或导入之后调用）。
+   *
+   * 必需：启动时的首次装载与这里的刷新走的是同一条装配路径，缺了它就只能重启——
+   * 而「改完配置要重启」正是这轮要消掉的那件事。
+   */
+  reloadMcp(): Promise<McpReloadResult>;
+  /** 重新读 `[mcp]` 偏好段；写回 config.toml 之后调用。 */
+  refreshMcpPreferences(): void;
+  /** 生效中的 MCP 启停偏好，供弹窗显示当前状态。 */
+  mcpPreferences: McpPreferences;
+  /** 最近一次发现的候选来源读取结果。 */
+  mcpSources(): readonly McpSourceReport[];
   todos: TodoList;
   jobs: JobBoard;
   approvalMode: ApprovalMode;
@@ -120,6 +135,13 @@ export interface TuiDeps {
   effort?: ReasoningEffort;
   /** /model 与 /effort 改动后按新参数重建 client。 */
   makeClient(options: { model: string; api: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
+  /**
+   * 辅助调用（压缩摘要 / auto 审查器）的 client；模型名省略时返回 undefined。
+   *
+   * 必需而非可选：此前这条线没接上，配置了 `compact_model` / `review_model` 也一直用主模型，
+   * 是个静默失效的省钱开关。做成必需，调用方漏接就编译不过。
+   */
+  makeAuxClient(model: string | undefined): LlmClient | undefined;
   fetchModels(): Promise<readonly string[]>;
   /** 上游模型目录的磁盘缓存路径。 */
   modelCachePath?: string;
@@ -133,6 +155,8 @@ export interface TuiDeps {
   spillThreshold?: number;
   /** 子代理嵌套深度预算（config.subagent_max_depth）；省略用内置默认 1（扁平）。 */
   maxSubagentDepth?: number;
+  /** 会话累计 token 预算（config.max_session_tokens）；省略或 0 = 不限制。 */
+  maxSessionTokens?: number;
   /** 子代理 worktree 隔离的工作树仓库（isolation: worktree 用）。 */
   worktrees?: WorktreeStore;
   /** 注入终端实现；省略用 ProcessTerminal（测试用假终端驱动整条链路）。 */
@@ -156,7 +180,8 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'help', label: '/help', hint: 'List commands and key bindings' },
   { id: 'new', label: '/new', hint: 'Start a new session' },
   { id: 'sessions', label: '/sessions', hint: 'Browse sessions, or switch by id' },
-  { id: 'recap', label: '/recap', hint: 'Summarize the session so far' },
+  { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises' },
+  { id: 'mcps', label: '/mcps', hint: 'Manage MCP servers: status, enable/disable, add, remove, reload' },
   { id: 'plan', label: '/plan', hint: 'Enter plan mode, or /plan off to leave' },
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
@@ -164,12 +189,11 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'approval', label: '/approval', hint: 'Set approval mode: ask | auto | yolo' },
 ];
 
-/** 命令别名（对齐 grok-build 的 `/summarize`）：只影响输入，不进命令面板。 */
-const COMMAND_ALIASES: Readonly<Record<string, string>> = { summarize: 'recap' };
+/** 选择列表里 server 条目的 value 前缀，避免和上方的固定动作条目撞名。 */
+const SERVER_PREFIX = 'server:';
 
 const COMMAND_NAMES = new Set<string>([
   ...COMMANDS.map((command) => command.id),
-  ...Object.keys(COMMAND_ALIASES),
   'exit',
 ]);
 
@@ -231,8 +255,10 @@ class InteractiveMode implements ApprovalUi {
   private session: JsonlSession;
   private client: LlmClient;
   private readonly approver: InteractiveApprover;
-  private compactClient?: LlmClient;
-  private reviewClient?: LlmClient;
+  /** 压缩摘要专用 client（config.compact_model）；未配置为 undefined，runTurn 回退主 client。 */
+  private readonly compactClient?: LlmClient;
+  /** auto 审批审查器专用 client（config.review_model）；未配置为 undefined。 */
+  private readonly reviewClient?: LlmClient;
 
   private model: string;
   private effort?: ReasoningEffort;
@@ -331,6 +357,9 @@ class InteractiveMode implements ApprovalUi {
     this.contextWindow = deps.contextWindow;
 
     this.client = this.buildClient();
+    // 辅助 client 必须在这里建好：下面构造审批器时要用 reviewClient，runTurn 时要用 compactClient。
+    this.compactClient = deps.makeAuxClient(deps.compactModel);
+    this.reviewClient = deps.makeAuxClient(deps.reviewModel);
     this.approver = new InteractiveApprover(
       this,
       this.approval === 'auto'
@@ -645,6 +674,7 @@ class InteractiveMode implements ApprovalUi {
         contextWindow: this.contextWindow,
         depth: this.sessionDepth,
         maxSubagentDepth: this.deps.maxSubagentDepth,
+        maxSessionTokens: this.deps.maxSessionTokens,
         listener: this.listener,
         signal: controller.signal,
         mcp: this.deps.mcp,
@@ -1158,7 +1188,7 @@ class InteractiveMode implements ApprovalUi {
       effort: this.effort,
       approvalMode: this.approval,
       sandboxMode: this.deps.sandbox.status.mode,
-      mcpServerCount: this.deps.mcpServerCount,
+      mcpServerCount: this.deps.mcp.listServers().length,
       planMode: this.plan.active,
     };
   }
@@ -1225,7 +1255,7 @@ class InteractiveMode implements ApprovalUi {
 
   private async handleCommand(input: string): Promise<void> {
     const [rawName, ...rest] = input.slice(1).split(/\s+/);
-    const name = COMMAND_ALIASES[rawName.toLowerCase()] ?? rawName.toLowerCase();
+    const name = rawName.toLowerCase();
     const argument = rest.join(' ').trim();
 
     if (!COMMAND_NAMES.has(name)) {
@@ -1243,8 +1273,11 @@ class InteractiveMode implements ApprovalUi {
       case 'sessions':
         await this.commandSessions(argument);
         break;
-      case 'recap':
-        await this.commandRecap(false);
+      case 'skills':
+        await this.commandSkills();
+        break;
+      case 'mcps':
+        await this.commandMcps();
         break;
       case 'plan':
         await this.commandPlan(argument);
@@ -1284,6 +1317,199 @@ class InteractiveMode implements ApprovalUi {
     await showMessageDialog(this.ui, { title: 'Help', text: lines.join('\n') });
   }
 
+  /**
+   * 重新扫一遍技能目录，而不是复用本轮提示词里那份目录。
+   *
+   * 会话中途新建一个 skill 是正常用法，当场扫就能立刻看到；代价只是读几个 SKILL.md 的文件头。
+   * 与当前轮次提示词有分歧时以本弹窗为准——下一轮的提示词就会跟上。
+   */
+  private async commandSkills(): Promise<void> {
+    const { catalog, warnings } = scanSkills(this.deps.workspaceRoot);
+    await showMessageDialog(this.ui, {
+      title: 'Skills',
+      text: renderSkillsReport({ catalog, warnings, roots: skillRoots(this.deps.workspaceRoot) }),
+      hint: 'Esc close · re-scanned on every open',
+    });
+  }
+
+  /**
+   * MCP 管理器。
+   *
+   * 「选一次 → 做一件事 → 重新选」的循环，而不是一次性只读弹窗：改完开关要能立刻看到新
+   * 状态，否则用户只能反复敲命令来确认刚才那一下到底生效没有。Esc 退出。
+   *
+   * 每一轮都重新取状态：server 崩溃后的懒重连、以及外部配置的改动都会改变它。
+   */
+  private async commandMcps(): Promise<void> {
+    for (;;) {
+      const servers = this.deps.mcp.listServers();
+      const choice = await showSelectDialog(this.ui, {
+        title: `MCP servers (${servers.length})`,
+        maxVisible: 14,
+        hint: 'Enter act · Esc close',
+        items: [
+          { value: 'reload', label: 'Reload from disk', description: 're-read every source and reconnect' },
+          { value: 'report', label: 'Show full report', description: 'sources scanned, warnings, per-server tools' },
+          { value: 'add', label: 'Add a server…', description: `append to ${this.deps.configPath}` },
+          ...servers.map((server) => ({
+            value: `server:${server.name}`,
+            label: `${server.name} — ${mcpStateLabel(server)}`,
+            description: `${server.target} · from ${server.origin.label}`,
+          })),
+        ],
+      });
+      if (choice === undefined) return;
+      if (choice === 'report') {
+        await showMessageDialog(this.ui, {
+          title: 'MCP servers',
+          text: renderMcpReport({
+            servers: this.deps.mcp.listServers(),
+            warnings: [...(this.deps.mcpWarnings ?? [])],
+            sources: [...this.deps.mcpSources()],
+          }),
+          hint: 'Esc close · status is live',
+        });
+        continue;
+      }
+      if (choice === 'reload') {
+        await this.reloadMcpWithNotice();
+        continue;
+      }
+      if (choice === 'add') {
+        await this.addMcpServer();
+        continue;
+      }
+      await this.manageMcpServer(choice.slice(SERVER_PREFIX.length));
+    }
+  }
+
+  /**
+   * 重载 MCP，并把结果讲清楚。
+   *
+   * 只说「已重载」等于没说：用户关心的是**哪个**连上了、哪个被关掉了。
+   */
+  private async reloadMcpWithNotice(): Promise<void> {
+    const result = await this.deps.reloadMcp();
+    const parts: string[] = [];
+    if (result.added.length > 0) parts.push(`+ ${result.added.join(', ')}`);
+    if (result.restarted.length > 0) parts.push(`~ ${result.restarted.join(', ')}`);
+    if (result.removed.length > 0) parts.push(`- ${result.removed.join(', ')}`);
+    this.addNotice(
+      parts.length === 0 ? 'MCP: reloaded, nothing changed' : `MCP: reloaded · ${parts.join(' · ')}`,
+      'dim',
+    );
+    for (const warning of this.deps.mcpWarnings ?? []) this.addNotice(warning, 'warn');
+  }
+
+  private async addMcpServer(): Promise<void> {
+    const rawName = await showInputDialog(this.ui, {
+      title: 'Server name',
+      hint: 'letters, digits, - and _ · Esc cancel',
+    });
+    if (rawName === undefined) return;
+    const name = rawName.trim();
+    // 名字会进 TOML、也会成为工具命名空间，限制字符集比事后处理转义简单得多。
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+      this.addNotice(`Invalid server name (letters, digits, - and _ only): ${name}`, 'warn');
+      return;
+    }
+    const rawLine = await showInputDialog(this.ui, {
+      title: `Command for ${name}`,
+      hint: 'e.g. npx -y @modelcontextprotocol/server-filesystem . · quote paths with spaces',
+    });
+    if (rawLine === undefined) return;
+    const parsed = splitCommandLine(rawLine.trim());
+    if (parsed === undefined) {
+      this.addNotice('Unbalanced quotes in that command — nothing written.', 'warn');
+      return;
+    }
+    upsertSphMcpServer(this.deps.configPath, { name, command: parsed.command, args: parsed.args });
+    this.addNotice(`Added ${name} to ${this.deps.configPath}`, 'success');
+    await this.reloadMcpWithNotice();
+
+    // 写进去却被项目级同名条目盖住是「设置不生效」的典型来源，必须当场说出来。
+    const written = this.deps.mcp.listServers().find((server) => server.name === name);
+    if (written !== undefined && written.origin.path !== this.deps.configPath) {
+      this.addNotice(
+        `${name} is overridden by ${written.origin.label} (closer/project config wins)`,
+        'warn',
+      );
+    }
+  }
+
+  private async manageMcpServer(name: string): Promise<void> {
+    const server = this.deps.mcp.listServers().find((item) => item.name === name);
+    if (server === undefined) return; // 列表是上一轮取的，条目可能已经不在了
+    type Action = { value: string; label: string; description?: string };
+    const items: Action[] = [
+      {
+        value: 'toggle',
+        label: server.enabled ? 'Disable' : 'Enable',
+        // 外部来源只读，开关记在 sph 自己的配置里——写别人的文件是不可逆的副作用。
+        description: server.origin.editable
+          ? `edit ${server.origin.path}`
+          : `recorded in ${this.deps.configPath} as a local preference`,
+      },
+    ];
+    if (server.connected) {
+      items.push({ value: 'tools', label: 'Show tools', description: `${server.tools.length} available` });
+    }
+    if (server.origin.editable) {
+      items.push({ value: 'remove', label: 'Remove from config', description: server.origin.path });
+    }
+    const action = await showSelectDialog(this.ui, {
+      title: `${server.name} — ${mcpStateLabel(server)}`,
+      bodyText: `${server.target}\nfrom ${server.origin.label}`,
+      items,
+      maxVisible: 4,
+    });
+
+    if (action === 'toggle') {
+      const enabled = !server.enabled;
+      setSphMcpPreference(this.deps.configPath, server.name, {
+        enabled,
+        sourceEnabled: server.sourceEnabled ?? server.enabled,
+      });
+      this.deps.refreshMcpPreferences();
+      await this.reloadMcpWithNotice();
+      return;
+    }
+    if (action === 'tools') {
+      await showMessageDialog(this.ui, {
+        title: `${server.name} tools`,
+        text: renderMcpTools(server),
+        hint: 'Esc close',
+      });
+      return;
+    }
+    if (action === 'remove') {
+      const confirmed = await showConfirmDialog(this.ui, {
+        title: `Remove ${server.name}?`,
+        message: `This deletes the entry from ${server.origin.path}. Nothing else is touched.`,
+        confirmLabel: 'Remove',
+      });
+      if (!confirmed) return;
+      const removed = removeSphMcpServer(server.origin.path, server.name);
+      this.addNotice(
+        removed ? `Removed ${server.name} from ${server.origin.path}` : `${server.name} was already gone`,
+        removed ? 'success' : 'warn',
+      );
+      // 名字没了，可能还留着一条只认识它的本地偏好；留着会在同名条目重新出现时突然生效。
+      setSphMcpPreference(this.deps.configPath, server.name, { enabled: true, sourceEnabled: true });
+      this.deps.refreshMcpPreferences();
+      await this.reloadMcpWithNotice();
+    }
+  }
+
+  /**
+   * 把外部来源的 server 固化进 sph 自己的配置。
+   *
+   * 两条路径都要能走：外部来源平时是**静默读取**的（保持无缝），但一旦用户决定「就按现在
+   * 这份来」，继续同时读两处就会让外部文件日后的改动继续悄悄影响运行时。导入即截止。
+   *
+   * 落点可选：用户级适合个人常用的 server，项目级适合要跟着仓库提交、给同事共享的。
+   * 传 undefined 走用户级。
+   */
   private async commandNewSession(): Promise<void> {
     const confirmed = await showConfirmDialog(this.ui, {
       title: 'Start a new session?',

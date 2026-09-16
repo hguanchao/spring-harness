@@ -1,5 +1,6 @@
 import { errorMessage } from '../../util.js';
 import { canonicalize } from '../../workspace/boundary.js';
+import { hasOtherLiveSession } from '../../session/lock.js';
 import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../open.js';
 import { SandboxError, type SandboxMode, type SandboxStatus } from '../types.js';
 import { grantWrite, revokeWrite } from './acl.js';
@@ -24,12 +25,19 @@ export interface WindowsAclOptions {
   tempDir: string;
 }
 
-/** Windows restricted-token 后端。强制执行按设计是 partial。 */
+/**
+ * Windows restricted-token 后端。强制执行按设计是 partial。
+ *
+ * ACL 生命周期：`workspace` 档位会给工作区与 `~/.sph` 各加一条可继承的写授权（给受限 token
+ * 持有的能力 SID），退出时全部撤销，把 DACL 还原到授权之前。`~/.sph` 的授权跨工作区共享
+ * （见 dispose 与 session/lock.ts 的 hasOtherLiveSession），所以撤销要看还有没有别的会话在跑。
+ */
 export class WindowsAclSandbox implements SandboxHandle {
   readonly status: SandboxStatus;
   readonly tempDir: string;
   private token: Handle | null = null;
-  private readonly revocable: { path: string; sid: Handle }[] = [];
+  /** 退出时要撤销的授权。`shared` = 所有工作区会话共用同一路径，撤销前要确认没有别人在跑。 */
+  private readonly revocable: { path: string; sddl: string; shared: boolean }[] = [];
   private readonly owned: Handle[] = [];
 
   constructor(private readonly options: WindowsAclOptions) {
@@ -49,11 +57,20 @@ export class WindowsAclSandbox implements SandboxHandle {
       const writeSids: Buffer[] = [];
       if (this.options.mode === 'workspace') {
         const workspaceSid = workspaceWriteSid(workspace);
+        // ~/.sph 的 SID 由 sphHome 路径派生，不含工作区信息：所有会话算出来是同一个，
+        // 因此这条授权是跨工作区共享的（Linux 后端同样是全局 --bind sphHome）。
         const sphSid = workspaceWriteSid(`${sphHome}\0sph`);
         const tmpSid = tempWriteSid(temp);
-        grantWrite(workspace, workspaceSid);
-        grantWrite(sphHome, sphSid);
-        this.revocable.push({ path: temp, sid: grantWrite(temp, tmpSid) });
+        const grants: Array<{ path: string; sddl: string; shared: boolean }> = [
+          { path: workspace, sddl: workspaceSid, shared: false },
+          { path: sphHome, sddl: sphSid, shared: true },
+          { path: temp, sddl: tmpSid, shared: false },
+        ];
+        for (const grant of grants) {
+          grantWrite(grant.path, grant.sddl);
+          // 授一条记一条：只撤销真正生效过的，中途失败也不会去动没改过的 DACL。
+          this.revocable.push(grant);
+        }
         writeSids.push(sidBuffer(workspaceSid), sidBuffer(sphSid), sidBuffer(tmpSid));
       }
       const token = createRestrictedToken(
@@ -117,9 +134,14 @@ export class WindowsAclSandbox implements SandboxHandle {
   }
 
   dispose(): void {
+    // ~/.sph 的授权是跨工作区共享的：另一个工作区的会话正靠它让 shell 写 ~/.sph，而它在本进程
+    // 退出前不会重新申请。还有别人活着就跳过这一条，留给最后一个退出的进程收——否则会留下一个
+    // 「授权被别的进程悄悄撤掉」的间歇性写失败，比脏 ACE 难查得多。
+    const dropShared = !hasOtherLiveSession();
     for (const grant of this.revocable) {
+      if (grant.shared && !dropShared) continue;
       try {
-        revokeWrite(grant.path, grant.sid);
+        revokeWrite(grant.path, grant.sddl);
       } catch {
         // 退出时清理失败不掩盖启动错误
       }

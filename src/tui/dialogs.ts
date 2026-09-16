@@ -124,6 +124,7 @@ abstract class DialogBody implements Component {
 	}
 }
 
+
 /**
  * 只读长文本视口：把 Markdown 渲染结果裁到分到的行数，↑/↓、PgUp/PgDn、Home/End 与滚轮
  * 滚动。行数每帧按预算重算，终端尺寸变化即时生效。

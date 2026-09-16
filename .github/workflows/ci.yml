@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      # 两个平台都跑完再汇总，便于一次看到全部失败。
+      fail-fast: false
+      matrix:
+        # 不含 macOS：沙箱后端只支持 Windows（受限令牌 + ACL）与 Linux（bwrap），
+        # macOS 上启动即被拒绝，那是设计而非缺陷。
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # 不加 --ignore-scripts：koffi 需要它的安装脚本（原生绑定）。
+      - run: npm ci
+      - run: npm run build
+      # npm test 会先跑 pretest → typecheck（tsconfig.test.json），
+      # 测试文件的类型错误在这里就会被挡住。
+      - run: npm test

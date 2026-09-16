@@ -2,7 +2,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { runTurn } from '../agent/loop.js';
-import type { AgentListener } from '../agent/events.js';
+import { createJsonOutput, createTextOutput } from './output.js';
 import { HeadlessApprover, type ApprovalMode } from '../approval/policy.js';
 import { createLlmClassifier } from '../approval/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
@@ -10,7 +10,7 @@ import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { sphModelsPath, sphSpillRoot } from '../home.js';
 import { SpillStore } from '../runtime/spill.js';
 import type { TokenUsage } from '../llm/openai.js';
-// 注意：TUI 模块**不要**在顶层 import。它（连同 marked / highlight.js）约 300ms 的加载
+// 注意：TUI 模块**不要**在顶层 import。它（连同 marked）约 300ms 的加载
 // 成本只有交互路径才值得付；--help / sessions / export / -p 全都不需要它。
 // 下面两处按需动态 import。
 import { sessionDirFor } from '../session/path.js';
@@ -72,6 +72,9 @@ async function bootstrap(
   try {
     return await bootstrapRuntime({
       workspaceRoot,
+      // 项目级配置的查找链从**启动目录**开始，而不是 workspaceRoot：在仓库的子目录里
+      // 启动时，「最近的配置优先」才有意义。
+      startDir: process.cwd(),
       sandboxOverride: args.sandbox,
       trust: args.trust,
       untrusted,
@@ -133,7 +136,10 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       sandbox: rt.sandbox,
       session: rt.session,
       mcp: rt.mcp,
-      mcpServerCount: rt.config.mcpServers.length,
+      reloadMcp: () => rt.reloadMcp(),
+      refreshMcpPreferences: () => rt.refreshMcpPreferences(),
+      mcpPreferences: rt.mcpPreferences,
+      mcpSources: () => rt.mcpSources,
       todos: rt.todos,
       jobs: rt.jobs,
       approvalMode: args.approval ?? rt.config.approval ?? 'ask',
@@ -145,6 +151,7 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       effort: args.effort ?? rt.config.reasoningEffort,
       maxTokens: args.maxTokens ?? rt.config.maxTokens,
       makeClient: (overrides) => rt.makeClient(overrides),
+      makeAuxClient: (model) => rt.makeAuxClient(model),
       fetchModels: () => listAvailableModels(rt.config.baseUrl, rt.config.apiKey),
       // 模型目录缓存放用户主目录：/model 靠它在启动时直接命中，不必现等上游一个 RTT。
       modelCachePath: sphModelsPath(),
@@ -155,6 +162,7 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       spillRoot: sphSpillRoot(),
       spillThreshold: rt.config.spillThreshold,
       maxSubagentDepth: rt.config.subagentMaxDepth,
+      maxSessionTokens: rt.config.maxSessionTokens,
       worktrees: rt.worktrees,
       mcpWarnings: rt.mcpWarnings,
       ...(ui === undefined ? {} : { ui }),
@@ -180,49 +188,18 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       api: args.api ?? config.api,
       effort: args.effort ?? config.reasoningEffort,
     });
-    // 辅助调用（压缩摘要 / auto 审查器）可以走更便宜的模型；未配置时复用主 client。
-    const aux = (model: string | undefined) =>
-      model === undefined
-        ? undefined
-        : runtime.makeClient({ model, api: args.api ?? config.api, effort: config.reasoningEffort });
-    const compactClient = aux(config.compactModel);
-    const reviewClient = aux(config.reviewModel);
+    // 辅助调用（压缩摘要 / auto 审查器）可以走更便宜的模型或另一个厂商的端点；
+    // 未配置时 makeAuxClient 返回 undefined，下面各处自动回退主 client。
+    const compactClient = runtime.makeAuxClient(config.compactModel);
+    const reviewClient = runtime.makeAuxClient(config.reviewModel);
     const recordAuxUsage = (usage: TokenUsage, purpose: string): void => {
       session.appendEvent('usage', { ...usage, purpose });
     };
-    const listener: AgentListener = (event) => {
-      switch (event.type) {
-        case 'text':
-          process.stdout.write(event.text);
-          break;
-        case 'tool_start':
-          process.stderr.write(`\n[${event.name}]\n`);
-          break;
-        case 'tool_end':
-          process.stderr.write(`${event.content.slice(0, 400)}\n`);
-          break;
-        case 'subagent_start':
-          // 子代理内部事件封在 subagent_event 里（default 丢弃）：headless 只报起止两行，
-          // 详情留在子会话 JSONL，不往终端刷子代理的每一步。
-          process.stderr.write(
-            `\n[task] ${event.description} (${event.childType}${event.mode === 'background' ? ', background' : ''})\n`,
-          );
-          break;
-        case 'subagent_end':
-          process.stderr.write(
-            `[task] ${event.ok ? 'done' : 'FAILED'} in ${(event.durationMs / 1000).toFixed(1)}s${event.ok ? '' : `: ${event.summary.slice(0, 200)}`}\n`,
-          );
-          break;
-        case 'status':
-        case 'error':
-          process.stderr.write(`${event.text}\n`);
-          break;
-        default:
-          break;
-      }
-    };
     // 恢复的会话带着跨轮次状态：任务目标与上次失败要进提示词，否则「继续」时模型是失忆的。
     const folded = foldSessionState(session.readAll());
+    const output = args.outputFormat === 'json'
+      ? createJsonOutput({ sessionId: session.id })
+      : createTextOutput();
     await runTurn({
       prompt,
       workspaceRoot,
@@ -238,7 +215,8 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       contextWindow: config.contextWindow,
       depth: folded.depth,
       maxSubagentDepth: config.subagentMaxDepth,
-      listener,
+      maxSessionTokens: config.maxSessionTokens,
+      listener: output.listener,
       mcp,
       todos,
       jobs,
@@ -253,7 +231,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       spill: new SpillStore(join(sphSpillRoot(), session.id), config.spillThreshold),
       worktrees: runtime.worktrees,
     });
-    process.stdout.write('\n');
+    process.stdout.write(output.finalLine());
   } finally {
     runtime.cleanup();
   }

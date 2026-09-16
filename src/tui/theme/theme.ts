@@ -4,11 +4,14 @@
  */
 
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from '../core/index.js';
-import { highlight, normalizeLanguage } from '../syntax/highlight.js';
 import { PALETTE, type ThemeColor } from './palettes.js';
 
 export type { ThemeColor };
-export type ColorMode = 'truecolor' | '256color';
+/**
+ * 'ansi' = 终端默认配色：只发基础 ANSI 码（31–37/90–97 + 39/49），实际颜色由
+ * 终端主题决定——sph 不再跟用户的终端配色打架。SPH_THEME=terminal 显式选用。
+ */
+export type ColorMode = 'truecolor' | '256color' | 'ansi';
 
 let colorEnabled = detectColorEnabled();
 
@@ -25,6 +28,8 @@ function sgr(open: string, close: string, text: string): string {
 }
 
 function detectColorMode(): ColorMode {
+  // 显式优先：SPH_THEME=terminal 表示「跟随终端主题」，不再自己上色。
+  if ((process.env.SPH_THEME ?? '').toLowerCase() === 'terminal') return 'ansi';
   const colorterm = (process.env.COLORTERM ?? '').toLowerCase();
   if (colorterm.includes('truecolor') || colorterm.includes('24bit')) return 'truecolor';
   const term = (process.env.TERM ?? '').toLowerCase();
@@ -105,6 +110,30 @@ function hexTo256(hex: string): number {
   return rgbTo256(r, g, b);
 }
 
+/**
+ * ansi 模式的语义色 → 基础 SGR 码表。颜色完全由终端主题的 16 色调色板决定：
+ * primary/标题/列表/进行中 = 亮品红（95），正文 = 终端默认前景（39），
+ * 弱化系 = 亮黑（90），行内码 = 亮蓝（94），状态三色 = 92/91/93。
+ * 未映射的键（如已废弃的 syntax*）回落默认前景，不会抛错。
+ */
+const ANSI_FG: Record<string, string> = {
+  primary: '95', accent: '95', thinkingText: '95', selectedMark: '95',
+  mdHeading: '95', mdH1: '95', mdH2: '95', mdH3: '95', mdH4: '95', mdH5: '95', mdH6: '95',
+  mdListBullet: '95',
+  text: '39', mdText: '39', userMessageText: '39',
+  muted: '90', dim: '90', border: '90', borderMuted: '90',
+  toolTitle: '90', toolOutput: '90', mdCodeBlock: '90', mdCodeBlockBorder: '90',
+  mdQuote: '90', mdQuoteBorder: '90', mdHr: '90', mdLinkUrl: '90', scrollbarTrack: '90',
+  mdLink: '97', mdCode: '94',
+  success: '92', error: '91', warning: '93',
+};
+
+/** ansi 模式的背景码：画布交还终端默认底（49）——「跟随终端」的核心；面层用亮黑（100）。 */
+const ANSI_BG: Record<string, string> = {
+  bg: '49',
+  selectedBg: '100', userMessageBg: '100', toolPendingBg: '100', scrollbarThumb: '100',
+};
+
 function fgAnsi(color: string, mode: ColorMode): string {
   if (mode === 'truecolor') {
     const { r, g, b } = hexToRgb(color);
@@ -126,6 +155,14 @@ export class Theme {
   private readonly bgColors = new Map<string, string>();
 
   constructor(palette: Record<string, string>, mode: ColorMode = detectColorMode()) {
+    if (mode === 'ansi') {
+      // 与 truecolor 分支同语义：无条件预编译（NO_COLOR 的历史缺口两者共有，不在此处单边修）。
+      for (const key of Object.keys(palette)) {
+        this.fgColors.set(key, `\x1b[${ANSI_FG[key] ?? '39'}m`);
+        this.bgColors.set(key, `\x1b[${ANSI_BG[key] ?? '49'}m`);
+      }
+      return;
+    }
     for (const [key, value] of Object.entries(palette)) {
       this.fgColors.set(key, fgAnsi(value, mode));
       this.bgColors.set(key, bgAnsi(value, mode));
@@ -172,95 +209,14 @@ export const theme = new Theme(PALETTE);
 
 /** OSC 11 用真 hex，256 色终端也能拿到 #141414，不跟 SGR 量化走。 */
 export function oscSetCanvasBackground(): string {
+  // ansi 模式下画布就是终端自己的底色——强行 OSC 11 反而把用户的主题盖掉。
+  if (detectColorMode() === 'ansi') return '';
   return `\x1b]11;${PALETTE.bg}\x07`;
 }
 
 /** 退出 TUI 时还原终端默认底；1049l 不会自动清掉 OSC 11。 */
 export function oscResetCanvasBackground(): string {
   return `\x1b]111\x07`;
-}
-
-const HIGHLIGHT_CACHE_LIMIT = 32;
-const highlightCache = new Map<string, string[]>();
-
-/**
- * 带语言围栏的 scope → 色。只有关键字/函数/字符串/类型走蓝，其余归中性灰。
- * 行内码不走这张表。
- */
-const highlightTheme: Record<string, (text: string) => string> = {
-  comment: (t) => theme.italic(theme.fg('syntaxComment', t)),
-  doctag: (t) => theme.italic(theme.fg('syntaxComment', t)),
-  quote: (t) => theme.italic(theme.fg('syntaxComment', t)),
-  keyword: (t) => theme.fg('syntaxKeyword', t),
-  'selector-tag': (t) => theme.fg('syntaxKeyword', t),
-  'meta-keyword': (t) => theme.fg('syntaxKeyword', t),
-  literal: (t) => theme.fg('syntaxKeyword', t),
-  'built_in': (t) => theme.fg('syntaxKeyword', t),
-  title: (t) => theme.fg('syntaxFunction', t),
-  function: (t) => theme.fg('syntaxFunction', t),
-  variable: (t) => theme.fg('mdCodeBlock', t),
-  params: (t) => theme.fg('mdCodeBlock', t),
-  property: (t) => theme.fg('mdCodeBlock', t),
-  'template-variable': (t) => theme.fg('mdCodeBlock', t),
-  attr: (t) => theme.fg('mdCodeBlock', t),
-  attribute: (t) => theme.fg('mdCodeBlock', t),
-  'selector-id': (t) => theme.fg('mdCodeBlock', t),
-  'selector-class': (t) => theme.fg('mdCodeBlock', t),
-  string: (t) => theme.fg('syntaxString', t),
-  subst: (t) => theme.fg('syntaxString', t),
-  symbol: (t) => theme.fg('syntaxString', t),
-  regexp: (t) => theme.fg('syntaxString', t),
-  addition: (t) => theme.fg('syntaxString', t),
-  deletion: (t) => theme.fg('mdCodeBlock', t),
-  number: (t) => theme.fg('syntaxKeyword', t),
-  type: (t) => theme.bold(theme.fg('syntaxFunction', t)),
-  class: (t) => theme.bold(theme.fg('syntaxFunction', t)),
-  operator: (t) => theme.fg('mdCodeBlock', t),
-  punctuation: (t) => theme.fg('mdCodeBlock', t),
-  tag: (t) => theme.fg('syntaxKeyword', t),
-  name: (t) => theme.fg('syntaxKeyword', t),
-  bullet: (t) => theme.fg('syntaxKeyword', t),
-  meta: (t) => theme.fg('syntaxAnnotation', t),
-  default: (t) => theme.fg('mdCodeBlock', t),
-};
-
-/** grok-build：无语言标记或 text/plaintext 的围栏不当代码高亮，整块走中性灰。 */
-const UNTAGGED_LANGS = new Set(['plaintext', 'text', 'txt', 'output', 'ansi', 'console', 'raw']);
-
-/**
- * 无标签围栏：不对词法、不上蓝，整块中性灰。
- * 目录树/配置片段是代码块，不该跟正文一样亮。
- */
-function plainCodeLines(code: string): string[] {
-  return code.split('\n').map((line) => theme.fg('mdCodeBlock', line));
-}
-
-/**
- * 高亮代码块。无语言 / text / 未知语言整块中性灰，不猜词法；
- * 只有 highlight.js 认得出的语言标签才上蓝色语法色。
- */
-export function highlightCode(code: string, lang?: string): string[] {
-  const validLang = normalizeLanguage(lang);
-  if (!validLang || UNTAGGED_LANGS.has(validLang)) return plainCodeLines(code);
-  const key = `${validLang}\0${code}`;
-  const cached = highlightCache.get(key);
-  if (cached) {
-    highlightCache.delete(key);
-    highlightCache.set(key, cached);
-    return cached;
-  }
-  try {
-    const lines = highlight(code, { language: validLang, ignoreIllegals: true, theme: highlightTheme }).split('\n');
-    highlightCache.set(key, lines);
-    if (highlightCache.size > HIGHLIGHT_CACHE_LIMIT) {
-      const oldest = highlightCache.keys().next().value;
-      if (oldest !== undefined) highlightCache.delete(oldest);
-    }
-    return lines;
-  } catch {
-    // highlight.js 抛错时同样整块走中性灰：半块蓝半块灰比全灰更难读。
-    return plainCodeLines(code);
-  }
 }
 
 const HEADING_COLORS = ['mdH1', 'mdH2', 'mdH3', 'mdH4', 'mdH5', 'mdH6'] as const;
@@ -288,7 +244,6 @@ export function getMarkdownTheme(): MarkdownTheme {
     emphasis: (text: string) => theme.italic(theme.fg('muted', text)),
     underline: (text: string) => theme.underline(text),
     strikethrough: (text: string) => theme.strikethrough(text),
-    highlightCode: (code: string, lang?: string): string[] => highlightCode(code, lang),
   };
 }
 

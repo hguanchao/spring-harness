@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sphSessionsRoot } from '../home.js';
 
 const LOCK_NAME = 'session.lock';
 
@@ -42,4 +43,40 @@ export function acquireSessionLock(sessionDir: string, pid = process.pid): () =>
       // 进程退出时锁文件可能已被外部清掉
     }
   };
+}
+
+/**
+ * 是否还有**别的** sph 进程活着（跨工作区）。
+ *
+ * 动机：Windows 沙箱对 `~/.sph` 的写授权是**机器级共享**的——能力 SID 由 sphHome 路径派生，
+ * 所有工作区算出来是同一个。退出时撤销会连累另一个正在跑的工作区里的 shell（它们的受限 token
+ * 正靠这条授权写 ~/.sph），而那条会话在本进程退出前不会重新申请授权。所以撤销前先问一句，
+ * 还有别人活着就留给最后一个退出的进程收。
+ *
+ * 工作区授权没有这个问题：它受会话锁保护，同一工作区同时只允许一个实例。
+ *
+ * 判断依据就是各工作区目录里的 session.lock（已有状态，不新增簿记）。扫描不到或读不出来
+ * 一律当作「没有别人」——宁可多撤销一次，也不要把授权永久留在盘上。
+ */
+export function hasOtherLiveSession(ownPid = process.pid, root = sphSessionsRoot()): boolean {
+  let names: string[];
+  try {
+    if (!existsSync(root)) return false;
+    names = readdirSync(root);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    const path = lockPath(join(root, name));
+    let raw: string;
+    try {
+      if (!existsSync(path)) continue;
+      raw = readFileSync(path, 'utf8').trim();
+    } catch {
+      continue;
+    }
+    const pid = Number(raw);
+    if (Number.isInteger(pid) && pid > 0 && pid !== ownPid && isPidAlive(pid)) return true;
+  }
+  return false;
 }

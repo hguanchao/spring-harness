@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { assertInsideWorkspace, looksLikeText, TEXT_SNIFF_BYTES, toWorkspaceRelative } from '../workspace/boundary.js';
 import { asString, clip, type ToolContext, type ToolResult, type ToolSpec } from './types.js';
@@ -9,25 +9,33 @@ const HIT_LIMIT = 200;
 /** 目录递归深度上限，防符号链接环与超深目录导致栈溢出。 */
 const MAX_DEPTH = 24;
 
+/**
+ * 递归收集候选文件。
+ *
+ * **符号链接一律不下探**：`statSync` 会跟随链接，工作区里一个指向外部目录的软链接（或
+ * Windows 目录联接）就等于给 grep 开了一条把工作区外的文件读进上下文的路。glob 一直这么
+ * 做（见 glob.ts 的 `entry.isSymbolicLink()`），这里此前漏了，是本项目唯一能读出工作区外的读取路径。
+ *
+ * 用 `withFileTypes` 取目录项**自身**的类型（lstat 语义），判断过程不跟随链接。
+ */
 function walk(dir: string, files: string[], depth = 0): void {
   if (depth > MAX_DEPTH) return;
-  let names: string[];
+  let entries: Dirent[];
   try {
-    names = readdirSync(dir);
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch {
     return;
   }
-  for (const name of names) {
-    if (SKIP.has(name)) continue;
-    const full = join(dir, name);
-    let stat;
-    try {
-      stat = statSync(full);
-    } catch {
+  for (const entry of entries) {
+    if (SKIP.has(entry.name)) continue;
+    if (entry.isSymbolicLink()) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walk(full, files, depth + 1);
       continue;
     }
-    if (stat.isDirectory()) walk(full, files, depth + 1);
-    else files.push(full);
+    // 只要普通文件：fifo / 设备节点读起来会阻塞，且对搜索没有意义。
+    if (entry.isFile()) files.push(full);
   }
 }
 

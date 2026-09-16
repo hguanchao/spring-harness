@@ -71,3 +71,49 @@ describe('foldSessionState recap', () => {
     assert.equal(state.goal, 'ship it');
   });
 });
+
+describe('foldSessionState tokensUsed', () => {
+  function event(kind: string, data: Record<string, unknown>): SessionRecord {
+    return { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind, data };
+  }
+
+  it('累加自己的 usage（prompt + completion），辅助调用的也计', () => {
+    const state = foldSessionState([
+      event('usage', { promptTokens: 100, completionTokens: 20, totalTokens: 120 }),
+      // 压缩摘要走的是便宜模型，但那是真花钱，一样计入。
+      event('usage', { promptTokens: 30, completionTokens: 5, totalTokens: 35, purpose: 'compaction' }),
+    ]);
+    assert.equal(state.tokensUsed, 155);
+  });
+
+  it('计入子代理 end 事件的 tokens（含其后代），start 不计', () => {
+    const state = foldSessionState([
+      event('subagent', { phase: 'start', id: 'sub-1', description: 'x' }),
+      event('subagent', { phase: 'end', id: 'sub-1', ok: true, tokens: 400, durationMs: 10, summary: 'y' }),
+    ]);
+    assert.equal(state.tokensUsed, 400);
+  });
+
+  it('自己的用量与子代理的用量不相交，不会重复计', () => {
+    const state = foldSessionState([
+      event('usage', { promptTokens: 10, completionTokens: 10, totalTokens: 20 }),
+      event('subagent', { phase: 'end', id: 'sub-1', ok: true, tokens: 50, durationMs: 1, summary: 's' }),
+      event('usage', { promptTokens: 20, completionTokens: 20, totalTokens: 40 }),
+    ]);
+    assert.equal(state.tokensUsed, 110, '20 + 50 + 40：两部分各自计入，没有重复');
+  });
+
+  it('坏数据（缺字段/负数/非数字）不污染累计量', () => {
+    const state = foldSessionState([
+      event('usage', {}),
+      event('usage', { promptTokens: 'many', completionTokens: null }),
+      event('usage', { promptTokens: -100, completionTokens: 10 }),
+      event('subagent', { phase: 'end', tokens: 'lots' }),
+    ]);
+    assert.equal(state.tokensUsed, 10);
+  });
+
+  it('空会话为 0', () => {
+    assert.equal(foldSessionState([]).tokensUsed, 0);
+  });
+});

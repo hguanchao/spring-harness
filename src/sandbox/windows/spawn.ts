@@ -11,16 +11,13 @@ import {
 } from './win32.js';
 import koffi from 'koffi';
 
+import { quoteCommandLineArg } from './command-line.js';
+
 export interface Spawned {
   process: Handle;
   thread: Handle;
   stdout: Handle;
   stderr: Handle;
-}
-
-function quote(arg: string): string {
-  if (!/[ \t"]/u.test(arg)) return arg;
-  return `"${arg.replaceAll('"', '\\"')}"`;
 }
 
 function resolveExecutable(command: string): string {
@@ -53,7 +50,7 @@ export function spawnAsUser(token: Handle, command: string, args: string[], cwd:
   const startup = emptyStartup(null, outWrite[0], errWrite[0]);
   const pi = Buffer.alloc(koffi.sizeof(PROCESS_INFORMATION));
   const exe = resolveExecutable(command);
-  const cmd = [exe, ...args].map(quote).join(' ');
+  const cmd = [exe, ...args].map(quoteCommandLineArg).join(' ');
   const cmdBuf = Buffer.from(`${cmd}\0`, 'utf16le');
   const created = api.createProcessAsUserW(
     token,

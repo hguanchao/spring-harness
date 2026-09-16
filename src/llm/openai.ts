@@ -1,4 +1,6 @@
+import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
 import { llmError } from './errors.js';
+import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_RETENTION } from './prompt-cache.js';
 import type { ProtocolAdapter } from './stream-client.js';
 
 export interface TokenUsage {
@@ -273,6 +275,8 @@ export interface RequestBodyOptions {
   tools: unknown[];
   reasoningEffort?: ReasoningEffort;
   maxTokens?: number;
+  /** 会话身份：作为 `prompt_cache_key`，让同一会话的请求落到同一台机器上。 */
+  sessionId?: string;
 }
 
 export interface FlatToolSpec {
@@ -293,23 +297,35 @@ export function flattenToolSpec(tool: unknown): FlatToolSpec {
 }
 
 /** 组装 chat.completions 请求体；JSON.stringify 会丢弃 undefined 字段，off/未设置即不发送该参数。 */
-export function buildRequestBody(options: RequestBodyOptions): Record<string, unknown> {
+export function buildRequestBody(
+  options: RequestBodyOptions,
+  caps: RequestCaps = DEFAULT_REQUEST_CAPS,
+): Record<string, unknown> {
+  // 输出上限的名字随端点而变：o 系列 / gpt-5 只认 max_completion_tokens，发 max_tokens 直接 400。
+  // 仅在显式配置时发送；undefined 会被 JSON.stringify 丢弃，输出上限交还端点。
+  const limitKey = caps.maxCompletionTokens ? 'max_completion_tokens' : 'max_tokens';
   return {
     model: options.model,
     messages: options.messages.map(serializeMessage),
     tools: options.tools.length > 0 ? options.tools : undefined,
     tool_choice: options.tools.length > 0 ? 'auto' : undefined,
     stream: true,
-    stream_options: { include_usage: true },
+    // include_usage 是 OpenAI 私有扩展：部分兼容端点遇到未知字段直接 400，故可降级关闭。
+    stream_options: caps.streamOptions ? { include_usage: true } : undefined,
     reasoning_effort: activeReasoningEffort(options.reasoningEffort),
-    // 上限仅在显式配置时发送；undefined 会被 JSON.stringify 丢弃，输出上限交还端点。
-    max_tokens: options.maxTokens,
+    // 前缀缓存是自动的，这两个字段负责「落到同一台机器」与「保留更久」。
+    prompt_cache_key: caps.promptCacheKey ? clampPromptCacheKey(options.sessionId) : undefined,
+    prompt_cache_retention: caps.promptCacheRetention ? PROMPT_CACHE_RETENTION : undefined,
+    [limitKey]: options.maxTokens,
   };
 }
 
 export const openaiAdapter: ProtocolAdapter = {
   path: '/chat/completions',
   headers: bearerJsonHeaders,
-  buildBody: (input) => JSON.stringify(buildRequestBody(input)),
+  buildBody: (input, caps) => JSON.stringify(buildRequestBody(input, caps)),
   apply: applySsePayload,
+  degrade: degradeRequestCaps,
+  // 会话亲和的追加头：让同一会话的请求尽量落到同一台机器，各自的前缀缓存才叠得起来。
+  sessionHeaders: openaiSessionHeaders,
 };

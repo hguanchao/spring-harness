@@ -18,7 +18,6 @@ export {
   getEditorTheme,
   getMarkdownTheme,
   getSelectListTheme,
-  highlightCode,
   theme,
   Theme,
   type ThemeColor,

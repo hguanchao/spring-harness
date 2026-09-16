@@ -31,7 +31,7 @@ import {
   VStack,
 } from '../core/index.js';
 import { formatDuration } from '../../util.js';
-import { getMarkdownTheme, theme, type ThemeColor } from '../theme/theme.js';
+import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
 import { asSelectableRow, handleSelectablePress } from './selectable-row.js';
 import {
@@ -144,6 +144,8 @@ class ThinkingMember {
   running = true;
   durationMs: number | undefined;
   expanded = false;
+  /** 正文当前挂的缩进档位；组开/合会改变它，变了就要重建 Markdown。 */
+  bodyIndent = TOOL_DETAIL_INDENT;
   readonly row = new Text('', 0, 0);
   readonly body = new Container();
   readonly region: MouseRegion;
@@ -160,6 +162,37 @@ type GroupMember =
   | { kind: 'thinking'; thinking: ThinkingMember }
   | { kind: 'tool'; tool: ToolExecutionComponent };
 
+let grayThinkingTheme: MarkdownTheme | undefined;
+
+/**
+ * 思考正文专用主题：**一切元素压成中性灰**（toolTitle）。
+ *
+ * 思考内容是 markdown——复用全局主题时，里面的标题/列表序号/行内码会吃到紫与蓝，
+ * 而推理记录应当整体退到背景层。粗体/斜体保留字形，颜色统一灰。
+ */
+function thinkingMarkdownTheme(): MarkdownTheme {
+  if (grayThinkingTheme) return grayThinkingTheme;
+  const gray = (text: string): string => theme.fg('toolTitle', text);
+  grayThinkingTheme = {
+    heading: gray,
+    link: gray,
+    linkUrl: gray,
+    code: gray,
+    codeBlock: gray,
+    codeBlockBorder: gray,
+    quote: gray,
+    quoteBorder: gray,
+    hr: gray,
+    listBullet: gray,
+    bold: (text) => theme.bold(gray(text)),
+    italic: (text) => theme.italic(gray(text)),
+    emphasis: (text) => theme.italic(gray(text)),
+    underline: gray,
+    strikethrough: gray,
+  };
+  return grayThinkingTheme;
+}
+
 export class ToolGroupComponent extends VStack {
   private readonly ui: TUI;
   private readonly tools: ToolExecutionComponent[] = [];
@@ -172,7 +205,6 @@ export class ToolGroupComponent extends VStack {
   private readonly members: GroupMember[] = [];
   /** 当前正在流式写入的那一段；收尾后置空由下一次 beginThinking 另起。 */
   private currentThinking?: ThinkingMember;
-  private readonly markdownTheme: MarkdownTheme = getMarkdownTheme();
 
   private readonly headerText = new Text('', 0, 0);
   private readonly headerRegion: MouseRegion;
@@ -325,26 +357,33 @@ export class ToolGroupComponent extends VStack {
       : member.durationMs === undefined
         ? 'Thought'
         : `Thought for ${formatDuration(member.durationMs)}`;
-    const markColor: ThemeColor = member.running ? 'primary' : 'thinkingText';
-    // 缩进用成员级：思考链是「并入本组的成员」（见文件头注释），和组头同级会让它看起来
-    // 像第二个汇总行、像是该并进汇总文案——而汇总行只统计工具，思考从不进汇总文案。
+    // 圆点跟全组一套语言：永远品牌紫（error 红），只靠 ○/● 表状态——
+    // 成员行与汇总行都是「紫点灰字」，思考行连点一起转灰就断了这条惯例。
+    // 标签文字才是状态色：执行中紫、完成后灰。
+    const labelColor: ThemeColor = member.running ? 'primary' : 'toolTitle';
+    // 缩进随组态：折叠时与汇总行对齐（3，折叠态可见的就是这两行）；
+    // 展开时降一级（5），与工具成员行对齐——此时思考行是成员之一。
+    const rowIndent = this.expanded ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
     member.row.setText(
-      `${' '.repeat(TOOL_MEMBER_INDENT)}${theme.fg(markColor, caret)} ${theme.fg('thinkingText', label)}`,
+      `${' '.repeat(rowIndent)}${theme.fg('primary', caret)} ${theme.fg(labelColor, label)}`,
     );
 
     member.body.clear();
     const detail = member.text.trim();
     if (!member.expanded || detail === '') return;
+    // 正文跟随自己的行：行缩进 +2（对齐标签列）。组开/合会改变档位，
+    // Markdown 的 paddingX 建后不可变，档位变了就重建。
+    const bodyIndent = rowIndent + 2;
     member.body.addChild(new Spacer(1));
-    // 正文下沉到「详情」那一级（TOOL_DETAIL_INDENT）：思考行在成员级，正文若与工具行同级，
-    // 一段散文会读成工具列表的第一项。
+    if (member.markdown && member.bodyIndent !== bodyIndent) member.markdown = undefined;
     if (member.markdown) {
       member.markdown.setText(detail);
     } else {
-      member.markdown = new Markdown(detail, TOOL_DETAIL_INDENT, 0, this.markdownTheme, {
-        color: (content: string) => theme.fg('thinkingText', content),
+      member.markdown = new Markdown(detail, bodyIndent, 0, thinkingMarkdownTheme(), {
+        color: (content: string) => theme.fg('toolTitle', content),
         italic: true,
       });
+      member.bodyIndent = bodyIndent;
     }
     member.body.addChild(member.markdown);
   }

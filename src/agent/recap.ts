@@ -8,10 +8,8 @@
  * 前缀逐字不变，提供方的提示词缓存才能继续命中；追加之前要先摘掉悬挂的工具尾
  * （见 popTrailingToolRun），否则一条 tool_use 没有配对的 tool_result 会被上游判 400。
  *
- * 触发有两条路径，共用同一套闸门与水印：
- * - 手动：`/recap`（别名 `/summarize`）；
- * - 自动：用户离开一段时间后回来（TUI 的 idle 轮询），闸门更严（轮次下限 + 空闲时长 +
- *   距上次 recap 有新轮次）。
+ * 触发是自动的一条路径（共用同一套闸门与水印）：用户离开一段时间后回来（TUI 的
+ * idle 轮询），闸门有轮次下限 + 空闲时长 + 距上次 recap 有新轮次三重条件。
  */
 
 import { estimateTokens, toChatMessages, type CompactionEvent } from './compact.js';

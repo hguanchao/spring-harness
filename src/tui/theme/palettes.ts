@@ -48,9 +48,10 @@ export const PALETTE = {
   mdH1: PRIMARY,
   mdH2: PRIMARY,
   mdH3: PRIMARY,
-  mdH4: TEXT,
-  mdH5: TEXT,
-  mdH6: TEXT,
+  // 标题全档走品牌紫：h4-6 曾是正文白，夹在 h1-3 之间深浅不一。
+  mdH4: PRIMARY,
+  mdH5: PRIMARY,
+  mdH6: PRIMARY,
   mdHeading: PRIMARY,
   mdLink: TEXT,
   mdLinkUrl: MUTED,
@@ -60,7 +61,8 @@ export const PALETTE = {
   mdQuote: MUTED,
   mdQuoteBorder: MUTED,
   mdHr: MUTED,
-  mdListBullet: MUTED,
+  // 列表符号与有序序号同用一色：紫，跟标题同一套强调系。
+  mdListBullet: PRIMARY,
 
   syntaxComment: MUTED,
   syntaxKeyword: SYNTAX,

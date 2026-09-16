@@ -113,6 +113,12 @@ export interface ProjectionResult {
   messages: ChatMessage[];
   /** 压缩后的最新状态；loop 负责持久化为 compaction event 并在内存中续用。 */
   compaction?: CompactionEvent;
+  /**
+   * 本次投影实际应用的 stub 边界（session 坐标，readMessages 序）。
+   * 仅在 stub 级真正生效且调用方未提供冻结值时回报——loop 首次拿到就冻结，
+   * stub 窗口便不再随轮次前移（每前移一格，历史中段改写一次，缓存从切点起全部作废）。
+   */
+  stubbedFromSession?: number;
 }
 
 export interface CompactionEvent {
@@ -166,6 +172,27 @@ function keepFromIndex(messages: ChatMessage[], emptyFallback: number): number {
   const starts = turnStarts(messages);
   const raw = starts.length > KEEP_RECENT_TURNS ? starts[starts.length - KEEP_RECENT_TURNS] : emptyFallback;
   return pairingBalancedCut(messages, raw);
+}
+
+/**
+ * session 索引 → base 索引。base =（covered > 0 时）摘要消息 ++ messages.slice(covered)，
+ * 其余一一对应，所以换算只有这一个偏移。
+ */
+function baseIndexOfSession(sessionIndex: number, compaction: CompactionEvent | undefined): number {
+  const covered = compaction?.covered ?? 0;
+  if (covered === 0) return sessionIndex;
+  // 冻结值落在已被摘要覆盖的范围里：摘要本身就是新系列的边界，旧冻结作废。
+  // loop 在摘要落地时也会重置它，这里只是防御。
+  if (sessionIndex < covered) return -1;
+  return sessionIndex - covered + 1;
+}
+
+/** base 索引 → session 索引（回报冻结值用）。 */
+function sessionIndexOfBase(baseIndex: number, messagesLength: number, compaction: CompactionEvent | undefined): number {
+  const covered = compaction?.covered ?? 0;
+  if (covered === 0) return Math.min(baseIndex, messagesLength);
+  if (baseIndex <= 0) return covered;
+  return Math.min(baseIndex - 1 + covered, messagesLength);
 }
 
 /** 机械压缩：先戳旧 tool result，再把更旧的轮次收成字符串拼接摘要。纯同步、零成本，做 fallback。 */
@@ -416,6 +443,14 @@ export async function projectContext(options: {
   system?: string;
   /** 已投影的未 stub wire；省略则从 messages 重建。调用方须先 flush 图片。 */
   base?: ChatMessage[];
+  /**
+   * 调用方冻结的 stub 边界（session 坐标，readMessages 序）。
+   *
+   * 不传时按「最近 K 轮完好」现算——那个窗口每加一轮就前移一格，历史中段随之改写一次，
+   * 缓存从切点起全部作废。传入后 stub 级固定从这条边界起保留原文，窗口只增不滑；
+   * 窗口因此涨大也无妨，水位线会照常触发 LLM 摘要，摘要才是真正的系列边界。
+   */
+  stubFromSession?: number;
 }): Promise<ProjectionResult> {
   const { messages, contextWindow, client, signal } = options;
   const compaction = options.compaction;
@@ -430,12 +465,22 @@ export async function projectContext(options: {
   }
 
   // 第一级：stub 全部旧 tool result（含摘要覆盖范围内的），零成本。
-  const keepFrom = keepFromIndex(base, base.length);
+  // 冻结边界优先：它由 loop 在首次 stub 时回报并固定，坐标换算见 baseIndexOfSession。
+  const frozen = options.stubFromSession === undefined
+    ? undefined
+    : baseIndexOfSession(options.stubFromSession, compaction);
+  const keepFrom = frozen !== undefined && frozen >= 0 ? frozen : keepFromIndex(base, base.length);
   const stubbed = stubOldTools(base, keepFrom, true);
   // 只估算一次：stub 后仍超水位线时才继续走 LLM 摘要。force 时不能提前返回——
   // provider 的判定优先于我们自己的估算，否则会原样重发同一个必然失败的请求。
   if (!force && !isOverPressure(estimateTokens(stubbed), contextWindow)) {
-    return { messages: withSystem(stubbed) };
+    return {
+      messages: withSystem(stubbed),
+      // 只在首次（调用方还没冻结）且真的 stub 掉了内容时回报；空转的边界不值得冻结。
+      ...(options.stubFromSession === undefined && keepFrom < base.length
+        ? { stubbedFromSession: sessionIndexOfBase(keepFrom, messages.length, compaction) }
+        : {}),
+    };
   }
 
   // 第二级：LLM 摘要。范围 = 已摘要覆盖之后、保留窗口之前的原始记录。

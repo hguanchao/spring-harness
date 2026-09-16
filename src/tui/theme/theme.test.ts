@@ -4,7 +4,6 @@ import { Markdown } from '../components/markdown.js';
 import { PALETTE } from './palettes.js';
 import {
   getMarkdownTheme,
-  highlightCode,
   oscResetCanvasBackground,
   oscSetCanvasBackground,
   Theme,
@@ -13,6 +12,9 @@ import {
 
 /** 只看前景色 SGR，忽略加粗/斜体等修饰。 */
 const FG = /\x1b\[38;(?:5;\d+|2;\d+;\d+;\d+)m/g;
+
+/** 剥掉全部 SGR 序列，只留可读文本（判断行内容时用）。 */
+const STRIP = /\x1b\[[0-9;]*m/g;
 
 function colorsOf(text: string): string[] {
   return text.match(FG) ?? [];
@@ -27,49 +29,41 @@ function markdownOf(text: string): Markdown {
   return new Markdown(text, 0, 0, getMarkdownTheme(), { color: (content: string) => theme.fg('mdText', content) });
 }
 
-describe('highlightCode', () => {
-  it('text 围栏整块同色，不做词法猜测', () => {
-    // 目录清单里的 RestEndpointPathTest(4) 曾经被当成方法调用染成金色。
-    const lines = highlightCode(
-      'src/test/  RestEndpointPathTest(4) 纯逻辑JUnit4\n├── model/  HttpMethod, RestEndpoint',
-      'text',
-    );
-    assert.equal(distinctColors(lines).length, 1, `expected one color, got ${distinctColors(lines).join(',')}`);
-  });
-
-  it('无语言围栏同样整块同色', () => {
-    const lines = highlightCode('plain fenced line\nsecond line', undefined);
-    assert.equal(distinctColors(lines).length, 1);
-  });
-
-  it('未知语言不上色，也不做 highlightAuto', () => {
-    const lines = highlightCode('some tree\n└── leaf', 'not-a-real-language');
-    assert.equal(distinctColors(lines).length, 1);
-  });
-
-  it('带语言的围栏上蓝色语法色，关键字与正文灰不同色', () => {
-    const lines = highlightCode('public class Foo { return "s"; } // hi', 'java');
-    const fence = colorsOf(getMarkdownTheme().codeBlockBorder('```'))[0];
-    const codes = distinctColors(lines);
-    assert.ok(codes.length >= 2, `expected syntax colors, got ${codes.join(',')}`);
-    assert.ok(codes.some((c) => c !== fence), 'tagged fence must use a color besides muted');
-  });
-
-  it('无语言 / text / 未知语言整块中性灰，不上蓝', () => {
+describe('代码块统一中性灰', () => {
+  /**
+   * 回归点：带语言标签的围栏曾走 highlight.js 语法色（蓝系关键字 + 多彩字符串），
+   * 无语言围栏却是中性灰——同一个回答里两种代码块两种配色，用户要求统一灰。
+   * 现在渲染面不再接高亮：所有代码块内容一律 mdCodeBlock 灰，`highlightCode` 整条链路已删。
+   */
+  it('带语言与无语言的围栏都只产出 mdCodeBlock 灰', () => {
     const muted = colorsOf(theme.fg('mdCodeBlock', 'x'))[0];
-    const body = colorsOf(theme.fg('mdText', 'x'))[0];
-    const syntax = colorsOf(theme.fg('syntaxKeyword', 'x'))[0];
-    for (const lang of ['text', undefined, 'not-a-real-language']) {
-      const codes = distinctColors(highlightCode('@Override public void f() { return "x"; } // c', lang));
-      assert.deepEqual(codes, [muted], `${lang ?? '(none)'} 应与代码块灰同色`);
-      assert.notEqual(muted, body);
-      assert.notEqual(muted, syntax);
+    const md = markdownOf(
+      '```bash\nnpm run build          # 打包\nnpm run sph\n```\n\n```\nsome tree\n└── leaf\n```',
+    );
+    const body = md.render(100);
+    // 跳过首尾围栏装饰行（mdCodeBlockBorder，同为灰系），只看代码内容行。
+    const contentLines = body.filter((line) => !line.replace(STRIP, '').includes('```'));
+    const codeLines = contentLines.filter((line) => /npm run|some tree/.test(line.replace(STRIP, '')));
+    assert.ok(codeLines.length >= 3, `应有代码内容行，实际: ${codeLines.join(' | ')}`);
+    for (const line of codeLines) {
+      assert.deepEqual(
+        distinctColors([line]),
+        [muted],
+        `代码内容行应只有中性灰，实际: ${distinctColors([line]).join(',')} — ${line}`,
+      );
     }
   });
 
-  it('text 围栏的内容色与围栏灰一致', () => {
-    const [line] = highlightCode('some text', 'text');
-    assert.equal(colorsOf(line ?? '')[0], colorsOf(getMarkdownTheme().codeBlockBorder('```'))[0]);
+  it('语法高亮链路已整体移除：主题不提供 highlightCode，syntax 色板不再出现在代码块里', () => {
+    const themeObj = getMarkdownTheme();
+    assert.equal(themeObj.highlightCode, undefined, '主题不再接高亮');
+    const syntax = colorsOf(theme.fg('syntaxKeyword', 'x'))[0];
+    const body = markdownOf('```bash\nnpm run build\n```').render(100);
+    assert.equal(
+      body.some((line) => colorsOf(line).includes(syntax)),
+      false,
+      '代码块里不应再出现 syntax 蓝',
+    );
   });
 });
 
@@ -84,15 +78,11 @@ describe('代码档配色分工', () => {
     assert.notEqual(colorsOf(theme.code('x'))[0], colorsOf(theme.codeBlock('x'))[0]);
   });
 
-  it('高亮块里的标点与块正文同色，块内不会灰白相间', () => {
+  it('高亮已移除：块内不会再出现灰白相间', () => {
+    // 旧断言verify highlight.js 的标点落在块正文色上；现在没有高亮，块内天然单色。
     const theme = getMarkdownTheme();
-    const blockColor = colorsOf(theme.codeBlock('x'))[0];
-    // class 是关键字、Foo 是类型、{} 是标点：标点必须落在块正文色上。
-    const codes = colorsOf(highlightCode('class Foo {}', 'java').join('\n'));
-    assert.ok(
-      codes.includes(blockColor ?? ''),
-      `punctuation must use the block color, got ${codes.join(',')}`,
-    );
+    const blockColor = colorsOf(theme.codeBlock('class Foo {}'))[0];
+    assert.ok(blockColor, '代码块着色函数仍应产出前景色');
   });
 
   it('行内码整段单色，注解和标识符不再分色', () => {
@@ -157,5 +147,47 @@ describe('画布底色', () => {
     assert.equal(t.bgSeq('bg'), '\x1b[48;2;20;20;20m');
     assert.equal(oscSetCanvasBackground(), '\x1b]11;#141414\x07');
     assert.equal(oscResetCanvasBackground(), '\x1b]111\x07');
+  });
+});
+
+describe('标题与列表强调色', () => {
+  const primary = colorsOf(theme.fg('primary', 'x'))[0];
+
+  it('各级标题（含 h4-6）都是品牌紫', () => {
+    // h4-6 曾是正文白：夹在紫的 h1-3 之间深浅不一，用户要求标题统一紫。
+    const md = getMarkdownTheme();
+    for (const depth of [1, 2, 3, 4, 5, 6] as const) {
+      const colors = colorsOf(md.heading('标题', depth));
+      assert.ok(colors.includes(primary), 'h' + depth + ' 应含品牌紫，实际: ' + colors.join(','));
+    }
+  });
+
+  it('列表符号与有序序号都是品牌紫', () => {
+    const md = getMarkdownTheme();
+    assert.ok(colorsOf(md.listBullet('- ')).includes(primary), '无序列表符号应为品牌紫');
+    assert.ok(colorsOf(md.listBullet('1. ')).includes(primary), '有序序号应为品牌紫');
+  });
+});
+
+describe('终端默认配色（ansi 模式）', () => {
+  const ansi = new Theme(PALETTE, 'ansi');
+
+  it('语义色映射到基础 ANSI 码，颜色交由终端主题决定', () => {
+    assert.equal(ansi.fg('primary', 'x'), '\x1b[95mx\x1b[39m');
+    assert.equal(ansi.fg('mdH4', 'x'), '\x1b[95mx\x1b[39m');
+    assert.equal(ansi.fg('text', 'x'), '\x1b[39mx\x1b[39m', '正文=终端默认前景');
+    assert.equal(ansi.fg('muted', 'x'), '\x1b[90mx\x1b[39m');
+    assert.equal(ansi.fg('mdCode', 'x'), '\x1b[94mx\x1b[39m');
+    assert.equal(ansi.fg('error', 'x'), '\x1b[91mx\x1b[39m');
+  });
+
+  it('画布交还终端默认底（49），面层用亮黑（100）', () => {
+    assert.equal(ansi.bg('bg', 'x'), '\x1b[49mx\x1b[49m');
+    assert.equal(ansi.bgSeq('bg'), '\x1b[49m');
+    assert.equal(ansi.bg('userMessageBg', 'x'), '\x1b[100mx\x1b[49m');
+  });
+
+  it('未映射的键回落默认前景，不抛错', () => {
+    assert.equal(ansi.fg('syntaxKeyword', 'x'), '\x1b[39mx\x1b[39m');
   });
 });

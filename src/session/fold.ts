@@ -52,10 +52,27 @@ export interface FoldedSessionState {
   lastRecap?: string;
   /** 计划模式是否激活（last-wins）。 */
   planMode: boolean;
+  /**
+   * 本会话**整棵代理树**的累计 token 用量，供预算判断。
+   *
+   * 构成（两部分不相交，不会重复计）：
+   * - 自己（含压缩摘要等辅助调用）的 `usage` 事件；
+   * - 每个子代理 end 事件里的 `tokens` 汇总——子代理的用量记在它自己的会话文件里，
+   *   父会话只留这一个数字，而它已经含了孙代理的量。
+   * 放在折叠里而不是内存里，预算就自然活过 resume：重启后不会从零开始重新烧一遍。
+   */
+  tokensUsed: number;
 }
 
 export function emptySessionState(): FoldedSessionState {
-  return { todos: [], failures: [], depth: 0, lastRecapMainTurn: 0, planMode: false };
+  return {
+    todos: [],
+    failures: [],
+    depth: 0,
+    lastRecapMainTurn: 0,
+    planMode: false,
+    tokensUsed: 0,
+  };
 }
 
 function parseTodoItems(value: unknown): TodoItem[] | undefined {
@@ -133,6 +150,19 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
       }
       case 'plan_mode': {
         if (typeof data.active === 'boolean') state.planMode = data.active;
+        break;
+      }
+      case 'usage': {
+        // 自己的 LLM 调用（含 compact_model / review_model 这类辅助调用）都记在这。
+        const prompt = asFiniteNumber(data.promptTokens) ?? 0;
+        const completion = asFiniteNumber(data.completionTokens) ?? 0;
+        state.tokensUsed += Math.max(0, prompt) + Math.max(0, completion);
+        break;
+      }
+      case 'subagent': {
+        // 只认 end：start 里没有用量。tokens 是该子代理（含其后代）的总量。
+        if (data.phase !== 'end') break;
+        state.tokensUsed += Math.max(0, asFiniteNumber(data.tokens) ?? 0);
         break;
       }
       case 'tool_result': {

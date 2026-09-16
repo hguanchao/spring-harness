@@ -27,7 +27,6 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
       planMode.active = active;
     },
     ...overrides,
-    planMode,
   };
 }
 
