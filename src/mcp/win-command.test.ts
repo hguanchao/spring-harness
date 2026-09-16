@@ -87,6 +87,20 @@ describe('resolveWindowsCommand（注入 env，任何平台可跑）', () => {
     }
   });
 
+  it('已带扩展名的裸名先试原名（npx.cmd / node.exe）', () => {
+    const s = sandbox();
+    try {
+      writeFileSync(join(s.dir, 'npx.cmd'), '@echo off\r\n');
+      writeFileSync(join(s.dir, 'node.exe'), 'x');
+      assert.equal(resolveWindowsCommand('npx.cmd', s.env)?.file, join(s.dir, 'npx.cmd'));
+      assert.equal(resolveWindowsCommand('npx.cmd', s.env)?.viaCmd, true);
+      assert.equal(resolveWindowsCommand('node.exe', s.env)?.file, join(s.dir, 'node.exe'));
+      assert.equal(resolveWindowsCommand('node.exe', s.env)?.viaCmd, false);
+    } finally {
+      s.cleanup();
+    }
+  });
+
   it('找不到时返回 undefined', () => {
     const s = sandbox();
     try {

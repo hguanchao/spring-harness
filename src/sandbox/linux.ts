@@ -23,7 +23,8 @@ export function linuxBwrapArgs(
     '--ro-bind-try', '/etc', '/etc',
     '--tmpfs', '/tmp',
     bindWs, workspaceRoot, workspaceRoot,
-    '--bind', sphHome, sphHome,
+    // 配置/密钥在父进程写；子进程只读 ~/.sph，避免 shell 改 api_key。
+    '--ro-bind', sphHome, sphHome,
     '--bind', tempDir, tempDir,
     '--chdir', workspaceRoot,
   ];

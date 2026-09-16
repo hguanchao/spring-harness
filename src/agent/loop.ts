@@ -634,6 +634,13 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
               options.listener?.({ type: 'text', text: delta.text });
             }
           },
+          (info) => {
+            options.listener?.({
+              type: 'status',
+              level: 'warn',
+              text: `Retrying LLM stream (attempt ${info.attempt}): ${info.message}`,
+            });
+          },
         );
         break;
       } catch (error) {
@@ -694,26 +701,29 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
     const reasoning = reply.reasoning?.length ? { reasoning: reply.reasoning } : {};
     if (!reply.toolCalls?.length) {
-      appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
-      // OpenCode 会话环：只有明确的 stop/length/content-filter 且没有工具才退出。
+      // OpenCode / deepseek-harness 会话环：只有明确的 stop/length/content-filter 且没有工具才退出。
       //
-      // 这条 `finish !== undefined` 就是**截断流的唯一防线**（例如 Responses 流没等到
-      // response.completed、网关半途掐断）：此时不能当正常收工，再打一轮。协议层曾经留过一个
-      // `afterStream` 钩子想做同一件事，但三个 adapter 都没实现，实际保护一直在这里，故已删除该钩子。
+      // 线协议写 `tool_calls`，内部测试写 `tool-calls`，Anthropic 写 `tool_use`——漏掉任何
+      // 一种都会把「该调工具」当成收工，表现为突然停止。
       const finish = reply.finishReason;
-      const stopped = finish !== undefined && finish !== 'tool-calls' && finish !== 'unknown';
-      if (stopped) {
-        options.session.appendEvent('turn_end', { depth, finishReason: finish });
-        options.listener?.({ type: 'done' });
-        return;
+      const toolFinish = finish === 'tool_calls' || finish === 'tool-calls' || finish === 'tool_use';
+      const stopped = finish !== undefined && !toolFinish && finish !== 'unknown';
+      if (!stopped) {
+        // 截断流：有正文才落盘再继续。空回复不写脏历史——否则下一步会看到一条空白 assistant。
+        if (reply.text || reply.thinking || reply.reasoning?.length) {
+          appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
+        }
+        options.listener?.({
+          type: 'status',
+          level: 'warn',
+          text: `Stream ended without a finish reason (${finish ?? 'none'}) — continuing the turn.`,
+        });
+        continue;
       }
-      // 静默继续会让「模型自己停了」无从排查，所以每次都留一条痕迹。
-      options.listener?.({
-        type: 'status',
-        level: 'warn',
-        text: `Stream ended without a finish reason (${finish ?? 'none'}) — continuing the turn.`,
-      });
-      continue;
+      appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
+      options.session.appendEvent('turn_end', { depth, finishReason: finish });
+      options.listener?.({ type: 'done' });
+      return;
     }
 
     const parseErrors = new Map<string, string>();

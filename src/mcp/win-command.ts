@@ -87,6 +87,11 @@ export function resolveWindowsCommand(command: string, env: NodeJS.ProcessEnv = 
     .map((dir) => dir.trim().replace(/^"(.*)"$/, '$1'))
     .filter((dir) => dir !== '');
   for (const dir of dirs) {
+    // 已带扩展名的裸名（npx.cmd / node.exe）先试原名，再补 PATHEXT。
+    if (fileExtension(command) !== '') {
+      const exact = tryFile(join(dir, command));
+      if (exact) return exact;
+    }
     for (const ext of exts) {
       const resolved = tryFile(join(dir, command + ext));
       if (resolved) return resolved;

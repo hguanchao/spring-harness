@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { degradeRequestCaps, initialRequestCaps, type RequestCaps } from './compat.js';
+import { degradeRequestCaps, degradeSilentCompat, initialRequestCaps, type RequestCaps } from './compat.js';
 
 /** 从默认能力位出发做一次降级，避免每条用例都手写整份对象。 */
 function after(text: string, caps = initialRequestCaps('gpt-4o', true)) {
@@ -126,5 +126,20 @@ describe('缓存路由参数的降级', () => {
     assert.equal(caps.promptCache, false);
     assert.equal(caps.promptCacheKey, false);
     assert.equal(caps.promptCacheRetention, false);
+  });
+});
+
+describe('degradeSilentCompat', () => {
+  it('按 stream_options → retention → key 的顺序剥，没有 unsupported 字样也能降', () => {
+    let caps = initialRequestCaps('gpt-4o', true);
+    caps = degradeSilentCompat(caps)!;
+    assert.equal(caps.streamOptions, false);
+    assert.equal(caps.promptCacheRetention, true);
+    caps = degradeSilentCompat(caps)!;
+    assert.equal(caps.promptCacheRetention, false);
+    assert.equal(caps.promptCacheKey, true);
+    caps = degradeSilentCompat(caps)!;
+    assert.equal(caps.promptCacheKey, false);
+    assert.equal(degradeSilentCompat(caps), undefined);
   });
 });

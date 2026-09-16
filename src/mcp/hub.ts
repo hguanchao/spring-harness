@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { join } from 'node:path';
+import { mergeChildEnv } from '../sandbox/env.js';
 import { errorMessage } from '../util.js';
 import { cmdArgumentLine, resolveWindowsCommand } from './win-command.js';
 
@@ -267,7 +269,8 @@ export class McpHub {
   private launch(spec: McpServerSpec & { enabled: boolean; origin: McpOrigin }): Promise<void> {
     const existing = this.inFlight.get(spec.name);
     if (existing) return existing;
-    const task = this.attach(spec)
+    let task: Promise<void>;
+    task = this.attach(spec)
       .then(() => {
         this.problems.delete(spec.name);
       })
@@ -276,7 +279,7 @@ export class McpHub {
         this.onProblem(`${spec.name}: ${errorMessage(error)}`);
       })
       .finally(() => {
-        this.inFlight.delete(spec.name);
+        if (this.inFlight.get(spec.name) === task) this.inFlight.delete(spec.name);
       });
     this.inFlight.set(spec.name, task);
     return task;
@@ -319,6 +322,7 @@ export class McpHub {
   }
 
   private close(name: string, reason: string): void {
+    this.inFlight.delete(name);
     const conn = this.connections.get(name);
     if (conn === undefined) return;
     this.failPending(conn, `MCP server ${name} ${reason}`);
@@ -335,8 +339,8 @@ export class McpHub {
     const spawnOptions: Parameters<typeof spawn>[2] = {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      // 必须铺在 process.env 之上：不继承 PATH 的话子进程连自己的运行时都找不到。
-      env: { ...process.env, ...(spec.env ?? {}) },
+      // 擦除 KEY/TOKEN/SPH_* 后再叠 spec.env：MCP 自己的密钥可以显式转交，宿主的不行。
+      env: mergeChildEnv(spec.env),
     };
     if (process.platform === 'win32') {
       const resolved = resolveWindowsCommand(launchCommand);
@@ -344,7 +348,9 @@ export class McpHub {
         // 数组 + verbatim：Node 原样拼接 lpCommandLine。整串塞进 command 会被当成
         // 文件名去找（实测 ENOENT），必须走这里。
         spawnOptions.windowsVerbatimArguments = true;
-        launchCommand = 'cmd.exe';
+        // 裸 cmd.exe 会先搜工作区 cwd；固定 System32，避免仓库里放一个 cmd.exe 劫持 MCP。
+        const root = process.env.SystemRoot ?? 'C:\\Windows';
+        launchCommand = join(root, 'System32', 'cmd.exe');
         launchArgs = ['/d', '/s', '/c', cmdArgumentLine(resolved.file, launchArgs)];
       } else if (resolved) {
         launchCommand = resolved.file;

@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 export const READ_BYTE_LIMIT = 100 * 1024;
 /** 文本嗅探只读文件头这么多字节：够判 NUL / 常见魔数，不必整文件进内存。 */
@@ -33,29 +33,30 @@ export class PathEscapeError extends Error {
 }
 
 /**
- * realpath 结果缓存。grep/list_dir 会对同一批文件反复调用
- * assertInsideWorkspace / toWorkspaceRelative，而 realpathSync.native 在
- * Windows 上是明显的系统调用开销（每文件 3~4 次）。
+ * 规范化到物理路径。
  *
- * 只缓存 realpath 成功的条目：解析失败（路径不存在）仍然每次都重算，
- * 避免把「尚未创建」的路径固化成非符号链接结果而削弱边界判定。
+ * 不缓存：同一轮里 `rm + mklink` 之后再用缓存，会把已经换成外链的路径当成区内文件。
+ * 目标还不存在时（write 新建）对最近存在的祖先做 realpath，再拼回缺失段——否则
+ * `workspace/link/new.txt`（link → 区外）会被当成区内路径。
  */
-const canonicalCache = new Map<string, string>();
-const CANONICAL_CACHE_LIMIT = 4096;
-
 export function canonicalize(path: string): string {
   const resolved = resolve(path);
-  const cached = canonicalCache.get(resolved);
-  if (cached !== undefined) return cached;
-  let canonical: string;
   try {
-    canonical = realpathSync.native(resolved);
+    return realpathSync.native(resolved);
   } catch {
-    return resolved;
+    const missing: string[] = [];
+    let current = resolved;
+    for (;;) {
+      const parent = dirname(current);
+      if (parent === current) return resolved;
+      missing.unshift(basename(current));
+      try {
+        return resolve(realpathSync.native(parent), ...missing);
+      } catch {
+        current = parent;
+      }
+    }
   }
-  if (canonicalCache.size >= CANONICAL_CACHE_LIMIT) canonicalCache.clear();
-  canonicalCache.set(resolved, canonical);
-  return canonical;
 }
 
 /** 工作区是安全边界：盘符、UNC、.. 一律按 realpath 判断。 */

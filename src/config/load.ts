@@ -192,7 +192,7 @@ export function loadConfig(options?: {
   const httpHeaders = parseHttpHeaders(file.http_headers);
   const proxy = parseProxy(file.proxy);
 
-  if (!baseUrl || !model || (!apiKey && !httpHeaders)) {
+  if (!baseUrl || !model || (!apiKey && Object.keys(httpHeaders).length === 0)) {
     throw new ConfigError(
       `missing base_url, model, or API key.\nWrite ${path}:\n\n${CONFIG_EXAMPLE}\nSet SPH_API_KEY or api_key ("" + [http_headers] for keyless gateways). SPH_API_KEY wins.`,
     );
@@ -371,10 +371,10 @@ function parseProxy(value: unknown): string | undefined {
   try {
     url = new URL(trimmed);
   } catch {
-    throw new ConfigError(`proxy must be an http(s) URL (e.g. http://127.0.0.1:7890), got: ${trimmed}`);
+    throw new ConfigError('proxy must be an http(s) URL (e.g. http://127.0.0.1:7890)');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ConfigError(`proxy must be an http(s) URL (socks is not supported), got: ${trimmed}`);
+    throw new ConfigError('proxy must be an http(s) URL (socks is not supported)');
   }
   return trimmed;
 }
@@ -412,11 +412,14 @@ function parseMcpServers(value: unknown): McpServerConfigFile[] {
     const rec = row as Record<string, unknown>;
     const name = asString(rec.name, `mcp_servers[${i}].name`);
     const command = asString(rec.command, `mcp_servers[${i}].command`);
-    if (!name || !command) throw new ConfigError(`mcp_servers[${i}] needs name and command`);
+    const url = asString(rec.url, `mcp_servers[${i}].url`);
+    if (!name || (!command && !url)) {
+      throw new ConfigError(`mcp_servers[${i}] needs name and a command or url`);
+    }
     const args = rec.args;
     if (args !== undefined && (!Array.isArray(args) || args.some((item) => typeof item !== 'string'))) {
       throw new ConfigError(`mcp_servers[${i}].args must be a string array`);
     }
-    return { name, command, args: args as string[] | undefined };
+    return { name, command, args: args as string[] | undefined, url };
   });
 }

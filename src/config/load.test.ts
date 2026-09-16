@@ -24,6 +24,25 @@ function configWith(extra: string): string {
   return path;
 }
 
+describe('启动校验', () => {
+  it('缺 api_key 且没有 http_headers 时拒绝启动', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sph-config-'));
+    dirs.push(dir);
+    const path = join(dir, 'config.toml');
+    writeFileSync(path, 'base_url = "https://api.example.com/v1"\nmodel = "m"\n', 'utf8');
+    assert.throws(() => loadConfig({ configPath: path, env: {} }), /API key/);
+  });
+
+  it('仅有 url 的 MCP 条目不挡启动', () => {
+    const config = loadConfig({
+      configPath: configWith('[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"\n'),
+      env: {},
+    });
+    assert.equal(config.mcpServers[0]?.name, 'remote');
+    assert.equal(config.mcpServers[0]?.url, 'https://example.com/mcp');
+  });
+});
+
 describe('prompt_cache', () => {
   it('未配置时默认开：agent 多步循环里缓存收益远大于写入成本', () => {
     assert.equal(loadConfig({ configPath: configWith(''), env: {} }).promptCache, true);

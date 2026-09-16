@@ -165,3 +165,18 @@ export function degradeRequestCaps(caps: RequestCaps, errorText: string): Reques
   }
   return undefined;
 }
+
+/**
+ * 网关不回 400、直接给空 SSE / 空完成时，按 OpenCode 兼容端点常见拒收顺序摘字段。
+ *
+ * 实测：同一条提示词在 OpenCode 能跑完，sph 在工具后下一跳拿到 empty body。
+ * OpenCode 默认不发 `stream_options` / `prompt_cache_retention` / `prompt_cache_key`；
+ * 部分中转对未知字段不报 400，而是 200 + 空 event-stream。报文里没有 unsupported 字样，
+ * `degradeRequestCaps` 认不出来，只能按这个静默顺序剥。
+ */
+export function degradeSilentCompat(caps: RequestCaps): RequestCaps | undefined {
+  if (caps.streamOptions) return { ...caps, streamOptions: false };
+  if (caps.promptCacheRetention) return { ...caps, promptCacheRetention: false };
+  if (caps.promptCacheKey) return { ...caps, promptCacheKey: false };
+  return undefined;
+}

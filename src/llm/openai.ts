@@ -70,12 +70,18 @@ export interface StreamDelta {
   usage?: TokenUsage;
 }
 
+export interface LlmRetryInfo {
+  attempt: number;
+  message: string;
+}
+
 export interface LlmClient {
   complete(
     messages: ChatMessage[],
     tools: unknown[],
     signal?: AbortSignal,
     onDelta?: (delta: { text?: string; thinking?: string }) => void,
+    onRetry?: (info: LlmRetryInfo) => void,
   ): Promise<StreamDelta>;
 }
 
@@ -119,11 +125,21 @@ export function activeReasoningEffort(
   return effort && effort !== 'off' ? effort : undefined;
 }
 
-/** SSE data 行 → 对象；非对象（含 JSON 数组）视为空事件。 */
+/** SSE data 行 → 对象；`[DONE]`、坏 JSON、非对象一律视为空事件，不中断整段流。 */
 export function parseSseJson(payload: string): Record<string, unknown> | undefined {
-  const json: unknown = JSON.parse(payload);
-  if (json === null || typeof json !== 'object') return undefined;
-  return json as Record<string, unknown>;
+  if (payload === '[DONE]') return undefined;
+  try {
+    const json: unknown = JSON.parse(payload);
+    if (json === null || typeof json !== 'object') return undefined;
+    return json as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 没有任何正文、思考、工具或推理项：对齐 EMPTY_RESPONSE，应重试而不是当成功空回复。 */
+export function isEmptyReply(reply: StreamDelta): boolean {
+  return !reply.text && !reply.thinking && !reply.toolCalls?.length && !reply.reasoning?.length;
 }
 
 /** 把一段正文/思考增量写入累积器，并原样作为 delta 返回。 */
@@ -175,44 +191,18 @@ export function llmErrorMessage(error: unknown): string {
   return 'unknown error';
 }
 
-/** 解析 OpenAI chat.completions SSE 的一行 data payload。 */
-export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
-  if (payload === '[DONE]') return {};
-  const json = parseSseJson(payload);
-  if (!json) return {};
-  // 兼容端点把业务错误塞进 SSE data（HTTP 仍 200）：必须抛出，否则空 choices 会被当成成功空回复。
-  const errorField = json.error;
-  if (errorField !== undefined && errorField !== null) {
-    throw llmError('LLM error', llmErrorMessage(errorField));
-  }
-  const usageRaw = json.usage;
-  if (usageRaw && typeof usageRaw === 'object') {
-    const usage = usageRaw as Record<string, unknown>;
-    const prompt = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined;
-    const completion = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined;
-    const total = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
-    if (prompt !== undefined || completion !== undefined) {
-      writeUsage(acc, prompt ?? 0, completion ?? 0, total, readCachedTokens(usage));
-    }
-  }
-  const choices = (json as { choices?: unknown }).choices;
-  if (!Array.isArray(choices) || choices.length === 0) return {};
-  const choice = choices[0] as {
-    finish_reason?: string | null;
-    delta?: {
-      content?: string | null;
-      /** DeepSeek reasoner 等兼容端点的思考链增量。 */
-      reasoning_content?: string | null;
-      tool_calls?: Array<{
-        index?: number;
-        id?: string;
-        function?: { name?: string; arguments?: string };
-      }>;
-    };
-  };
-  if (choice.finish_reason) acc.finish = choice.finish_reason;
-  const delta = choice.delta;
-  if (!delta) return {};
+type ChatDelta = {
+  content?: string | null;
+  /** DeepSeek reasoner 等兼容端点的思考链增量。 */
+  reasoning_content?: string | null;
+  tool_calls?: Array<{
+    index?: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+  }>;
+};
+
+function applyChatDelta(acc: SseAcc, delta: ChatDelta): { textDelta?: string; thinkingDelta?: string } {
   let textDelta: string | undefined;
   let thinkingDelta: string | undefined;
   if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
@@ -230,6 +220,44 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
     acc.tools.set(index, current);
   }
   return { textDelta, thinkingDelta };
+}
+
+/** 解析 OpenAI chat.completions SSE 的一行 data payload。 */
+export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
+  if (payload === '[DONE]') return {};
+  const json = parseSseJson(payload);
+  if (!json) return {};
+  // 兼容端点把业务错误塞进 SSE data（HTTP 仍 200）：必须抛出，否则空 choices 会被当成成功空回复。
+  const errorField = json.error;
+  if (errorField !== undefined && errorField !== null) {
+    throw llmError('LLM error', llmErrorMessage(errorField));
+  }
+  const usageRaw = json.usage;
+  if (usageRaw && typeof usageRaw === 'object') {
+    const usage = usageRaw as Record<string, unknown>;
+    const asNum = (value: unknown): number | undefined =>
+      typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    const prompt = asNum(usage.prompt_tokens) ?? asNum(usage.input_tokens);
+    const completion = asNum(usage.completion_tokens) ?? asNum(usage.output_tokens);
+    const total = asNum(usage.total_tokens);
+    // 部分网关在工具调用首包塞 usage: {prompt_tokens:0}，不能把后面的真值盖掉，
+    // 也不能让界面显示 0 / 1.0M。
+    if ((prompt !== undefined && prompt > 0) || (completion !== undefined && completion > 0)) {
+      writeUsage(acc, prompt ?? 0, completion ?? 0, total, readCachedTokens(usage));
+    }
+  }
+  const choices = (json as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return {};
+  const choice = choices[0] as {
+    finish_reason?: string | null;
+    delta?: ChatDelta;
+    /** 非流式完整报文：网关把 stream 折成一条 JSON 时走这里。 */
+    message?: ChatDelta;
+  };
+  if (choice.finish_reason) acc.finish = choice.finish_reason;
+  const delta = choice.delta ?? choice.message;
+  if (!delta) return {};
+  return applyChatDelta(acc, delta);
 }
 
 export function finishStream(acc: SseAcc): StreamDelta {

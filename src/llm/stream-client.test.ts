@@ -128,8 +128,107 @@ describe('参数降级重试', () => {
   });
 });
 
-describe('不重发的边界', () => {
-  it('已经输出过正文后即使可重试类错误也不重发', async () => {
+describe('空流与截断', () => {
+  it('空 SSE 体可重试，不把 empty body 当致命错误', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response('', { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return okResponse('ok');
+    }) as typeof fetch;
+
+    const reply = await client().complete(messages, []);
+    assert.equal(reply.text, 'ok');
+    assert.equal(calls, 2);
+  });
+
+  it('字段剥完后空 SSE 仍按传输抖动重试，不立刻失败', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls <= 2) {
+        return new Response('', { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return okResponse('ok');
+    }) as typeof fetch;
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      promptCache: false,
+      maxRetries: 2,
+    });
+    const reply = await c.complete(messages, []);
+    assert.equal(reply.text, 'ok');
+    assert.equal(calls, 3);
+  });
+
+  it('空 SSE 先摘 stream_options 再发，而不是同一份请求连打', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (body.stream_options) {
+        return new Response('', { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return okResponse('ok');
+    }) as typeof fetch;
+
+    const reply = await client().complete(messages, []);
+    assert.equal(reply.text, 'ok');
+    assert.equal(bodies[0]?.stream_options !== undefined, true);
+    assert.equal(bodies[1]?.stream_options, undefined);
+  });
+
+  it('finish=stop 但零内容按 EMPTY_RESPONSE 重试', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) {
+        return sseResponse([
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+          'data: [DONE]\n\n',
+        ]);
+      }
+      return okResponse('ok');
+    }) as typeof fetch;
+
+    const reply = await client().complete(messages, []);
+    assert.equal(reply.text, 'ok');
+    assert.equal(calls, 2);
+  });
+
+  it('application/json 非流式 message.content 也能收下', async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'hello' }, finish_reason: 'stop' }],
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+
+    const reply = await client().complete(messages, []);
+    assert.equal(reply.text, 'hello');
+    assert.equal(reply.finishReason, 'stop');
+  });
+
+  it('text/event-stream 里塞完整 JSON（无 data: 前缀）仍能解析', async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'via-json' }, finish_reason: 'stop' }],
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )) as typeof fetch;
+
+    const reply = await client().complete(messages, []);
+    assert.equal(reply.text, 'via-json');
+  });
+
+  it('已经输出过正文后流中断：交回半截而不是抛错', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
@@ -137,17 +236,40 @@ describe('不重发的边界', () => {
     }) as typeof fetch;
 
     const seen: string[] = [];
-    await assert.rejects(
-      () =>
-        client().complete(messages, [], undefined, (delta) => {
-          if (delta.text) seen.push(delta.text);
-        }),
-      /socket died/,
-    );
+    const reply = await client().complete(messages, [], undefined, (delta) => {
+      if (delta.text) seen.push(delta.text);
+    });
     assert.deepEqual(seen, ['partial']);
-    assert.equal(calls, 1, '既不能走重试，也不能走参数降级');
+    assert.equal(reply.text, 'partial');
+    assert.equal(reply.finishReason, undefined);
+    assert.equal(calls, 1, '半截不重发同一请求，交给 loop 再打一轮');
   });
 
+  it('半截之后的协议 error 事件上抛，不当成 stop 收工', async () => {
+    let pulled = 0;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            const encoder = new TextEncoder();
+            if (pulled++ === 0) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'hi' } }] })}\n\n`),
+              );
+              return;
+            }
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: 'filtered' } })}\n\n`));
+            controller.close();
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )) as typeof fetch;
+
+    await assert.rejects(() => client().complete(messages, []), /filtered/);
+  });
+});
+
+describe('不重发的边界', () => {
   it('参数无关的 400 直接上抛', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {

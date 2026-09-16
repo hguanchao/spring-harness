@@ -15,7 +15,8 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "../core/tui.js";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../core/utils.js";
+import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../core/utils.js";
+import { formatDuration } from "../../util.js";
 
 
 type RenderCache = {
@@ -448,6 +449,9 @@ const DEFAULT_INTERVAL_MS = 80;
 
 /**
  * Loader component that updates with an optional spinning animation.
+ *
+ * 状态行布局：左侧转圈 + 阶段文案，最右侧本轮已运行时长。时长跟转圈共用同一
+ * 个 interval，避免再开一只定时器。
  */
 export class Loader extends Text {
 	private frames = [...DEFAULT_FRAMES];
@@ -459,6 +463,7 @@ export class Loader extends Text {
 	private spinnerColorFn: (str: string) => string;
 	private messageColorFn: (str: string) => string;
 	private message: string = "Loading...";
+	private readonly startedAt = Date.now();
 
 	constructor(
 		ui: TUI,
@@ -476,7 +481,25 @@ export class Loader extends Text {
 	}
 
 	render(width: number): string[] {
-		return ["", ...super.render(width)];
+		const w = Math.max(1, width);
+		const leftPad = 1;
+		// 右缘：1 列给滚动条 ▐，再空两格，耗时不要贴着滑块。
+		const rightPad = 4;
+		const inner = Math.max(1, w - leftPad - rightPad);
+		const elapsed = formatDuration(Date.now() - this.startedAt);
+		const elapsedStyled = this.messageColorFn(elapsed);
+		const elapsedW = visibleWidth(elapsed);
+		const frame = this.getRenderedIndicator();
+		const left =
+			frame.length > 0 ? `${frame} ${this.messageColorFn(this.message)}` : this.messageColorFn(this.message);
+		const gap = 2;
+		const clipped = truncateToWidth(left, Math.max(0, inner - elapsedW - gap), "…");
+		const pad = Math.max(0, inner - visibleWidth(clipped) - elapsedW);
+		let line = `${" ".repeat(leftPad)}${clipped}${" ".repeat(pad)}${elapsedStyled}${" ".repeat(rightPad)}`;
+		const vis = visibleWidth(line);
+		if (vis < w) line += " ".repeat(w - vis);
+		else if (vis > w) line = truncateToWidth(line, w, "…");
+		return ["", line];
 	}
 
 	start(): void {

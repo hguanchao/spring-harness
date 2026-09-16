@@ -305,3 +305,64 @@ describe('系统提示词一轮内冻结', () => {
     }
   });
 });
+
+describe('截断流继续', () => {
+  it('没有 finish reason 时把已有正文落盘并再打一轮，而不是收工', async () => {
+    const { session, root, cleanup } = makeSession();
+    let calls = 0;
+    const events: AgentEvent[] = [];
+    const client: LlmClient = {
+      async complete(): Promise<StreamDelta> {
+        calls += 1;
+        if (calls === 1) return { text: 'partial' };
+        return { text: ' done', finishReason: 'stop' };
+      },
+    };
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client,
+        session,
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        listener: (event) => events.push(event),
+      });
+      assert.equal(calls, 2);
+      assert.ok(events.some((event) => event.type === 'status' && /without a finish reason/.test(event.text)));
+      assert.ok(events.some((event) => event.type === 'done'));
+      const assistant = session.readMessages().filter((row) => row.role === 'assistant');
+      assert.equal(assistant[0]?.content, 'partial');
+      assert.equal(assistant[1]?.content, ' done');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('线协议 tool_calls（下划线）且没有工具载荷时不当成收工', async () => {
+    const { session, root, cleanup } = makeSession();
+    let calls = 0;
+    const client: LlmClient = {
+      async complete(): Promise<StreamDelta> {
+        calls += 1;
+        if (calls === 1) return { text: '', finishReason: 'tool_calls' };
+        return { text: 'done', finishReason: 'stop' };
+      },
+    };
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client,
+        session,
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+      });
+      assert.equal(calls, 2);
+    } finally {
+      cleanup();
+    }
+  });
+});

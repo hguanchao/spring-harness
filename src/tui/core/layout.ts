@@ -493,6 +493,21 @@ export function contentPaintRight(box: LayoutBox): number {
 	return column === undefined ? clipRight : Math.min(clipRight, column);
 }
 
+function layoutRoot(box: LayoutBox): LayoutBox {
+	let current = box;
+	while (current.parent) current = current.parent;
+	return current;
+}
+
+function findLayoutBox(box: LayoutBox, component: Component): LayoutBox | undefined {
+	if (box.component === component) return box;
+	for (const child of box.children) {
+		const found = findLayoutBox(child, component);
+		if (found) return found;
+	}
+	return undefined;
+}
+
 function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
@@ -500,14 +515,28 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	// 只画滑块、不画轨道：右半块 ▐ 贴在列右缘。颜色始终中性灰，不跟滚动状态变。
 	const glyph = "▐";
 	const thumb = box.scrollView.scrollbarThumbStyle(glyph);
+	const viewBottom = geometry.trackTop + geometry.trackHeight;
+
+	const paintRow = (row: number): void => {
+		if (row < 0 || row >= screen.length) return;
+		screen[row] = replaceScrollbarCell(screen[row] ?? "", geometry.column, totalWidth, thumb, true);
+	};
 
 	for (let offset = 0; offset < geometry.trackHeight; offset++) {
 		const row = geometry.trackTop + offset;
-		if (row < box.clip.y || row >= box.clip.y + box.clip.height || row < 0 || row >= screen.length) continue;
+		if (row < box.clip.y || row >= box.clip.y + box.clip.height) continue;
 		const isThumb = row >= geometry.thumbTop && row < geometry.thumbTop + geometry.thumbHeight;
-		if (!isThumb) continue;
-		screen[row] = replaceScrollbarCell(screen[row] ?? "", geometry.column, totalWidth, thumb, true);
+		if (isThumb) paintRow(row);
 	}
+
+	// scrollbarUntil：滑块在转录区底时，把 ▐ 接到 until 组件顶（对话框上沿）。
+	const until = box.scrollView.scrollbarUntil;
+	if (!until) return;
+	const untilBox = findLayoutBox(layoutRoot(box), until);
+	if (!untilBox || untilBox.rect.y <= viewBottom) return;
+	const thumbAtBottom = geometry.thumbTop + geometry.thumbHeight >= viewBottom;
+	if (!thumbAtBottom) return;
+	for (let row = viewBottom; row < untilBox.rect.y; row++) paintRow(row);
 }
 
 function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {

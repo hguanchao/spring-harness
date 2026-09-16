@@ -78,5 +78,11 @@ describe('isBlockedHost', () => {
     assert.equal(isBlockedHost('192.168.1.1'), true);
     assert.equal(isBlockedHost('172.16.0.1'), true);
     assert.equal(isBlockedHost('example.com'), false);
+    assert.equal(isBlockedHost('::1'), true);
+    assert.equal(isBlockedHost('::ffff:127.0.0.1'), true);
+    assert.equal(isBlockedHost('fe80::1'), true);
+    assert.equal(isBlockedHost('fd12:3456::1'), true);
+    assert.equal(isBlockedHost('100.64.1.1'), true);
+    assert.equal(isBlockedHost('8.8.8.8'), false);
   });
 });

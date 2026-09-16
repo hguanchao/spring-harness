@@ -12,6 +12,11 @@ export interface ScrollViewOptions {
 	scrollbarTrackStyle?: (text: string) => string;
 	scrollbarThumbStyle?: (text: string) => string;
 	scrollbarHideDelayMs?: number;
+	/**
+	 * 滑块视觉下沿画到该组件顶（不含该组件）。转录区在输入框之上，
+	 * 把 until 设成 editor，滚动条就能接到对话框，而不是停在 Working 行上面。
+	 */
+	scrollbarUntil?: Component;
 }
 
 export interface ScrollViewScrollToOptions {
@@ -40,6 +45,8 @@ export class ScrollView extends Container {
 	readonly overscroll: "chain" | "contain";
 	readonly scrollbarTrackStyle: (text: string) => string;
 	readonly scrollbarThumbStyle: (text: string) => string;
+	/** 滑块视觉延伸到该组件顶；省略则只画在 ScrollView 自己的高度里。 */
+	readonly scrollbarUntil?: Component;
 	private currentScrollbar: ScrollViewScrollbar;
 	private currentScrollTop = 0;
 	private contentHeight = 0;
@@ -67,6 +74,7 @@ export class ScrollView extends Container {
 		this.currentScrollbar = options.scrollbar ?? "hidden";
 		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
 		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
+		this.scrollbarUntil = options.scrollbarUntil;
 	}
 
 	get scrollTop(): number {

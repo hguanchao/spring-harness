@@ -31,6 +31,8 @@ export const EXPLICIT_ACCESS_W_SIZE = 48;
 export const SECURITY_MAX_SID_SIZE = 68;
 export const STARTF_USESTDHANDLES = 0x00000100;
 export const HANDLE_FLAG_INHERIT = 1;
+/** CreateProcessAsUserW 传入 Unicode 环境块时必须置位，否则会按 ANSI 解这块 UTF-16。 */
+export const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
 
 export type Handle = unknown;
 
@@ -211,7 +213,7 @@ export const api = {
     threadSa: Handle | null,
     inherit: number,
     flags: number,
-    env: Handle | null,
+    env: Buffer | Handle | null,
     cwd: string,
     startup: unknown,
     pi: unknown,

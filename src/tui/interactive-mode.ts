@@ -418,6 +418,7 @@ class InteractiveMode implements ApprovalUi {
       scrollbar: 'auto',
       scrollbarTrackStyle: (text) => theme.fg('dim', text),
       scrollbarThumbStyle: (text) => theme.fg('dim', text),
+      scrollbarUntil: this.editorContainer,
     });
     this.transcriptView = transcript;
     const dock = new VStack([
@@ -1106,8 +1107,8 @@ class InteractiveMode implements ApprovalUi {
     this.currentIndicator?.dispose();
     this.currentIndicator = indicator;
     this.activityLabel = undefined;
-    // 状态行常驻输入框上方（grok-build 的 turn status 行位置），左对齐：空闲时是
-    // 两行占位，工作时换成「转圈 + 阶段文案」。两种形态同为两行，切换时高度不变。
+    // 状态行常驻输入框上方（grok-build 的 turn status 行位置）：空闲时是两行占位，
+    // 工作时换成「转圈 + 阶段文案」+ 最右侧本轮耗时。两种形态同为两行，切换时高度不变。
     this.statusContainer.clear();
     this.statusContainer.addChild(indicator ?? this.idleStatus);
   }

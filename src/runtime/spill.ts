@@ -12,6 +12,7 @@
  *    也不能让工具结果凭空消失。
  */
 
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sanitizeIdent } from '../util.js';
@@ -47,9 +48,11 @@ export class SpillStore {
     if (!this.enabled || text.length <= this.threshold) return undefined;
     let path: string;
     try {
-      mkdirSync(this.root, { recursive: true });
-      path = join(this.root, `${sanitizeToolName(toolName)}-${Date.now().toString(36)}-${++spillSeq}.txt`);
-      writeFileSync(path, text, 'utf8');
+      mkdirSync(this.root, { recursive: true, mode: 0o700 });
+      const nonce = randomBytes(6).toString('hex');
+      path = join(this.root, `${sanitizeToolName(toolName)}-${Date.now().toString(36)}-${++spillSeq}-${nonce}.txt`);
+      // wx：路径上已有预放的 symlink 时失败并退回原文，而不是跟出去写。
+      writeFileSync(path, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     } catch {
       return undefined;
     }

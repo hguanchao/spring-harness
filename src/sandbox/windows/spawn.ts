@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, isAbsolute } from 'node:path';
 import {
   api,
+  CREATE_UNICODE_ENVIRONMENT,
   HANDLE_FLAG_INHERIT,
   PROCESS_INFORMATION,
   emptyStartup,
@@ -12,6 +13,7 @@ import {
 import koffi from 'koffi';
 
 import { quoteCommandLineArg } from './command-line.js';
+import { scrubbedParentEnv, windowsEnvBlock } from '../env.js';
 
 export interface Spawned {
   process: Handle;
@@ -52,6 +54,7 @@ export function spawnAsUser(token: Handle, command: string, args: string[], cwd:
   const exe = resolveExecutable(command);
   const cmd = [exe, ...args].map(quoteCommandLineArg).join(' ');
   const cmdBuf = Buffer.from(`${cmd}\0`, 'utf16le');
+  const envBuf = windowsEnvBlock(scrubbedParentEnv());
   const created = api.createProcessAsUserW(
     token,
     null,
@@ -59,8 +62,8 @@ export function spawnAsUser(token: Handle, command: string, args: string[], cwd:
     null,
     null,
     1,
-    0,
-    null,
+    CREATE_UNICODE_ENVIRONMENT,
+    envBuf,
     cwd,
     startup,
     pi,

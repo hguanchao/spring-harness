@@ -35,17 +35,26 @@ export function displayNameForModel(id: string): string {
  * 为什么单独放在 LLM 层：模型目录请求与具体对话协议无关，TUI 只需要拿到可选项，
  * 这样 API Key 不会进入界面状态，也不会在界面错误信息里被意外回显。
  */
-export async function listAvailableModels(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<string[]> {
+export async function listAvailableModels(
+  baseUrl: string,
+  apiKey: string,
+  options?: { signal?: AbortSignal; headers?: Record<string, string> },
+): Promise<string[]> {
   const url = `${baseUrl.replace(/\/+$/, '')}/models`;
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+    'anthropic-version': '2023-06-01',
+    ...options?.headers,
+  };
+  // 与 createSseClient 同一套免鉴权约定：空 key 不发 Authorization / x-api-key。
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+    headers['x-api-key'] = apiKey;
+  }
   const response = await fetch(url, {
     method: 'GET',
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${apiKey}`,
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    signal,
+    headers,
+    signal: options?.signal,
   });
   if (!response.ok) throw new Error(`获取上游模型失败（HTTP ${response.status}）`);
 

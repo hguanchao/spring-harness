@@ -152,7 +152,7 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       maxTokens: args.maxTokens ?? rt.config.maxTokens,
       makeClient: (overrides) => rt.makeClient(overrides),
       makeAuxClient: (model) => rt.makeAuxClient(model),
-      fetchModels: () => listAvailableModels(rt.config.baseUrl, rt.config.apiKey),
+      fetchModels: () => listAvailableModels(rt.config.baseUrl, rt.config.apiKey, { headers: rt.config.httpHeaders }),
       // 模型目录缓存放用户主目录：/model 靠它在启动时直接命中，不必现等上游一个 RTT。
       modelCachePath: sphModelsPath(),
       // --model 是本次进程的显式选择，不该被会话里记录的模型覆盖；切换会话时仍然尊重会话记录。

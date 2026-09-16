@@ -226,3 +226,20 @@ describe('toResponsesInput', () => {
     assert.equal(items.some((item) => item.type === 'reasoning'), false);
   });
 });
+
+describe('applyResponsesEvent 非流式报文', () => {
+  it('完整 response JSON（无 type 字段）按 completed 收下', () => {
+    const acc = newSseAcc();
+    applyResponsesEvent(
+      JSON.stringify({
+        object: 'response',
+        status: 'completed',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }],
+      }),
+      acc,
+    );
+    const reply = finishStream(acc);
+    assert.equal(reply.text, 'hi');
+    assert.equal(reply.finishReason, 'stop');
+  });
+});

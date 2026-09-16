@@ -22,7 +22,7 @@ export function flattenWhitespace(text: string): string {
 /**
  * 时长的紧凑显示：一分钟内 `43.2s`，以上 `2m13s`。
  *
- * 工具分组（思考链耗时）与子代理活动行共用同一套写法，避免两处各印一个版本。
+ * 工具分组（思考链耗时）、子代理活动行、状态行右侧耗时共用同一套写法。
  */
 export function formatDuration(ms: number): string {
   const totalSeconds = ms / 1000;

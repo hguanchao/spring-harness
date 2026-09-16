@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Text } from '../components/primitives.js';
+import { Text, VStack } from '../components/primitives.js';
 import { ScrollView } from '../components/scroll-view.js';
 import { contentPaintRight, getScrollbarGeometry, getScrollViewBox, renderLayoutFrame } from './layout.js';
+import { stripTerminalSequences } from './utils.js';
 
 describe('ScrollView 布局缓存', () => {
   it('同代缓存命中后 follow-end 改了 scrollTop，文档仍跟着平移', () => {
@@ -38,5 +39,44 @@ describe('contentPaintRight', () => {
     const box = getScrollViewBox(frame, view);
     assert.ok(box);
     assert.equal(contentPaintRight(box), box.clip.x + box.clip.width);
+  });
+});
+
+describe('scrollbarUntil', () => {
+  it('follow-end 时滑块画到 until 组件顶，不停在转录区底', () => {
+    const body = Array.from({ length: 40 }, (_, i) => `L${i}`).join('\n');
+    const editor = new Text('prompt', 0, 0);
+    const view = new ScrollView(new Text(body, 0, 0), {
+      follow: 'end',
+      primary: true,
+      scrollbar: 'always',
+      scrollbarUntil: editor,
+    });
+    const root = new VStack(
+      [
+        { component: view, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+        { component: editor, basis: 'auto', grow: 0, shrink: 0, minSize: 1 },
+      ],
+      { gap: 1 },
+    );
+    const frame = renderLayoutFrame(root, 20, 12, () => {});
+    const scrollBox = getScrollViewBox(frame, view);
+    assert.ok(scrollBox);
+    const geo = getScrollbarGeometry(scrollBox);
+    assert.ok(geo);
+    const visit = (box: typeof frame.root): typeof frame.root | undefined => {
+      if (box.component === editor) return box;
+      for (const child of box.children) {
+        const found = visit(child);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const editorBox = visit(frame.root);
+    assert.ok(editorBox);
+    assert.ok(editorBox.rect.y > scrollBox.rect.y + scrollBox.rect.height);
+    const gutter = editorBox.rect.y - 1;
+    const cell = stripTerminalSequences(frame.lines[gutter] ?? '').slice(geo.column, geo.column + 1);
+    assert.equal(cell, '▐');
   });
 });

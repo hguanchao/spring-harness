@@ -5,6 +5,7 @@ import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../open.js';
 import { SandboxError, type SandboxMode, type SandboxStatus } from '../types.js';
 import { grantWrite, revokeWrite } from './acl.js';
 import { sidBuffer, tempWriteSid, workspaceWriteSid } from './sid.js';
+import { capSpawnOutput } from '../env.js';
 import { drainHandle, readExitCode, spawnAsUser } from './spawn.js';
 import {
   createRestrictedToken,
@@ -28,9 +29,8 @@ export interface WindowsAclOptions {
 /**
  * Windows restricted-token 后端。强制执行按设计是 partial。
  *
- * ACL 生命周期：`workspace` 档位会给工作区与 `~/.sph` 各加一条可继承的写授权（给受限 token
- * 持有的能力 SID），退出时全部撤销，把 DACL 还原到授权之前。`~/.sph` 的授权跨工作区共享
- * （见 dispose 与 session/lock.ts 的 hasOtherLiveSession），所以撤销要看还有没有别的会话在跑。
+ * ACL 生命周期：`workspace` 档位给工作区与临时目录加可继承写授权（给受限 token
+ * 持有的能力 SID），退出时撤销。`~/.sph` 不授写——配置和密钥由父进程写。
  */
 export class WindowsAclSandbox implements SandboxHandle {
   readonly status: SandboxStatus;
@@ -48,7 +48,6 @@ export class WindowsAclSandbox implements SandboxHandle {
   async init(): Promise<void> {
     try {
       const workspace = canonicalize(this.options.workspaceRoot);
-      const sphHome = canonicalize(this.options.sphHomeDir);
       const temp = canonicalize(this.options.tempDir);
       const processToken = openCurrentProcessToken();
       this.owned.push(processToken);
@@ -57,13 +56,10 @@ export class WindowsAclSandbox implements SandboxHandle {
       const writeSids: Buffer[] = [];
       if (this.options.mode === 'workspace') {
         const workspaceSid = workspaceWriteSid(workspace);
-        // ~/.sph 的 SID 由 sphHome 路径派生，不含工作区信息：所有会话算出来是同一个，
-        // 因此这条授权是跨工作区共享的（Linux 后端同样是全局 --bind sphHome）。
-        const sphSid = workspaceWriteSid(`${sphHome}\0sph`);
         const tmpSid = tempWriteSid(temp);
+        // 不给 ~/.sph 授写：配置/会话/密钥由父进程写，沙箱子进程不该改 api_key。
         const grants: Array<{ path: string; sddl: string; shared: boolean }> = [
           { path: workspace, sddl: workspaceSid, shared: false },
-          { path: sphHome, sddl: sphSid, shared: true },
           { path: temp, sddl: tmpSid, shared: false },
         ];
         for (const grant of grants) {
@@ -71,7 +67,7 @@ export class WindowsAclSandbox implements SandboxHandle {
           // 授一条记一条：只撤销真正生效过的，中途失败也不会去动没改过的 DACL。
           this.revocable.push(grant);
         }
-        writeSids.push(sidBuffer(workspaceSid), sidBuffer(sphSid), sidBuffer(tmpSid));
+        writeSids.push(sidBuffer(workspaceSid), sidBuffer(tmpSid));
       }
       const token = createRestrictedToken(
         processToken,
@@ -130,7 +126,7 @@ export class WindowsAclSandbox implements SandboxHandle {
       api.closeHandle(child.thread);
       api.closeHandle(child.process);
     }
-    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode };
+    return { stdout: capSpawnOutput(stdout.join('')), stderr: capSpawnOutput(stderr.join('')), exitCode: exitCode };
   }
 
   dispose(): void {

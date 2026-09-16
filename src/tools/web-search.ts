@@ -109,17 +109,25 @@ export function mergeSearchResults(
 }
 
 export function isBlockedHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/\.+$/, '');
+  const host = hostname.toLowerCase().replace(/\.+$/, '').replace(/^\[|\]$/g, '');
   if (
     host === 'localhost'
     || host.endsWith('.localhost')
     || host.endsWith('.local')
     || host === '127.0.0.1'
     || host === '::1'
+    || host === '::'
     || host === '0.0.0.0'
     || host === 'metadata.google.internal'
   ) {
     return true;
+  }
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
+  if (mapped) return isBlockedHost(mapped[1]!);
+  if (host.includes(':')) {
+    const first = host.split(':')[0] ?? '';
+    // fe80::/10 链路本地；fc00::/7 唯一本地。
+    if (/^fe[89ab]/i.test(first) || /^f[cd][0-9a-f]{0,2}$/i.test(first)) return true;
   }
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (!ipv4) return false;
@@ -129,6 +137,7 @@ export function isBlockedHost(hostname: string): boolean {
   if (a === 169 && b === 254) return true;
   if (a === 192 && b === 168) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
   return false;
 }
 

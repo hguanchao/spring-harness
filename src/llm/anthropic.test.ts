@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { toAnthropicRequest } from './anthropic.js';
+import { applyAnthropicEvent, toAnthropicRequest } from './anthropic.js';
 import { DEFAULT_REQUEST_CAPS } from './compat.js';
+import { finishStream, newSseAcc } from './openai.js';
 import type { ChatMessage } from './openai.js';
 
 const user = (content: string): ChatMessage => ({ role: 'user', content });
@@ -153,5 +154,27 @@ describe('toAnthropicRequest 输出上限', () => {
     const body = toAnthropicRequest({ model: 'm', messages: [user('hi')], tools: [] });
     assert.equal(body.max_tokens, 8192);
     assert.equal(body.thinking, undefined);
+  });
+});
+
+describe('applyAnthropicEvent 非流式报文', () => {
+  it('type=message 完整 JSON 收下正文与 stop', () => {
+    const acc = newSseAcc();
+    applyAnthropicEvent(
+      JSON.stringify({
+        type: 'message',
+        content: [{ type: 'text', text: 'hello' }],
+        stop_reason: 'end_turn',
+      }),
+      acc,
+    );
+    const reply = finishStream(acc);
+    assert.equal(reply.text, 'hello');
+    assert.equal(reply.finishReason, 'stop');
+  });
+
+  it('[DONE] 不当成 JSON 解析失败', () => {
+    const acc = newSseAcc();
+    assert.deepEqual(applyAnthropicEvent('[DONE]', acc), {});
   });
 });

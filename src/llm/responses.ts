@@ -210,6 +210,7 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
         arguments?: string;
         encrypted_content?: string | null;
         summary?: Array<{ type?: string; text?: string }>;
+        content?: Array<{ type?: string; text?: string }>;
       }>;
     };
   };
@@ -253,9 +254,18 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       return {};
     case 'response.completed':
     case 'response.incomplete': {
+      let textDelta: string | undefined;
       for (const item of data.response?.output ?? []) {
         if (item?.type === 'reasoning') upsertReasoning(acc, item);
         if (item?.type === 'function_call') upsertFunctionCall(acc, item);
+        // 流式路径里正文已经由 output_text.delta 写过；非流式完整报文只在这里有正文。
+        if (!acc.text && item?.type === 'message') {
+          for (const part of item.content ?? []) {
+            if ((part.type === 'output_text' || part.type === 'text') && part.text) {
+              textDelta = (textDelta ?? '') + (appendStreamDelta(acc, part.text).textDelta ?? '');
+            }
+          }
+        }
       }
       const usage = data.response?.usage;
       if (usage) {
@@ -269,18 +279,31 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
         );
       }
       acc.finish = data.type === 'response.incomplete' ? 'length' : 'stop';
-      return {};
+      return { textDelta };
     }
     case 'response.failed':
       throw llmError('Responses stream failed', llmErrorMessage(data.response?.error));
     case 'error':
       throw llmError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
-    default:
+    default: {
+      // 非流式完整报文：`{ object: "response", status, output }`，没有 `type: response.completed`。
+      const status = (data as { status?: string }).status;
+      const output = (data as { output?: unknown }).output;
+      if ((status === 'completed' || status === 'incomplete') && Array.isArray(output)) {
+        return applyResponsesEvent(
+          JSON.stringify({
+            type: status === 'incomplete' ? 'response.incomplete' : 'response.completed',
+            response: data,
+          }),
+          acc,
+        );
+      }
       // 部分端点把 error 塞在非 failed 事件里。
       if ((data as { error?: unknown }).error) {
         throw llmError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
       }
       return {};
+    }
   }
 }
 

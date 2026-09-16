@@ -35,7 +35,15 @@ export function acquireSessionLock(sessionDir: string, pid = process.pid): () =>
     }
     unlinkSync(path);
   }
-  writeFileSync(path, String(pid), { flag: 'wx' });
+  try {
+    writeFileSync(path, String(pid), { flag: 'wx' });
+  } catch (error) {
+    const code = error !== null && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : '';
+    if (code === 'EEXIST') {
+      throw new SessionLockedError(`session already in use (${path})`);
+    }
+    throw error;
+  }
   return () => {
     try {
       unlinkSync(path);

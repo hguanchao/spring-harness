@@ -193,8 +193,13 @@ export function toAnthropicRequest(
   };
 }
 
+function mapAnthropicStop(reason: string): string {
+  return reason === 'tool_use' ? 'tool_calls' : reason === 'max_tokens' ? 'length' : 'stop';
+}
+
 /** Anthropic SSE 事件流 → 与 chat.completions 共享的 SseAcc 累积结构。 */
 export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
+  if (payload === '[DONE]') return {};
   const event = parseSseJson(payload);
   if (!event) return {};
   const data = event as {
@@ -206,11 +211,33 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
     content_block?: { type?: string; id?: string; name?: string };
     delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; stop_reason?: string; usage?: { output_tokens?: number } };
     error?: { message?: string };
+    content?: Array<{ type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }>;
+    stop_reason?: string;
   };
   if (data.error || data.type === 'error') {
     throw llmError('Anthropic stream error', data.error?.message?.trim() || 'unknown');
   }
   switch (data.type) {
+    case 'message': {
+      // 非流式完整报文（网关把 stream 折成一条 JSON）。
+      let textDelta: string | undefined;
+      let thinkingDelta: string | undefined;
+      for (const [index, block] of (data.content ?? []).entries()) {
+        if (block.type === 'text' && block.text) {
+          textDelta = (textDelta ?? '') + (appendStreamDelta(acc, block.text).textDelta ?? '');
+        } else if (block.type === 'thinking' && (block.thinking || block.text)) {
+          thinkingDelta = (thinkingDelta ?? '') + (appendStreamDelta(acc, undefined, block.thinking || block.text).thinkingDelta ?? '');
+        } else if (block.type === 'tool_use') {
+          acc.tools.set(index, {
+            id: block.id ?? '',
+            name: block.name ?? '',
+            arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {}),
+          });
+        }
+      }
+      if (data.stop_reason) acc.finish = mapAnthropicStop(data.stop_reason);
+      return { textDelta, thinkingDelta };
+    }
     case 'message_start': {
       // Anthropic 的 input_tokens 不含缓存部分，这里归一化成「含缓存的总输入」，
       // 与 chat-completions / responses 的口径一致（命中率与窗口占用都需要总输入量）。
@@ -241,7 +268,7 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
       return {};
     case 'message_delta':
       if (data.delta?.stop_reason) {
-        acc.finish = data.delta.stop_reason === 'tool_use' ? 'tool_calls' : data.delta.stop_reason === 'max_tokens' ? 'length' : 'stop';
+        acc.finish = mapAnthropicStop(data.delta.stop_reason);
       }
       if (acc.usage && data.delta?.usage?.output_tokens !== undefined) {
         acc.usage.completionTokens = data.delta.usage.output_tokens;

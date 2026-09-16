@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { capSpawnOutput, scrubbedParentEnv } from './env.js';
 import type { ConfinedSpawn, SpawnResult } from './open.js';
 
 export function spawnUnrestricted(options: ConfinedSpawn): Promise<SpawnResult> {
@@ -7,6 +8,7 @@ export function spawnUnrestricted(options: ConfinedSpawn): Promise<SpawnResult> 
       cwd: options.cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: scrubbedParentEnv(),
     });
     let stdout = '';
     let stderr = '';
@@ -31,7 +33,7 @@ export function spawnUnrestricted(options: ConfinedSpawn): Promise<SpawnResult> 
     child.on('close', (code) => {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', onAbort);
-      resolve({ stdout, stderr, exitCode: code });
+      resolve({ stdout: capSpawnOutput(stdout), stderr: capSpawnOutput(stderr), exitCode: code });
     });
   });
 }

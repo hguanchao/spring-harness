@@ -1,8 +1,9 @@
-import { degradeRequestCaps, initialRequestCaps, type RequestCaps } from './compat.js';
+import { degradeRequestCaps, degradeSilentCompat, initialRequestCaps, type RequestCaps } from './compat.js';
+import { ContextOverflowError } from './errors.js';
 import type { ChatMessage, LlmClient, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
-import { finishStream, newSseAcc, type SseAcc } from './openai.js';
+import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
 import { postSseStream } from './sse.js';
-import { RetryableError, withRetries } from './retry.js';
+import { backoffMs, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../util.js';
 
 /** 一个上游协议的静态差异：端点、鉴权头、请求体编码、SSE 事件解码。 */
@@ -53,6 +54,11 @@ export interface SseClientOptions {
  */
 const MAX_DEGRADATIONS = 8;
 
+/** 空 SSE / 空完成：再发同一份请求没有意义，应立刻降级字段而不是连打 8 次。 */
+function isSilentReject(error: unknown): boolean {
+  return error instanceof RetryableError && /no SSE data events|no content/.test(error.message);
+}
+
 /**
  * 三种协议共用的流式客户端。
  *
@@ -87,6 +93,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
       tools: unknown[],
       signal?: AbortSignal,
       onDelta?: (delta: { text?: string; thinking?: string }) => void,
+      onRetry?: (info: { attempt: number; message: string }) => void,
     ): Promise<StreamDelta> {
       let streamed = false;
       const wrapped = onDelta
@@ -99,19 +106,42 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
 
       const attempt = async (body: string): Promise<StreamDelta> => {
         const acc = newSseAcc();
-        await postSseStream({
-          url,
-          headers,
-          body,
-          signal,
-          onData: (payload) => {
-            const { textDelta, thinkingDelta } = adapter.apply(payload, acc);
-            if (textDelta || thinkingDelta) wrapped?.({ text: textDelta, thinking: thinkingDelta });
-          },
-        });
-        return finishStream(acc);
+        try {
+          await postSseStream({
+            url,
+            headers,
+            body,
+            signal,
+            onData: (payload) => {
+              const { textDelta, thinkingDelta } = adapter.apply(payload, acc);
+              if (textDelta || thinkingDelta) wrapped?.({ text: textDelta, thinking: thinkingDelta });
+            },
+          });
+        } catch (error) {
+          // 半截流已经上屏：丢掉再报错就是「突然中断」。只对瞬时传输错误交回半截，
+          // 让 loop 再打一轮。协议层 error 事件（审核拒绝、上游业务失败）必须上抛，
+          // 否则会把失败当成 stop 收工。
+          if (signal?.aborted) throw error;
+          if (error instanceof ContextOverflowError) throw error;
+          if (
+            error instanceof RetryableError
+            && (acc.text || acc.thinking || acc.tools.size > 0 || acc.reasoningItems.size > 0)
+          ) {
+            return finishStream(acc);
+          }
+          throw error;
+        }
+        const result = finishStream(acc);
+        // 对齐 deepseek-harness：正常结束但零内容是 EMPTY_RESPONSE，重试同一请求，
+        // 不要当成成功空回复让 loop 收工（截图里工具跑完下一跳空体就是这条路径）。
+        if (isEmptyReply(result)) {
+          throw new RetryableError('LLM returned a completed response with no content');
+        }
+        return result;
       };
 
+      const maxRetries = options.maxRetries ?? 8;
+      let transportTries = 0;
       for (let degradations = 0; ; ) {
         const body = adapter.buildBody(
           {
@@ -125,18 +155,25 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           caps,
         );
         try {
-          return await withRetries(
-            () => attempt(body),
-            (error: unknown) => !streamed && error instanceof RetryableError,
-            { maxRetries: options.maxRetries, signal },
-          );
+          return await attempt(body);
         } catch (error) {
-          // 已经输出过内容 / 已取消 / 降级次数用尽：原样上抛。
-          if (streamed || signal?.aborted || degradations >= MAX_DEGRADATIONS) throw error;
-          const next = degrade(caps, errorMessage(error));
-          if (!next) throw error;
-          caps = next;
-          degradations++;
+          if (streamed || signal?.aborted) throw error;
+          const text = errorMessage(error);
+          const next = degrade(caps, text)
+            ?? (isSilentReject(error) && degradations < MAX_DEGRADATIONS
+              ? degradeSilentCompat(caps)
+              : undefined);
+          if (next) {
+            onRetry?.({ attempt: degradations + 2, message: `${text}; dropping extra request fields` });
+            caps = next;
+            degradations++;
+            continue;
+          }
+          // 字段已经剥完：空 SSE 按传输抖动退避，不再立刻失败。
+          if (!(error instanceof RetryableError) || transportTries >= maxRetries) throw error;
+          transportTries++;
+          onRetry?.({ attempt: transportTries + 1, message: text });
+          await sleepAbortable(backoffMs(transportTries - 1), signal);
         }
       }
     },

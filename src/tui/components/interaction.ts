@@ -92,8 +92,8 @@ export interface WorkingIndicatorOptions {
 export type StatusIndicatorKind = 'working' | 'retry' | 'compaction';
 
 /**
- * 状态行文案：一个工作轮次里不同阶段给不同措辞，对齐 grok-build 的 turn status 行
- * （`⠧ Run command 0.2s   1m20s ⇣12k [stop]`）——左起转圈 + 阶段短语，随活动切换。
+ * 状态行文案：一个工作轮次里不同阶段给不同措辞。左起转圈 + 阶段短语，最右侧
+ * 本轮已运行时长（`12.3s` / `2m13s`），对齐 grok-build turn status 行的右侧耗时。
  *
  * 文案是唯一真源，调用方只按阶段取词，不各自拼字符串。
  */
