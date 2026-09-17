@@ -9,7 +9,7 @@ import { defaultTools } from '../tools/index.js';
 import type { AgentEvent } from './events.js';
 import type { ChatMessage, LlmClient, StreamDelta, TokenUsage } from '../llm/openai.js';
 import type { SandboxHandle } from '../sandbox/types.js';
-import type { Approver } from '../approval/policy.js';
+import type { Approver } from '../permission/policy.js';
 
 const sandbox: SandboxHandle = {
   status: { mode: 'off', enforcement: 'none', platform: process.platform },
@@ -457,5 +457,64 @@ describe('取消 rewind：首次响应前中止不落盘用户消息', () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe('子代理审批策略', () => {
+  /** 按脚本依次返回；脚本用尽后一直返回最后一项。 */
+  function scriptedClient(script: StreamDelta[]): LlmClient {
+    let index = 0;
+    return {
+      async complete(): Promise<StreamDelta> {
+        const step = script[Math.min(index, script.length - 1)];
+        index++;
+        return step!;
+      },
+    };
+  }
+
+  const SPAWN: StreamDelta = {
+    text: '',
+    finishReason: 'tool-calls',
+    toolCalls: [{ id: 's1', name: 'subagent', arguments: '{"prompt":"child work","description":"child work"}' }],
+  };
+  const SHELL: StreamDelta = {
+    text: '',
+    finishReason: 'tool-calls',
+    toolCalls: [{ id: 'c1', name: 'shell', arguments: '{"command":"npm test"}' }],
+  };
+  const DONE: StreamDelta = { text: 'done', finishReason: 'stop' };
+
+  /** 父先 spawn 子代理，子跑一条受审的 shell，然后各自收尾。 */
+  async function spawnThenShell(subagentApprover?: Approver): Promise<string[]> {
+    const { session, root, cleanup } = makeSession();
+    const seen: string[] = [];
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client: scriptedClient([SPAWN, SHELL, DONE, DONE]),
+        session,
+        tools: defaultTools,
+        sandbox,
+        approver: { decide: async () => { seen.push('parent'); return true; } },
+        ...(subagentApprover === undefined ? {} : { subagentApprover }),
+        contextWindow: 100_000,
+      });
+    } finally {
+      cleanup();
+    }
+    return seen;
+  }
+
+  it('给了 subagentApprover 时，子代理的受审工具由它判定', async () => {
+    const childSeen: string[] = [];
+    const parentSeen = await spawnThenShell({ decide: async () => { childSeen.push('child'); return true; } });
+    assert.deepEqual(childSeen, ['child'], '子代理的 shell 调用必须由 subagentApprover 判定');
+    assert.deepEqual(parentSeen, [], '父会话的 approver 不该被子代理的调用碰到');
+  });
+
+  it('省略 subagentApprover 时沿用父会话的 approver（inherit）', async () => {
+    assert.deepEqual(await spawnThenShell(), ['parent']);
   });
 });

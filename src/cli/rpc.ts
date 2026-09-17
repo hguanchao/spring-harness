@@ -4,7 +4,7 @@
  */
 import { createInterface } from 'node:readline';
 import { runTurn } from '../agent/loop.js';
-import { HeadlessApprover } from '../approval/policy.js';
+import { HeadlessApprover } from '../permission/policy.js';
 import { jsonlSessionFactory } from '../session/store.js';
 import { defaultTools } from '../tools/index.js';
 import { createJsonOutput } from './output.js';
@@ -60,7 +60,7 @@ export async function runRpcLoop(runtime: Runtime, options: {
         tools: runtime.tools ?? defaultTools,
         sessions: runtime.sessions ?? jsonlSessionFactory,
         sandbox,
-        approver: new HeadlessApprover(options.approval),
+        approver: new HeadlessApprover(options.approval, undefined, config.permissions),
         contextWindow: config.contextWindow,
         listener: output.listener,
         signal: abort.signal,

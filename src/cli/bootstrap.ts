@@ -124,7 +124,7 @@ export interface Runtime {
   workspaceRoot: string;
   sessionDir: string;
   config: SphConfig;
-  /** config.toml 路径：TUI 把 /model、/effort、/approval 的选择写回这里。 */
+  /** config.toml 路径：TUI 把 /model、/effort、/permission 的选择写回这里。 */
   configPath: string;
   sandbox: SandboxHandle;
   session: JsonlSession;
@@ -167,7 +167,7 @@ export interface Runtime {
    */
   makeAuxClient(model: string | undefined): LlmClient | undefined;
   /**
-   * 把会话锁换到另一个 id（TUI `/new`、`/sessions`）。
+   * 把会话锁换到另一个 id（TUI `/new`、`/resume`）。
    * 先拿到新锁再放旧锁：失败时当前会话仍占用，不会两边落空。
    */
   claimSession(id: string): void;

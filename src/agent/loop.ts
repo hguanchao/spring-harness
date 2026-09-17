@@ -1,4 +1,4 @@
-import type { Approver } from '../approval/policy.js';
+import type { Approver } from '../permission/policy.js';
 import {
   flushWireImages,
   loadCompaction,
@@ -69,6 +69,14 @@ export interface RunTurnOptions {
   sessions?: SessionFactory;
   sandbox: SandboxHandle;
   approver: Approver;
+  /**
+   * 子代理专用的审批器；省略则复用 `approver`。
+   *
+   * 为什么要有这一项：子代理是自动化的，把交互决策连同父会话已经攒下的授权原样传下去，
+   * 等于让后台任务替你签字。`subagent_approval = "strict"` 时调用方传一个 fail-closed 的
+   * 审批器进来即可——策略判定留在调用方，loop 只负责挑，不复制那份判断。
+   */
+  subagentApprover?: Approver;
   contextWindow: number;
   listener?: AgentListener;
   signal?: AbortSignal;
@@ -432,7 +440,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         tools: registry,
         sessions,
         sandbox: options.sandbox,
-        approver: options.approver,
+        approver: options.subagentApprover ?? options.approver,
         contextWindow: options.contextWindow,
         listener: childListener,
         signal: input.signal ?? options.signal,

@@ -83,7 +83,7 @@ export function recapInstruction(): string {
     'Synthetic examples (style only — adapt to THIS session, do not copy):',
     '',
     'You asked how retries work in the LLM client: backoff lives in `src/llm/retry.ts`, capped attempts, transient 5xx only.',
-    'You asked for a walkthrough of the approval flow: policy in `src/approval/policy.ts`, ask/auto/yolo modes, no writes without a decision.',
+    'You asked for a walkthrough of the approval flow: policy in `src/permission/policy.ts`, ask/auto/yolo modes, no writes without a decision.',
     'We added the `/recap` command: read-only one-line summary in `src/agent/recap.ts`, gated on main turns and idle time.',
     'We fixed the tool-group rendering: thinking rows were split in two because the group was re-acquired after streaming text.',
     '',

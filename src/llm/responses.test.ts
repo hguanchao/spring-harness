@@ -210,6 +210,15 @@ describe('toResponsesInput', () => {
     assert.equal(items[3]?.type, 'function_call');
   });
 
+  it('没有摘要时仍发空 summary：上游把该字段列为必需，缺键直接 400', () => {
+    const items = toResponsesInput([
+      user('hi'),
+      { role: 'assistant', content: 'x', reasoning: [{ id: 'rs_1', encryptedContent: 'enc' }] },
+    ]);
+    assert.equal(items[1]?.type, 'reasoning');
+    assert.deepEqual(items[1]?.summary, []);
+  });
+
   it('没有 encrypted_content 的推理项不回传：空壳重建不了状态', () => {
     const items = toResponsesInput([
       user('hi'),

@@ -306,7 +306,7 @@ export const webSearchTool: ToolSpec = {
       return { ok: false, content: error instanceof Error ? error.message : String(error) };
     }
     const allowed = await ctx.approve('web_search', queries.join(', '));
-    if (!allowed) return { ok: false, content: 'web_search denied' };
+    if (!allowed) return { ok: false, content: 'web_search denied by the approval policy — do not retry it by another route' };
     const timeout = AbortSignal.timeout(WEB_SEARCH_TIMEOUT_MS);
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
     try {

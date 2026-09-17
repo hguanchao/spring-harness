@@ -157,6 +157,62 @@ describe('压缩请求复用对话前缀', () => {
   });
 });
 
+describe('手动压缩（/compact）', () => {
+  const summaryClient = (captured: ChatMessage[][]) => ({
+    async complete(messages: ChatMessage[]) {
+      captured.push(messages);
+      return { text: '## Goal and Acceptance Criteria\n- done', finishReason: 'stop' };
+    },
+  } as unknown as Parameters<typeof projectContext>[0]['client']);
+
+  /**
+   * 12 轮，且每轮都撑到 2000 字符：消息太小时 stub 级就能把水位线压下去，摘要根本不跑，
+   * 断言会退化成「测了个空」。窗口给 800 时这条会话必然越过水位线。
+   */
+  function twelveTurns(): SessionMessage[] {
+    const messages: SessionMessage[] = [];
+    for (let i = 1; i <= 12; i++) {
+      messages.push(session({ role: 'user', content: `turn ${i} ${'q'.repeat(2000)}` }));
+      messages.push(session({ role: 'assistant', content: `a${i} ${'z'.repeat(2000)}` }));
+    }
+    return messages;
+  }
+
+  it('instructions 接在固定指令之后，段落结构不被顶掉', async () => {
+    const captured: ChatMessage[][] = [];
+    await projectContext({
+      messages: twelveTurns(),
+      contextWindow: 800,
+      client: summaryClient(captured),
+      instructions: 'focus on the auth changes',
+    });
+    const last = captured[0]?.at(-1);
+    assert.equal(last?.role, 'user');
+    assert.match(String(last?.content), /compaction engine/, '固定指令仍在');
+    assert.match(String(last?.content), /Output EXACTLY the sections below/, '段落结构没被指令顶掉');
+    assert.match(String(last?.content), /focus on the auth changes/, '聚焦说明被带上');
+  });
+
+  it('不传 instructions 时指令与自动路径逐字相同', async () => {
+    const captured: ChatMessage[][] = [];
+    await projectContext({ messages: twelveTurns(), contextWindow: 800, client: summaryClient(captured) });
+    assert.equal(String(captured[0]?.at(-1)?.content).includes('Additional focus'), false);
+  });
+
+  it('force 让远未到水位线的会话也能压缩（/compact 走的就是这条路）', async () => {
+    const captured: ChatMessage[][] = [];
+    const client = summaryClient(captured);
+    const messages = twelveTurns();
+    // 窗口给得极大：不 force 必然在水位线判断处早退，force 才会走到摘要。
+    const passive = await projectContext({ messages, contextWindow: 10_000_000, client });
+    assert.equal(passive.compaction, undefined);
+    assert.equal(captured.length, 0, '未到水位线时不该产生摘要调用');
+
+    const forced = await projectContext({ messages, contextWindow: 10_000_000, client, force: true });
+    assert.equal(forced.compaction?.covered, messages.length - 8, '覆盖到保留窗口之前');
+  });
+});
+
 describe('stub 边界冻结', () => {
   const TOOL_BYTES = 40_000;
   const CONTEXT_WINDOW = 68_750; // 水位线 = 55_000 tokens：6 轮全量超线、4 轮完好低于线

@@ -7,7 +7,7 @@ import { runTurn } from './loop.js';
 import type { AgentEvent } from './events.js';
 import type { LlmClient, StreamDelta } from '../llm/openai.js';
 import type { SandboxHandle } from '../sandbox/types.js';
-import type { Approver } from '../approval/policy.js';
+import type { Approver } from '../permission/policy.js';
 import { ToolRegistry } from '../tools/registry.js';
 import type { ToolSpec } from '../tools/types.js';
 import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../session/types.js';

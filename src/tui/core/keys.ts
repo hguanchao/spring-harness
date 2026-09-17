@@ -410,10 +410,6 @@ interface ParsedModifyOtherKeysSequence {
 	modifier: number;
 }
 
-// Store the last parsed event type for isKeyRelease() to query.
-// Exported so the vendored copy stays free of unused-local diagnostics.
-export let _lastEventType: KeyEventType = "press";
-
 /**
  * Check if the last parsed key event was a key release.
  * Only meaningful when Kitty keyboard protocol with flag 2 is active.
@@ -507,7 +503,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		const baseLayoutKey = csiUMatch[3] ? parseInt(csiUMatch[3], 10) : undefined;
 		const modValue = csiUMatch[4] ? parseInt(csiUMatch[4], 10) : 1;
 		const eventType = parseEventType(csiUMatch[5]);
-		_lastEventType = eventType;
 		return { codepoint, shiftedKey, baseLayoutKey, modifier: modValue - 1, eventType };
 	}
 
@@ -516,7 +511,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 	if (arrowMatch) {
 		const modValue = parseInt(arrowMatch[1]!, 10);
 		const eventType = parseEventType(arrowMatch[2]);
-		_lastEventType = eventType;
 		return { codepoint: KITTY_ARROW_CODES[arrowMatch[3]!]!, modifier: modValue - 1, eventType };
 	}
 
@@ -528,7 +522,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		const eventType = parseEventType(funcMatch[3]);
 		const codepoint = KITTY_FUNC_CODES[keyNum];
 		if (codepoint !== undefined) {
-			_lastEventType = eventType;
 			return { codepoint, modifier: modValue - 1, eventType };
 		}
 	}
@@ -539,7 +532,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		const modValue = parseInt(homeEndMatch[1]!, 10);
 		const eventType = parseEventType(homeEndMatch[2]);
 		const codepoint = homeEndMatch[3] === "H" ? FUNCTIONAL_CODEPOINTS.home : FUNCTIONAL_CODEPOINTS.end;
-		_lastEventType = eventType;
 		return { codepoint, modifier: modValue - 1, eventType };
 	}
 

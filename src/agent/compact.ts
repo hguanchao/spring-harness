@@ -381,10 +381,18 @@ async function summarize(
   tools: unknown[],
   signal?: AbortSignal,
   onUsage?: (usage: TokenUsage) => void,
+  instructions?: string,
 ): Promise<string> {
   // 对齐 dsh：压缩走对话前缀（system + 历史），指令垫在最后一条 user，吃 KV 缓存。
+  //
+  // `/compact <指令>` 的聚焦说明接在固定指令**之后**：它只改这一次摘要的重点，
+  // 段落与规则仍由 COMPACTION_SYSTEM 定——结构一旦由用户输入决定，下游解析就失去保证。
+  const focus = instructions?.trim();
+  const directive = focus
+    ? `${COMPACTION_SYSTEM}\n\nAdditional focus for this compaction:\n${focus}`
+    : COMPACTION_SYSTEM;
   const reply = await client.complete(
-    [...prefix, { role: 'user', content: COMPACTION_SYSTEM }],
+    [...prefix, { role: 'user', content: directive }],
     tools,
     signal,
   );
@@ -450,6 +458,12 @@ export async function projectContext(options: {
   /** 主轮工具表；压缩请求带上才能与上一跳共享前缀。 */
   tools?: unknown[];
   /**
+   * 手动压缩的聚焦说明（`/compact <指令>`）。
+   *
+   * 只影响摘要重点，不改 COMPACTION_SYSTEM 的固定结构；自动路径不传，行为不变。
+   */
+  instructions?: string;
+  /**
    * LLM 摘要即将开始。TUI 用来把状态行切到 Folding context…——stub 是同步的，
    * 只有这一步会卡住数秒，不通知的话状态行会一直停在 Calling model…。
    */
@@ -494,7 +508,7 @@ export async function projectContext(options: {
     try {
       const prefix = withSystem(toChatMessages(messages.slice(0, rangeFrom + range.length), compaction));
       options.onCompacting?.();
-      const summary = await summarize(client, prefix, options.tools ?? [], signal, options.onUsage);
+      const summary = await summarize(client, prefix, options.tools ?? [], signal, options.onUsage, options.instructions);
       const covered = rangeFrom + range.length;
       const next: CompactionEvent = { summary, covered };
       const projected = toChatMessages(messages, next);

@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { buildSystemPrompt } from './prompt.js';
 import { subagentPrompt } from './subagent-prompt.js';
 import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from './compact.js';
-import { CLASSIFIER_SYSTEM } from '../approval/auto.js';
+import { CLASSIFIER_SYSTEM } from '../permission/auto.js';
 import { memoryToPrompt, touchInstructionBlock, type MemoryFile } from './memory.js';
 import { EXPLORE_TOOLS, tools } from '../tools/index.js';
 

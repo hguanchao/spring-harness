@@ -1,6 +1,6 @@
 import { API_PROTOCOLS, parseSandboxMode, type ApiProtocol } from '../config/load.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
-import type { ApprovalMode } from '../approval/policy.js';
+import type { ApprovalMode } from '../permission/policy.js';
 import type { SandboxMode } from '../sandbox/types.js';
 
 export interface CliArgs {
@@ -57,15 +57,18 @@ Usage:
                                                 the last line is {"type":"result",...}
 
 TUI keys: /            command menu (Up/Down pick, Enter run)
-          Ctrl+K       all actions (sessions, model, approval, export, ...)
+          Ctrl+K       all actions (sessions, model, permission, export, ...)
           Wheel / PgUp / PgDn  scroll the conversation view (full-screen UI)
           Up / Down    prompt history
           Esc          back to latest / abort the running turn / cancel a prompt
           Ctrl+L       clear the view
           Ctrl+C       abort the running turn; press twice to exit
           Ctrl+D       exit (when the input is empty)
-TUI commands: /help /new /sessions /skills /mcps /plan /goal
-              /model /effort /approval
+TUI commands: /help /new /resume /skills /mcps /plan /goal
+              /compact /model /effort /permission
+              (/sessions is an alias of /resume; /resume <id> switches
+              directly, /resume alone opens the picker. /compact folds
+              older history into a checkpoint on demand.)
               (a recap is generated automatically when you come back
               after being away)
               /mcps manages servers (enable/disable, add, remove, reload)

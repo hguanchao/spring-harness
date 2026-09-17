@@ -4,7 +4,6 @@
  * 分层与参考实现 pi 对齐：
  *   - core/       —— 通用终端 UI 框架（差分渲染、布局、组件、键位、编辑器、Markdown…）
  *   - theme/      —— 命名色板与组件主题
- *   - syntax/     —— 代码高亮
  *   - components/ —— 应用组件（消息块、工具块、底栏、编辑器外壳…）
  *   - interactive-mode.ts —— 交互模式装配与调度
  */

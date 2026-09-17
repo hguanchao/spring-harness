@@ -178,3 +178,54 @@ describe('applyAnthropicEvent 非流式报文', () => {
     assert.deepEqual(applyAnthropicEvent('[DONE]', acc), {});
   });
 });
+
+describe('applyAnthropicEvent 流式 usage', () => {
+  it('message_delta 的 usage 在事件顶层，不是嵌在 delta 里', () => {
+    // 规范形态，官方 API / Bedrock / Vertex 都这么发。曾经读 data.delta.usage，
+    // 于是所有按规范实现的端点 token 统计恒为 0（zen 的 message_start 又只给 0，
+    // 两头都拿不到真值）。prompt 是 input + cache_read 的归一化口径。
+    const acc = newSseAcc();
+    applyAnthropicEvent(
+      JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 0, output_tokens: 0 } } }),
+      acc,
+    );
+    applyAnthropicEvent(
+      JSON.stringify({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn', stop_sequence: null },
+        usage: { input_tokens: 10, output_tokens: 67, cache_read_input_tokens: 12 },
+      }),
+      acc,
+    );
+    assert.deepEqual(finishStream(acc).usage, {
+      promptTokens: 22,
+      completionTokens: 67,
+      totalTokens: 89,
+      cachedTokens: 12,
+    });
+  });
+
+  it('usage 被塞进 delta 的非规范网关仍然读得到', () => {
+    const acc = newSseAcc();
+    applyAnthropicEvent(
+      JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', usage: { output_tokens: 42 } } }),
+      acc,
+    );
+    assert.equal(finishStream(acc).usage?.completionTokens, 42);
+  });
+
+  it('message_delta 只带 output_tokens 时不把 message_start 的输入抹成 0', () => {
+    const acc = newSseAcc();
+    applyAnthropicEvent(
+      JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 100, cache_read_input_tokens: 40 } } }),
+      acc,
+    );
+    applyAnthropicEvent(JSON.stringify({ type: 'message_delta', delta: {}, usage: { output_tokens: 7 } }), acc);
+    assert.deepEqual(finishStream(acc).usage, {
+      promptTokens: 140,
+      completionTokens: 7,
+      totalTokens: 147,
+      cachedTokens: 40,
+    });
+  });
+});

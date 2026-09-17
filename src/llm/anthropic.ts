@@ -198,6 +198,44 @@ function mapAnthropicStop(reason: string): string {
   return reason === 'tool_use' ? 'tool_calls' : reason === 'max_tokens' ? 'length' : 'stop';
 }
 
+/**
+ * Anthropic 的 usage 块。
+ *
+ * 同一个块在不同事件里的位置不一样，这是本文件最容易踩的坑：
+ * `message_start` 在 `data.message.usage`，`message_delta` 在**事件顶层** `data.usage`
+ * （与 `delta` 平级，不是嵌在它里面）。
+ */
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+/**
+ * usage 块 → 归一化三元组。
+ *
+ * `input_tokens` 不含缓存部分，这里加成「含缓存的总输入」，与 chat-completions /
+ * responses 的口径一致（命中率与窗口占用都要总输入量）。
+ *
+ * `completion` 刻意保留 `undefined` 语义：调用方要靠它区分「事件里没有这个字段」和
+ * 「真的是 0」——前者不能覆盖已有的真值。
+ */
+function readAnthropicUsage(usage: AnthropicUsage | undefined): {
+  prompt: number;
+  completion?: number;
+  cached?: number;
+} {
+  const uncached = usage?.input_tokens ?? 0;
+  const cacheRead = usage?.cache_read_input_tokens ?? 0;
+  const cacheWrite = usage?.cache_creation_input_tokens ?? 0;
+  return {
+    prompt: uncached + cacheRead + cacheWrite,
+    completion: usage?.output_tokens,
+    cached: cacheRead + cacheWrite === 0 ? undefined : cacheRead,
+  };
+}
+
 /** Anthropic SSE 事件流 → 与 chat.completions 共享的 SseAcc 累积结构。 */
 export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string } {
   if (payload === '[DONE]') return {};
@@ -206,11 +244,13 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
   const data = event as {
     type?: string;
     message?: {
-      usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+      usage?: AnthropicUsage;
     };
     index?: number;
     content_block?: { type?: string; id?: string; name?: string };
-    delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; stop_reason?: string; usage?: { output_tokens?: number } };
+    delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; stop_reason?: string; usage?: AnthropicUsage };
+    /** `message_delta` 的 usage 在这里，与 `delta` 平级。 */
+    usage?: AnthropicUsage;
     error?: { message?: string };
     content?: Array<{ type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }>;
     stop_reason?: string;
@@ -240,13 +280,9 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
       return { textDelta, thinkingDelta };
     }
     case 'message_start': {
-      // Anthropic 的 input_tokens 不含缓存部分，这里归一化成「含缓存的总输入」，
-      // 与 chat-completions / responses 的口径一致（命中率与窗口占用都需要总输入量）。
-      const uncached = data.message?.usage?.input_tokens ?? 0;
-      const cacheRead = data.message?.usage?.cache_read_input_tokens ?? 0;
-      const cacheWrite = data.message?.usage?.cache_creation_input_tokens ?? 0;
-      const prompt = uncached + cacheRead + cacheWrite;
-      writeUsage(acc, prompt, 0, prompt, cacheRead + cacheWrite === 0 ? undefined : cacheRead);
+      // 口径归一化见 readAnthropicUsage。
+      const usage = readAnthropicUsage(data.message?.usage);
+      writeUsage(acc, usage.prompt, 0, usage.prompt, usage.cached);
       return {};
     }
     case 'content_block_start':
@@ -270,15 +306,27 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
         if (tool) tool.arguments += data.delta.partial_json;
       }
       return {};
-    case 'message_delta':
+    case 'message_delta': {
       if (data.delta?.stop_reason) {
         acc.finish = mapAnthropicStop(data.delta.stop_reason);
       }
-      if (acc.usage && data.delta?.usage?.output_tokens !== undefined) {
-        acc.usage.completionTokens = data.delta.usage.output_tokens;
-        acc.usage.totalTokens = acc.usage.promptTokens + acc.usage.completionTokens;
+      // usage 在**事件顶层**、与 delta 平级（Anthropic streaming 规范）。只读
+      // `data.delta.usage` 会让所有按规范实现的端点恒得 0——官方 API、Bedrock、Vertex
+      // 都一样，与具体模型无关。少数网关把 usage 塞进 delta，那条路径留作回退，
+      // 所以这里是「先顶层、再回退」，不是替换。
+      const raw = data.usage ?? data.delta?.usage;
+      if (raw) {
+        // 该事件的计数是**累积值**，直接覆盖即可。但缺字段不能把 message_start 已经拿到的
+        // 真值抹成 0：zen 的 message_start 恒给 input_tokens: 0、真值只在这里，而规范的
+        // message_delta 又常常只带 output_tokens。两边都得能补上对方缺的那半。
+        const next = readAnthropicUsage(raw);
+        const previous = acc.usage;
+        const prompt = next.prompt > 0 ? next.prompt : (previous?.promptTokens ?? 0);
+        const completion = next.completion ?? previous?.completionTokens ?? 0;
+        writeUsage(acc, prompt, completion, prompt + completion, next.cached ?? previous?.cachedTokens);
       }
       return {};
+    }
     default:
       // signature_delta / ping 等块对展示无意义，跳过。
       return {};

@@ -57,7 +57,12 @@ export function toResponsesInput(
           type: 'reasoning',
           id: item.id,
           encrypted_content: item.encryptedContent,
-          ...(item.summary ? { summary: [{ type: 'summary_text', text: item.summary }] } : {}),
+          // `summary` 是**必需字段**而不是可选字段：整个键缺席时上游直接 400
+          // `input[N] missing required field 'summary'`（N 指向本项）。而这里从不申请
+          // reasoning 摘要（见下方 REQUEST_REASONING_SUMMARY），摘要基本永远是空的——
+          // 空数组是合法值，键本身必须在。曾经写成「有摘要才带上」，结果只要回传
+          // reasoning 就必然被拒，多步工具轮次直接跑不下去。
+          summary: item.summary ? [{ type: 'summary_text', text: item.summary }] : [],
         });
       }
     }
@@ -99,7 +104,7 @@ export function buildResponsesRequest(
     model: options.model,
     stream: true,
     input: toResponsesInput(options.messages, caps),
-    // Responses 的工具定义是扁平结构，openaiTools() 产出的是嵌套 function 形态，这里摊平。
+    // Responses 的工具定义是扁平结构，而 ToolRegistry.schemas() 产出的是嵌套 function 形态，这里摊平。
     ...(options.tools.length > 0
       ? {
           tools: options.tools.map((tool) => ({ type: 'function', ...flattenToolSpec(tool) })),

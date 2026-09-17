@@ -22,7 +22,7 @@ export const shellTool: ToolSpec = {
   async execute(args, ctx: ToolContext): Promise<ToolResult> {
     const command = asString(args, 'command');
     const allowed = await ctx.approve('shell', command);
-    if (!allowed) return { ok: false, content: 'shell denied (headless requires --yolo; interactive requires approval)' };
+    if (!allowed) return { ok: false, content: 'shell denied by the approval policy (a deny rule, the approval mode, or the user) — do not retry it by another route' };
     const timeout = typeof args.timeout_ms === 'number' && args.timeout_ms > 0
       ? Math.min(args.timeout_ms, 5 * 60_000)
       : DEFAULT_TIMEOUT_MS;

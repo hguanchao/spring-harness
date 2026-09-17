@@ -2,7 +2,7 @@
 
 A personal, general-purpose agent runtime that runs on your own machine: one process, a terminal UI, and a tool-using LLM loop over a single workspace.
 
-It is written from scratch in TypeScript with six runtime dependencies — no CLI framework, no TUI framework, no HTTP client wrapper. That is a deliberate constraint rather than a boast: the parts that decide behaviour (the agent loop, the context budget, the terminal renderer, the sandbox) are the parts you can read end to end.
+It is written from scratch in TypeScript with five runtime dependencies — no CLI framework, no TUI framework, no HTTP client wrapper. That is a deliberate constraint rather than a boast: the parts that decide behaviour (the agent loop, the context budget, the terminal renderer, the sandbox) are the parts you can read end to end.
 
 - **Agent loop** — multi-step tool calling with an explicit 32-step ceiling, parallel-safe tool batching, and results committed in model order.
 - **Context management** — three-tier compaction (tool-result stubbing → LLM incremental summary → mechanical fold) plus recovery when a provider rejects the request as over-window.
@@ -47,6 +47,8 @@ Key facts:
 - `max_session_tokens` (default `0` = unlimited) caps cumulative prompt+completion tokens for the whole agent tree, including subagents and compaction. The count survives `--resume`; the turn stops before the next request when the budget is gone, and warns at 80%.
 - `max_retries` (default `10`) is how many times a failed upstream request is retried, not counting the first attempt. `0` fails immediately. Only 408/429/5xx, network errors, idle timeouts, and empty responses retry.
 - `subagent_max_depth` (default `1`) — `0` forbids delegation entirely.
+- `subagent_approval` (default `inherit`) — `strict` makes subagents fail closed: reviewed tools are denied without prompting, and the parent session's grants are not shared. `inherit` hands the child the same approver, grants included.
+- `[permissions]` — `allow` / `ask` / `deny` lists whose entries are `<tool>` or `<tool>:<pattern>` (`*` any run, `?` one character; no wildcard means an exact match). Rules are more specific than the mode, so they outrank it: **`deny` beats every mode including `yolo`**, `ask` also beats `yolo`, and `allow` skips the prompt. In headless mode an `ask` rule is a denial — there is nobody to ask.
 
 ## Usage
 
@@ -65,7 +67,7 @@ Useful flags: `--model`, `--effort` (`off|low|medium|high|xhigh|max`), `--max-to
 
 Theming: sph ships a fixed dark palette. Set `SPH_THEME=terminal` to drop hardcoded colors and emit basic ANSI codes instead, so the TUI follows your terminal emulator's own 16-color theme (canvas becomes the terminal's default background).
 
-TUI commands: `/help` `/new` `/sessions` `/skills` `/mcps` `/plan` `/goal` `/model` `/effort` `/approval`. `/skills` re-scans the skill roots on every open, and `/mcps` reports live server status and lets you enable/disable, add, remove, and reload — all reflect the current state rather than what the running turn started with.
+TUI commands: `/help` `/new` `/resume` `/skills` `/mcps` `/plan` `/goal` `/compact` `/model` `/effort` `/permission`. `/resume <id>` switches straight to a session and bare `/resume` opens the picker; `/sessions` is an alias. `/compact [instructions]` folds older history into a checkpoint on demand, optionally steering what the summary emphasises. `/permission` sets the approval mode (`ask | auto | yolo`) and writes it back to `config.toml` as the `approval` key. `/skills` re-scans the skill roots on every open, and `/mcps` reports live server status and lets you enable/disable, add, remove, and reload — all reflect the current state rather than what the running turn started with.
 
 ### MCP servers
 
@@ -105,7 +107,7 @@ Three independent layers, all failing closed:
 
 1. **Workspace trust.** A workspace must be trusted before the agent runs — `AGENTS.md` and the tools act inside it. `--trust` remembers it; the TUI asks once. Trust on a parent directory covers descendants, never the other way round.
 2. **Sandbox.** `off` / `workspace` (default) / `read-only`. Filesystem and process confinement come from the OS: a Windows restricted token with ACL write grants, or Linux `bwrap` mounts. **Reads, network, and hardlinks are not confined.** Denials are policy, not bugs — the prompt tells the model not to retry them by another route.
-3. **Approval.** `ask` (default) prompts per reviewed tool; `auto` sends the call to an LLM reviewer that denies when unsure; `yolo` allows everything. In headless mode `shell`, `web_search`, and `mcp` are denied unless approval is `yolo`.
+3. **Approval.** `ask` (default) prompts per reviewed tool; `auto` sends the call to an LLM reviewer that denies when unsure; `yolo` allows everything. In headless mode `shell`, `web_search`, and `mcp` are denied unless approval is `yolo`. The dialog's two *always allow* options are scoped to **that exact action** — a specific shell command, MCP tool, or path — never the whole tool, so approving `npm test` does not silently approve `rm -rf`. *For this session* lives in memory; *for this project* is written to `permissions.json` keyed by the git repo root, so a grant made in a subdirectory covers the whole repository. `[permissions]` rules sit above all of this: a `deny` rule is a hard boundary no mode can cross.
 
 Path handling canonicalises through `realpath` and rejects anything escaping the workspace root — including symlinked directories encountered while searching (a symlink is never traversed).
 
@@ -118,6 +120,7 @@ Everything user-level lives under `~/.sph/` and never in the repository:
 | `config.toml` | configuration; rewritten surgically by the TUI so comments and key order survive |
 | `sessions/<ws-key>/<id>.jsonl` | append-only session records (`message` / `event`), plus `current.json` pointer |
 | `trusted.json` | trusted workspace roots |
+| `permissions.json` | per-project approval grants, keyed by git repo root (falls back to the workspace root outside a repo) |
 | `models.json` | per-endpoint model catalog cache and user-entered capacity hints |
 | `spill/` | oversized tool results, kept out of context and referenced by path |
 
@@ -174,7 +177,7 @@ Notes for contributors:
 - **Windows ACL grants are machine-scoped for `~/.sph`.** The capability SID derives from the path, so it is shared across workspaces; it is revoked on exit unless another `sph` session is still running.
 - **One protocol per process.** `--api` applies to the main model; auxiliary calls follow `[aux].api` or the main protocol.
 - **No cost accounting.** The budget is denominated in tokens, not money — there are no per-model price tables.
-- `sph sessions` lists but does not delete; there is no manual `/compact`.
+- `sph sessions` lists but does not delete.
 
 ## License
 

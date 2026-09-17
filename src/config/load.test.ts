@@ -43,6 +43,52 @@ describe('启动校验', () => {
   });
 });
 
+describe('[permissions] 规则与 subagent_approval', () => {
+  it('缺省时没有规则，子代理策略是 inherit', () => {
+    const config = loadConfig({ configPath: configWith(''), env: {} });
+    assert.deepEqual(config.permissions, { allow: [], ask: [], deny: [] });
+    assert.equal(config.subagentApproval, 'inherit');
+  });
+
+  it('三张表原样读入，条目去掉首尾空白', () => {
+    const config = loadConfig({
+      configPath: configWith(
+        ['[permissions]', 'allow = [" shell:npm test "]', 'ask = ["shell:git push*"]', 'deny = ["shell:rm -rf*"]'].join('\n'),
+      ),
+      env: {},
+    });
+    assert.deepEqual(config.permissions.allow, ['shell:npm test']);
+    assert.deepEqual(config.permissions.ask, ['shell:git push*']);
+    assert.deepEqual(config.permissions.deny, ['shell:rm -rf*']);
+  });
+
+  it('未知键、非数组、空条目都拒绝启动', () => {
+    assert.throws(
+      () => loadConfig({ configPath: configWith('[permissions]\nallows = ["x"]\n'), env: {} }),
+      /unknown permissions key/,
+    );
+    assert.throws(
+      () => loadConfig({ configPath: configWith('[permissions]\ndeny = "shell:rm"\n'), env: {} }),
+      /must be an array/,
+    );
+    assert.throws(
+      () => loadConfig({ configPath: configWith('[permissions]\ndeny = ["  "]\n'), env: {} }),
+      /non-empty string/,
+    );
+  });
+
+  it('subagent_approval 只认 inherit / strict', () => {
+    assert.equal(
+      loadConfig({ configPath: configWith('subagent_approval = "strict"'), env: {} }).subagentApproval,
+      'strict',
+    );
+    assert.throws(
+      () => loadConfig({ configPath: configWith('subagent_approval = "never"'), env: {} }),
+      /subagent_approval must be one of/,
+    );
+  });
+});
+
 describe('prompt_cache', () => {
   it('未配置时默认开：agent 多步循环里缓存收益远大于写入成本', () => {
     assert.equal(loadConfig({ configPath: configWith(''), env: {} }).promptCache, true);

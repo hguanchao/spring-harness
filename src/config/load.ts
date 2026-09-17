@@ -1,6 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
-import { APPROVAL_MODES, type ApprovalMode } from '../approval/policy.js';
+import {
+  APPROVAL_MODES,
+  EMPTY_RULES,
+  SUBAGENT_APPROVAL_POLICIES,
+  type ApprovalMode,
+  type PermissionRules,
+  type SubagentApprovalPolicy,
+} from '../permission/policy.js';
 import { sphConfigPath } from '../home.js';
 import {
   SESSION_AFFINITY_FORMATS,
@@ -48,6 +55,19 @@ export interface SphConfig {
   reasoningEffort?: ReasoningEffort;
   /** 缺省审批模式；未配置时由 CLI 兜底为 ask。 */
   approval?: ApprovalMode;
+  /**
+   * 针对具体动作的长期规则（`[permissions]`）；省略即无规则。
+   *
+   * 与 `approval` 的分工：模式是全局的当下态度，规则是更具体的长期意图，优先级更高。
+   */
+  permissions: PermissionRules;
+  /**
+   * 子代理的审批策略；省略按 `inherit`。
+   *
+   * `inherit` 复用父会话的审批器（含父会话已批准的授权），`strict` 让子代理 fail-closed：
+   * 受审工具一律拒绝、不弹窗、不共享父会话的授权。
+   */
+  subagentApproval: SubagentApprovalPolicy;
   api: ApiProtocol;
   mcpServers: McpServerConfigFile[];
   /** 压缩摘要专用模型（同一个 base_url/api_key）；省略则用主模型。 */
@@ -106,7 +126,8 @@ context_window = 256000
 sandbox = "workspace"
 # api = "chat-completions"      # chat-completions | responses | anthropic-messages
 # reasoning_effort = "medium"   # off | low | medium | high | xhigh | max
-# approval = "ask"              # ask | auto | yolo（/approval 的选择会写回这里）
+# approval = "ask"              # ask | auto | yolo（/permission 的选择会写回这里）
+# subagent_approval = "inherit" # inherit | strict；strict 让子代理一律 fail-closed，不弹窗
 # compact_model = ""            # 压缩摘要用的便宜模型；留空用主模型
 # review_model = ""             # auto 审批审查器用的模型；留空用主模型
 # [aux]                         # 辅助调用（压缩摘要 / auto 审查器）走另一个端点；
@@ -125,6 +146,10 @@ sandbox = "workspace"
 # prompt_cache_retention = true # 发 prompt_cache_retention = "24h"；默认关
 # stream_options = false        # 关掉 stream_options.include_usage
 # session_affinity = "openrouter"  # openai | openrouter | off
+# [permissions]                 # 针对具体动作的长期规则，比 approval 模式更具体
+# allow = ["shell:npm test"]    # 条目为 <tool> 或 <tool>:<pattern>；* 任意长、? 单字符
+# ask = ["shell:git push*"]     # 命中即强制问人（headless 下等于拒绝）
+# deny = ["shell:rm -rf*"]      # 硬边界：deny 连 yolo 也绕不过去
 # [http_headers]                # 附加到每个 LLM 请求的静态头；api_key = ""（显式空）时免鉴权
 # "User-Agent" = "opencode/1.4.3"
 # "X-Opencode-Session" = "some-session-id"
@@ -225,6 +250,8 @@ export function loadConfig(options?: {
   const sandbox = options?.sandboxOverride ?? parseSandboxMode(asString(file.sandbox, 'sandbox'));
   const reasoningEffort = parseReasoningEffort(file.reasoning_effort);
   const approval = parseApprovalMode(file.approval);
+  const permissions = parsePermissionRules(file.permissions);
+  const subagentApproval = parseSubagentApproval(file.subagent_approval);
   const api = parseApiProtocol(file.api);
   const mcpServers = parseMcpServers(file.mcp_servers);
   const compactModel = parseOptionalModel(file.compact_model, 'compact_model');
@@ -239,6 +266,7 @@ export function loadConfig(options?: {
   const mcpPreferences = parseMcpPreferences(file.mcp);
   return {
     baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
+    permissions, subagentApproval,
     compactModel, reviewModel, aux, spillThreshold, httpHeaders, proxy, subagentMaxDepth, promptCache,
     compat, maxSessionTokens, maxRetries, mcpPreferences,
   };
@@ -402,7 +430,7 @@ function parseSpillThreshold(value: unknown): number {
 }
 
 /**
- * 审批模式可选。放在配置里是为了让 `/approval` 的选择能跨进程生效——
+ * 审批模式可选。放在配置里是为了让 `/permission` 的选择能跨进程生效——
  * 在此之前它只能来自 `--approval` / `--yolo`，命令行一过就没了。
  */
 export function parseApprovalMode(value: unknown): ApprovalMode | undefined {
@@ -411,6 +439,50 @@ export function parseApprovalMode(value: unknown): ApprovalMode | undefined {
     throw new ConfigError(`approval must be one of: ${APPROVAL_MODES.join(' | ')}`);
   }
   return value as ApprovalMode;
+}
+
+/**
+ * `[permissions]` 表：allow / ask / deny 三张字符串表，缺省即空。
+ *
+ * 条目语法（`<tool>` 或 `<tool>:<pattern>`）由 permission/policy.ts 定义与解释，
+ * 这里只管「是不是三张字符串表」——与 `[mcp]` 的偏好解析同一个分工。
+ */
+export function parsePermissionRules(value: unknown): PermissionRules {
+  if (value === undefined) return EMPTY_RULES;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('permissions must be a table with allow / ask / deny lists');
+  }
+  const row = value as Record<string, unknown>;
+  for (const name of Object.keys(row)) {
+    if (name !== 'allow' && name !== 'ask' && name !== 'deny') {
+      throw new ConfigError(`unknown permissions key: ${name} (allow | ask | deny)`);
+    }
+  }
+  return {
+    allow: parseRuleList(row.allow, 'permissions.allow'),
+    ask: parseRuleList(row.ask, 'permissions.ask'),
+    deny: parseRuleList(row.deny, 'permissions.deny'),
+  };
+}
+
+function parseRuleList(value: unknown, key: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of rules`);
+  return value.map((item, index) => {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new ConfigError(`${key}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+}
+
+/** 子代理审批策略；省略默认 inherit——沿用既有行为，不静默改语义。 */
+export function parseSubagentApproval(value: unknown): SubagentApprovalPolicy {
+  if (value === undefined || value === '') return 'inherit';
+  if (typeof value !== 'string' || !(SUBAGENT_APPROVAL_POLICIES as readonly string[]).includes(value)) {
+    throw new ConfigError(`subagent_approval must be one of: ${SUBAGENT_APPROVAL_POLICIES.join(' | ')}`);
+  }
+  return value as SubagentApprovalPolicy;
 }
 
 /** 上游协议可选；未配置默认 chat-completions（兼容所有 OpenAI 形态端点）。 */

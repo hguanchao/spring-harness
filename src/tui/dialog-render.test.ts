@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -277,6 +277,94 @@ describe('斜杠命令打通到弹窗', () => {
       assert.match(screen, /broken — not connected/);
       assert.match(screen, /Reload from disk/, '管理器动作要可见，而不是只读弹窗');
       assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/resume 打开会话选择器并列出会话', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-resume-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub();
+    try {
+      // 选择器只列有对话的会话：没有 message 记录的文件会被 listSessions 跳过。
+      writeFileSync(
+        join(root, 'aaaaaaaa.jsonl'),
+        `${JSON.stringify({ type: 'message', ts: new Date().toISOString(), id: 'e1', parentId: null, role: 'user', content: 'earlier work' })}\n`,
+        'utf8',
+      );
+
+      const screen = await driveCommand(terminal, root, mcp, {}, '/resume');
+      assert.match(screen, /Sessions/, '选择器标题');
+      assert.match(screen, /aaaaaaaa/, '会话 id 进了列表');
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/sessions 是 /resume 的别名，仍然可达', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-alias-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub();
+    try {
+      // 空目录下能走到「没有会话」这句，就说明别名解析到了 /resume；被当成未知命令时
+      // 屏幕上会是 "Unknown command"，两者完全不同。
+      const screen = await driveCommand(terminal, root, mcp, {}, '/sessions');
+      assert.match(screen, /No sessions yet/);
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/permission 打开审批模式选择器（命令名对齐 dsh）', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-permission-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub();
+    try {
+      const screen = await driveCommand(terminal, root, mcp, {}, '/permission');
+      assert.match(screen, /Approval mode/);
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/compact 把历史压成检查点，并落一条 compaction 事件', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-compact-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub();
+    try {
+      // 摘要只在「保留窗口之外还有原始记录」时才会跑，所以要给足 8 条以上。
+      // 用 JsonlSession 真写一遍而不是手搓 JSON：parentId 链条由 append 自己接，
+      // 手写时链条一断 readMessages 就只剩尾巴，断言会退化成「测了个空」。
+      const seed = new JsonlSession(root, 'test');
+      for (let i = 1; i <= 12; i++) {
+        seed.appendMessage({ role: 'user', content: `turn ${i}` });
+        seed.appendMessage({ role: 'assistant', content: `a${i}` });
+      }
+
+      const screen = await driveCommand(
+        terminal,
+        root,
+        mcp,
+        {
+          makeClient: () => ({
+            complete: async () => ({ text: '## Goal and Acceptance Criteria\n- done', finishReason: 'stop' }),
+          }),
+        },
+        '/compact',
+      );
+
+      assert.match(screen, /Compacted \d+ messages into a checkpoint/);
+      assert.equal(screen.includes('Unknown command'), false);
+      // 只写事件、不维护内存态：下一轮由 loadCompaction 读回来，所以落盘是唯一要验证的。
+      assert.match(readFileSync(join(root, 'test.jsonl'), 'utf8'), /"kind":"compaction"/);
     } finally {
       mcp.dispose();
       rmSync(root, { recursive: true, force: true });

@@ -22,7 +22,7 @@ export const enterPlanModeTool: ToolSpec = {
       return { ok: true, content: 'Already in plan mode. Explore, then present the plan with exit_plan_mode.' };
     }
     const allowed = await ctx.approve('enter_plan_mode', 'enter plan mode');
-    if (!allowed) return { ok: false, content: 'User declined to enter plan mode.' };
+    if (!allowed) return { ok: false, content: 'enter_plan_mode was denied by the approval policy — do not retry it.' };
     ctx.setPlanMode(true);
     return {
       ok: true,

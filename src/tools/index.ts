@@ -24,6 +24,9 @@ function tagged(tool: ToolSpec, flags: Pick<ToolSpec, 'concurrencySafe' | 'explo
 /**
  * 默认产品工具表。标志写在装配处而不是每个工具文件里：漏标对照下面这份清单，
  * 不必在 17 个文件里搜三个布尔值。
+ *
+ * rootOnly 用于隔离子代理：send_subagent_message 这类工具若对子代理开放，
+ * 会形成无主的旁路通道。子代理的 allowedTools 由 ToolRegistry.generalNames() 剔除。
  */
 export const tools: ToolSpec[] = [
   tagged(readFileTool, { concurrencySafe: true, explore: true }),
@@ -57,23 +60,6 @@ export function isConcurrencySafe(name: string): boolean {
 }
 
 export const EXPLORE_TOOLS = defaultTools.exploreNames();
-
-/**
- * 仅根会话可见的工具（grok 的 send_subagent_message 同语义）：子代理互相发消息
- * 会形成无主的旁路通道。运行时为 general 子代理构建 allowedTools 时剔除，
- * denyReason 兜底双保险。
- */
-export const ROOT_ONLY_TOOLS = new Set(
-  tools.filter((tool) => tool.rootOnly).map((tool) => tool.name),
-);
-
-export function openaiTools(allowed?: ReadonlySet<string>) {
-  return defaultTools.schemas(allowed);
-}
-
-export function findTool(name: string): ToolSpec | undefined {
-  return defaultTools.find(name);
-}
 
 export { ToolRegistry } from './registry.js';
 export type { OpenAiTool } from './registry.js';

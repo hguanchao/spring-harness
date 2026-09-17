@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { createJsonOutput, createTextOutput } from './output.js';
-import { HeadlessApprover, type ApprovalMode } from '../approval/policy.js';
-import { createLlmClassifier } from '../approval/auto.js';
+import { HeadlessApprover, type ApprovalMode } from '../permission/policy.js';
+import { createLlmClassifier } from '../permission/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { sphModelsPath, sphSpillRoot } from '../home.js';
@@ -144,6 +144,8 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       todos: rt.todos,
       jobs: rt.jobs,
       approvalMode: args.approval ?? rt.config.approval ?? 'ask',
+      permissionRules: rt.config.permissions,
+      subagentApproval: rt.config.subagentApproval,
       configPath: rt.configPath,
       authLabel: rt.config.apiKey === '' ? 'Logged in with HTTP headers' : 'Logged in with API key',
       baseUrl: rt.config.baseUrl,
@@ -186,7 +188,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
   try {
     for (const warning of runtime.mcpWarnings) process.stderr.write(`${warning}\n`);
 
-    // 优先级：命令行 > 配置文件 > 内置默认。这样 /approval 写回 config 后下次启动仍生效。
+    // 优先级：命令行 > 配置文件 > 内置默认。这样 /permission 写回 config 后下次启动仍生效。
     const approvalMode: ApprovalMode = args.approval ?? config.approval ?? 'ask';
     const client = runtime.makeClient({
       model: args.model ?? config.model,
@@ -219,7 +221,12 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
         approvalMode === 'auto'
           ? createLlmClassifier(reviewClient ?? client, { onUsage: (usage) => recordAuxUsage(usage, 'review') })
           : undefined,
+        config.permissions,
       ),
+      // strict 子代理：fail-closed，不弹窗也不共享父会话的授权；策略判定在这里，loop 只挑。
+      ...(config.subagentApproval === 'strict'
+        ? { subagentApprover: new HeadlessApprover('ask', undefined, config.permissions) }
+        : {}),
       contextWindow: config.contextWindow,
       depth: folded.depth,
       maxSubagentDepth: config.subagentMaxDepth,

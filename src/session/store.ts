@@ -180,7 +180,7 @@ export interface ListSessionsOptions {
   /**
    * 连子代理会话一起返回（默认只返回主会话）。
    *
-   * 默认关：`/sessions` 的语义是「选一个会话继续聊」，而子代理会话是主会话的产物，
+   * 默认关：`/resume` 的语义是「选一个会话继续聊」，而子代理会话是主会话的产物，
    * 直接切进去等于把内部转录当成一次独立对话。按 id 精确查找时需要打开它，
    * 否则无法区分「不存在」和「是子代理会话」。
    */
@@ -202,7 +202,7 @@ interface SessionScanEntry {
  * 流式扫描会话目录：单文件可能几 MB，逐行 readline 只取统计与首条 user 预览，
  * 不把整个文件读进内存。带 search 时只返回命中会话并统计命中行数。
  *
- * 默认只返回主会话：子代理会话与主会话同目录，不过滤的话 `/sessions` 会被子代理刷屏。
+ * 默认只返回主会话：子代理会话与主会话同目录，不过滤的话 `/resume` 会被子代理刷屏。
  */
 export async function listSessions(dir: string, options?: ListSessionsOptions): Promise<SessionInfo[]> {
   if (!existsSync(dir)) return [];

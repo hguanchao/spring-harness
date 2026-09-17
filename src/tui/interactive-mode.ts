@@ -14,7 +14,7 @@
 
 import { join } from 'node:path';
 import type { AgentListener, SubagentEvent } from '../agent/events.js';
-import { loadCompaction } from '../agent/compact.js';
+import { loadCompaction, projectContext } from '../agent/compact.js';
 import { loadUserTheme } from './theme/theme.js';
 import { sphThemePath } from '../home.js';
 
@@ -34,8 +34,9 @@ import {
   type RecapContext,
 } from '../agent/recap.js';
 import { scanSkills, skillRoots } from '../skills/scan.js';
-import { createLlmClassifier } from '../approval/auto.js';
-import { APPROVAL_MODES, type ApprovalMode, type ApprovalRequest } from '../approval/policy.js';
+import { createLlmClassifier } from '../permission/auto.js';
+import { APPROVAL_MODES, HeadlessApprover, type ApprovalMode, type ApprovalRequest, type Approver, type PermissionRules, type SubagentApprovalPolicy } from '../permission/policy.js';
+import { createGrantStore } from '../permission/store.js';
 import { updateConfigFile } from '../config/save.js';
 import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
 import type { ApiProtocol } from '../config/load.js';
@@ -90,7 +91,7 @@ import {
   ScrollView,
 } from './core/index.js';
 import { matchesAppKey } from './app-keybindings.js';
-import { InteractiveApprover, type ApprovalUi } from './approver.js';
+import { InteractiveApprover, type ApprovalUi } from './permission.js';
 import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import { mcpStateLabel, renderMcpReport, renderMcpTools, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
@@ -120,7 +121,7 @@ import { readVersion } from '../version.js';
 export interface TuiDeps {
   workspaceRoot: string;
   sessionDir: string;
-  /** config.toml 路径：/model、/effort、/approval 的选择写回这里，下次启动仍生效。 */
+  /** config.toml 路径：/model、/effort、/permission 的选择写回这里，下次启动仍生效。 */
   configPath: string;
   /** 欢迎态底部右对齐的登录状态文案（API key / 免鉴权头）。 */
   authLabel: string;
@@ -146,6 +147,10 @@ export interface TuiDeps {
   todos: TodoList;
   jobs: JobBoard;
   approvalMode: ApprovalMode;
+  /** `[permissions]` 规则；省略即无规则。 */
+  permissionRules?: PermissionRules;
+  /** 子代理审批策略；省略按 inherit。 */
+  subagentApproval?: SubagentApprovalPolicy;
   model: string;
   api: ApiProtocol;
   effort?: ReasoningEffort;
@@ -201,22 +206,33 @@ interface CommandItem {
 const COMMANDS: readonly CommandItem[] = [
   { id: 'help', label: '/help', hint: 'List commands and key bindings' },
   { id: 'new', label: '/new', hint: 'Start a new session' },
-  { id: 'sessions', label: '/sessions', hint: 'Browse sessions, or switch by id' },
+  { id: 'resume', label: '/resume', hint: 'Resume a previous session, or switch by id' },
   { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises' },
   { id: 'mcps', label: '/mcps', hint: 'Manage MCP servers: status, enable/disable, add, remove, reload' },
   { id: 'plan', label: '/plan', hint: 'Enter plan mode, or /plan off to leave' },
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
+  { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
-  { id: 'approval', label: '/approval', hint: 'Set approval mode: ask | auto | yolo' },
+  { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo' },
   { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
 ];
+
+/**
+ * 别名 → 正名。正名进菜单（`/help`、Ctrl+P 命令面板），别名只保证还能敲。
+ *
+ * 这条分工照抄 grok-build：那边的 `/resume` 是会话选择器的正名，`/sessions` 留作
+ * 老习惯的重定向。sph 早先只有 `/sessions`，名字留下是因为肌肉记忆和已经写进会话
+ * 记录的文本里都是它；新名字与 CLI 的 `sph --resume` 对齐。
+ */
+const COMMAND_ALIASES: Readonly<Record<string, string>> = { sessions: 'resume' };
 
 /** 选择列表里 server 条目的 value 前缀，避免和上方的固定动作条目撞名。 */
 const SERVER_PREFIX = 'server:';
 
 const COMMAND_NAMES = new Set<string>([
   ...COMMANDS.map((command) => command.id),
+  ...Object.keys(COMMAND_ALIASES),
   'exit',
 ]);
 
@@ -293,6 +309,8 @@ class InteractiveMode implements ApprovalUi {
   })();
   private followUps: string[] = [];
   private readonly approver: InteractiveApprover;
+  /** `subagent_approval = "strict"` 时的子代理审批器；inherit 时 undefined（复用 approver）。 */
+  private readonly subagentApprover?: Approver;
   /** 压缩摘要专用 client（config.compact_model）；未配置为 undefined，runTurn 回退主 client。 */
   private readonly compactClient?: LlmClient;
   /** auto 审批审查器专用 client（config.review_model）；未配置为 undefined。 */
@@ -409,7 +427,15 @@ class InteractiveMode implements ApprovalUi {
             onUsage: (usage) => this.recordAuxUsage(usage, 'review'),
           })
         : undefined,
+      // 作用域在构造时解析一次：工作区根在一次进程里不会变。
+      createGrantStore(deps.workspaceRoot),
+      deps.permissionRules,
     );
+    // `strict` 子代理的审批器：fail-closed，不弹窗，也不共享父会话攒下的授权集合。
+    // 在构造时建好，每次 runTurn 直接带上。
+    this.subagentApprover = deps.subagentApproval === 'strict'
+      ? new HeadlessApprover('ask', undefined, deps.permissionRules)
+      : undefined;
 
     this.ui = deps.ui ?? new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot);
     this.editor = new CustomEditor(this.ui, getEditorTheme(), {
@@ -765,6 +791,7 @@ class InteractiveMode implements ApprovalUi {
         ...(this.deps.spillRoot === undefined
           ? {}
           : { spill: new SpillStore(join(this.deps.spillRoot, this.session.id), this.deps.spillThreshold) }),
+        ...(this.subagentApprover === undefined ? {} : { subagentApprover: this.subagentApprover }),
       });
     } catch (error) {
       // 中断提示已由 handleInterrupt 即时给出，这里不再重复一条。
@@ -1375,21 +1402,49 @@ class InteractiveMode implements ApprovalUi {
     const detail = flattenWhitespace(request.command ?? request.path ?? '(no detail)');
     const preview = detail.length > 400 ? `${detail.slice(0, 400)}…` : detail;
     const body = note ? `${preview}\n\n${theme.fg('warning', note)}` : preview;
+    // 两个「总是允许」的作用域不一样，文案必须写出来：一个活到进程结束，一个写进
+    // ~/.sph/permissions.json 并且只对当前项目生效。
+    const scope = this.approvalScopeLabel(request);
     const choice = await showSelectDialog(this.ui, {
       title: `Approve ${request.tool}?`,
       bodyText: body,
       items: [
         { value: 'allow', label: 'Allow once' },
-        { value: 'always', label: `Always allow ${request.tool} this session` },
+        { value: 'session', label: `Allow ${scope} for this session` },
+        { value: 'always', label: `Always allow ${scope} for this project` },
         { value: 'deny', label: 'Deny' },
       ],
-      maxVisible: 3,
+      maxVisible: 4,
     });
+    if (choice === 'session') {
+      this.approver.allowForSession(request);
+      return true;
+    }
     if (choice === 'always') {
-      this.approver.allowForSession(request.tool);
+      this.approver.allowForProject(request);
       return true;
     }
     return choice === 'allow';
+  }
+
+  /**
+   * 「总是允许」的作用域描述（`this exact command` / `fs.read_file` / `writes to …`）。
+   *
+   * 必须把粒度写出来：这一项曾经写的是 `Always allow shell this session`，而记下来的键是
+   * 工具名——两者合起来会让人以为「只批准了眼前这条命令」，实际签出的是整个工具。文案和
+   * 键必须描述同一件事，所以这里的每个分支都和 approvalScopeKey 对应。
+   */
+  private approvalScopeLabel(request: ApprovalRequest): string {
+    switch (request.tool) {
+      case 'shell':
+        return 'this exact command';
+      case 'mcp':
+        return request.command ?? 'this tool';
+      case 'escalate':
+        return `writes to ${request.path ?? 'this path'}`;
+      default:
+        return request.tool;
+    }
   }
 
   async requestAnswer(question: string): Promise<string> {
@@ -1415,7 +1470,7 @@ class InteractiveMode implements ApprovalUi {
 
   private async handleCommand(input: string): Promise<void> {
     const [rawName, ...rest] = input.slice(1).split(/\s+/);
-    const name = rawName.toLowerCase();
+    const name = COMMAND_ALIASES[rawName.toLowerCase()] ?? rawName.toLowerCase();
     const argument = rest.join(' ').trim();
 
     if (!COMMAND_NAMES.has(name)) {
@@ -1430,8 +1485,8 @@ class InteractiveMode implements ApprovalUi {
       case 'new':
         await this.commandNewSession();
         break;
-      case 'sessions':
-        await this.commandSessions(argument);
+      case 'resume':
+        await this.commandResume(argument);
         break;
       case 'skills':
         await this.commandSkills();
@@ -1445,14 +1500,17 @@ class InteractiveMode implements ApprovalUi {
       case 'goal':
         await this.commandGoal(argument);
         break;
+      case 'compact':
+        await this.commandCompact(argument);
+        break;
       case 'model':
         await this.commandModel(argument);
         break;
       case 'effort':
         await this.commandEffort(argument);
         break;
-      case 'approval':
-        await this.commandApproval(argument);
+      case 'permission':
+        await this.commandPermission(argument);
         break;
       case 'export':
         await this.commandExport(argument);
@@ -1469,6 +1527,10 @@ class InteractiveMode implements ApprovalUi {
     const lines: string[] = [];
     lines.push('## Commands');
     for (const command of COMMANDS) lines.push(`- \`${command.label}\` — ${command.hint}`);
+    // 别名不进上面的清单（与 grok-build 一致，菜单只列正名），但必须写出来，
+    // 否则靠旧名字找到这里的人会以为命令被删了。
+    const aliases = Object.entries(COMMAND_ALIASES).map(([alias, canonical]) => `\`/${alias}\` → \`/${canonical}\``);
+    if (aliases.length > 0) lines.push(`- Aliases: ${aliases.join(' · ')}`);
     lines.push('');
     lines.push('## Key bindings');
     lines.push('- `Esc` — before the model replies, cancel and restore the prompt to the input; after it starts, interrupt output; or close a dialog');
@@ -1715,14 +1777,18 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * `/sessions [id]`：带 id 前缀匹配直接切换，不带 id 打开选择器。
+   * `/resume [id]`：带 id 前缀匹配直接切换，不带 id 打开选择器。
+   *
+   * 为什么保留 id 参数：sph 的内联选择器是纯列表模态，除 ↑↓/Enter/Esc 外一律吞键，
+   * 没法像 grok-build 那样「在选择器里粘贴 id 直接加载」，所以「按 id 直达」只剩参数
+   * 这一条路。正名与 CLI 的 `sph --resume <id>` 对齐，`/sessions` 保留为别名。
    *
    * 只有主会话可选。子代理会话是主会话跑出来的内部转录（同一个目录、独立文件），
    * 切进去等于把某次 subagent 的中间过程当成一段独立对话继续，语义上不成立；
    * 按 id 精确查找时要把它们一起捞出来，才能区分「不存在」和「是子代理会话」，
    * 否则用户从工具详情里抄来的子会话 id 只会得到一句「没有匹配的会话」。
    */
-  private async commandSessions(id: string): Promise<void> {
+  private async commandResume(id: string): Promise<void> {
     if (id !== '') {
       const sessions = await listSessions(this.deps.sessionDir, { includeSubagents: true });
       const match = sessions.find((info) => info.id === id || info.id.startsWith(id));
@@ -1732,7 +1798,7 @@ class InteractiveMode implements ApprovalUi {
       }
       if (match.parentId !== undefined) {
         this.addNotice(
-          `Session ${match.id} is a subagent session of ${match.parentId} — /sessions ${match.parentId} opens the main session.`,
+          `Session ${match.id} is a subagent session of ${match.parentId} — /resume ${match.parentId} opens the main session.`,
           'warn',
         );
         return;
@@ -1793,6 +1859,65 @@ class InteractiveMode implements ApprovalUi {
     this.recapEpoch++;
   }
 
+  // ------------------------------------------------------------------ Compact
+
+  /**
+   * `/compact [instructions]`：立刻把历史压成一个检查点，不等水位线。
+   *
+   * 与自动压缩共用 `projectContext`，区别只在于走 `force`——水位线判断的是「估算」，
+   * 用户主动要求时估算不该有否决权（估算可能因为分词口径不同而偏乐观）。
+   *
+   * 落地方式与 loop 完全一致：只往会话里写一条 `compaction` 事件，不碰内存态。下一轮
+   * `runTurn` 启动时由 `loadCompaction` 读回来，所以这里不需要维护任何投影状态，
+   * 也不会出现「命令改了状态、下一轮又按旧状态发请求」的错位。
+   *
+   * 带参数时是**聚焦说明**（对齐 grok-build 的 `/compact compaction instructions`）：
+   * 只改这一次摘要的重点，不改固定段落结构。
+   */
+  private async commandCompact(instructions: string): Promise<void> {
+    if (this.running) {
+      this.addNotice('A turn is running — wait for it to finish before compacting.', 'warn');
+      return;
+    }
+    const messages = this.session.readMessages();
+    if (messages.length === 0) {
+      this.addNotice('Nothing to compact yet.', 'dim');
+      return;
+    }
+
+    const covered = loadCompaction(this.session)?.covered ?? 0;
+    // 摘要是同步等 LLM 的，要几秒；没有反馈用户会以为命令没生效。
+    const indicator = new WorkingStatusIndicator(this.ui, WorkingLabel.compacting);
+    this.setStatusIndicator(indicator);
+    this.setActivity(WorkingLabel.compacting);
+    try {
+      const projection = await projectContext({
+        ...this.sessionContext(messages),
+        // 展开会把 messages 收窄成 readonly（RecapContext 的只读契约），传回原数组本身。
+        messages,
+        client: this.compactClient ?? this.client,
+        force: true,
+        instructions,
+        tools: (this.deps.tools ?? defaultTools).schemas(),
+        onCompacting: () => this.setActivity(WorkingLabel.compacting),
+        // 摘要的花费也是真花钱，和自动路径一样记进账。
+        onUsage: (usage) => this.recordAuxUsage(usage, 'compaction'),
+      });
+      const next = projection.compaction;
+      if (!next || next.covered <= covered) {
+        this.addNotice('Nothing new to compact — the recent history is kept as-is.', 'dim');
+        return;
+      }
+      this.session.appendEvent('compaction', { summary: next.summary, covered: next.covered });
+      this.addNotice(`Compacted ${next.covered - covered} messages into a checkpoint.`, 'success');
+    } catch (error) {
+      this.addNotice(`Compact failed: ${message(error)}`, 'error');
+    } finally {
+      this.setStatusIndicator(undefined);
+      this.setActivity(WorkingLabel.working);
+    }
+  }
+
   // ------------------------------------------------------------------ Recap
 
   /** 空闲轮询：离开够久就预生成一次 recap，用户回来时它已经在那儿了。 */
@@ -1848,7 +1973,7 @@ class InteractiveMode implements ApprovalUi {
     // 手动路径先挂 pending 行：生成要几秒，没有反馈用户会以为命令没生效。
     const block = auto ? undefined : this.startRecapBlock();
     try {
-      const result = await generateRecap(this.recapContext(messages), {
+      const result = await generateRecap(this.sessionContext(messages), {
         // 用会话模型而不是压缩小模型：recap 的全部价值就在于复用主轮次的提示词前缀，
         // 换模型等于换缓存，省下的钱还不够丢掉命中缓存的差价。
         client: this.client,
@@ -1889,8 +2014,12 @@ class InteractiveMode implements ApprovalUi {
     return 'Nothing new to recap yet.';
   }
 
-  /** 组装 recap 的只读上下文。系统提示词必须与 runTurn 的同参构造，前缀缓存才命中。 */
-  private recapContext(messages: ReturnType<JsonlSession['readMessages']>): RecapContext {
+  /**
+   * 组装只读上下文（recap 与 `/compact` 共用）。
+   *
+   * 系统提示词必须与 runTurn 的同参构造，前缀缓存才命中——所以这份构造只能有一处。
+   */
+  private sessionContext(messages: ReturnType<JsonlSession['readMessages']>): RecapContext {
     return {
       messages,
       compaction: loadCompaction(this.session),
@@ -2101,7 +2230,13 @@ class InteractiveMode implements ApprovalUi {
     );
   }
 
-  private async commandApproval(argument = ''): Promise<void> {
+  /**
+   * `/permission [mode]`：无参数打开选择器，带参数直接设。
+   *
+   * 命令名对齐 dsh 的 `/permission`；写回的配置键仍是 `approval`——那是「审批策略」这个
+   * 概念的名字，而且已经躺在用户既有的 config.toml 里，跟着改名会静默丢掉他们的设置。
+   */
+  private async commandPermission(argument = ''): Promise<void> {
     if (argument !== '') {
       const match = APPROVAL_MODES.find((mode) => mode === argument);
       if (!match) {

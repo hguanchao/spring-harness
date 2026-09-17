@@ -324,7 +324,7 @@ export class Editor implements Component, Focusable {
 	private autocompleteTriggerPattern = buildTriggerPattern(this.autocompleteTriggerCharacters);
 	private autocompleteDebouncePattern = buildDebouncePattern(this.autocompleteTriggerCharacters);
 	private autocompleteList?: SelectList;
-	/** 内联菜单态:命令参数选择器(如 /model、/approval 的二级列表),复用补全菜单的圆角盒渲染。 */
+	/** 内联菜单态:命令参数选择器(如 /model、/permission 的二级列表),复用补全菜单的圆角盒渲染。 */
 	private inlineMenu:
 		| {
 				list: SelectList;

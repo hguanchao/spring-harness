@@ -23,7 +23,7 @@ export const mcpTool: ToolSpec = {
     const raw = args.arguments;
     const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
     const allowed = await ctx.approve('mcp', `${server}.${tool}`);
-    if (!allowed) return { ok: false, content: 'mcp call denied' };
+    if (!allowed) return { ok: false, content: 'mcp call denied by the approval policy — do not retry it by another route' };
     return { ok: true, content: clip(await ctx.mcp.call(server, tool, input)) };
   },
 };

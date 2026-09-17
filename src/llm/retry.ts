@@ -9,13 +9,6 @@
 /** 传输层默认重试次数（不含首次）。config.toml `max_retries` 未写时用这个。 */
 export const DEFAULT_MAX_RETRIES = 10;
 
-export interface RetryOptions {
-  /** 最多重试次数（不含首次）。默认 {@link DEFAULT_MAX_RETRIES}。 */
-  maxRetries?: number;
-  /** 退避基准毫秒。默认 1000，指数递增并加抖动。 */
-  baseDelayMs?: number;
-}
-
 export class RetryableError extends Error {
   readonly status?: number;
   readonly retryAfterMs?: number;
@@ -66,22 +59,4 @@ export function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> 
     }
     signal?.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-export async function withRetries<T>(
-  task: (attempt: number) => Promise<T>,
-  shouldRetry: (error: unknown) => boolean,
-  options?: RetryOptions & { signal?: AbortSignal },
-): Promise<T> {
-  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-  const base = options?.baseDelayMs ?? 1000;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await task(attempt);
-    } catch (error) {
-      if (attempt >= maxRetries || !shouldRetry(error) || options?.signal?.aborted) throw error;
-      const hint = error instanceof RetryableError ? error.retryAfterMs : undefined;
-      await sleepAbortable(backoffMs(attempt, base, hint), options?.signal);
-    }
-  }
 }

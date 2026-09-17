@@ -222,26 +222,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
-	get viewportTop(): number {
-		return this.getPrimaryScrollView().scrollTop;
-	}
-
-	get isFollowingOutput(): boolean {
-		return this.getPrimaryScrollView().isFollowingEnd;
-	}
-
-	/** Whether the fullscreen viewport has a non-empty active text selection. */
-	hasActiveSelection(): boolean {
-		return this.getActiveSelectionText() !== undefined;
-	}
-
-	/** Copy the active fullscreen text selection, if any, using the configured selection clipboard path. */
-	async copyActiveSelectionToClipboard(): Promise<boolean> {
-		const text = this.getActiveSelectionText();
-		if (!text) return false;
-		return this.copyTextToClipboard(text);
-	}
-
 	setLayoutRoot(component: Component | undefined): void {
 		if (this.layoutRoot === component) return;
 		this.layoutRoot = component;
