@@ -9,11 +9,12 @@
  * - Responses 的 reasoning 项在转手中转站会被拒（`encrypted_content was not issued
  *   to this caller`），而官方端点需要它来跨步保留推理状态。
  *
- * 处理分两级，**都不需要用户配置**：
- * 1. 模型名启发式（initialRequestCaps）：命中已知约束的模型，首个请求就用对参数，
- *    不必先吃一次 400。
- * 2. 从端点报文反推（degradeRequestCaps）：端点自己说明了哪个参数不被接受，就按它说的改。
- *    这一级兜住启发式猜不到的情况——**包括猜错**——所以启发式可以放心激进。
+ * 处理分三层，后一层覆盖前一层：
+ * 1. 默认当兼容网关：未知 `base_url` 不发 `prompt_cache_key` / `prompt_cache_retention`。
+ *    只对 `api.openai.com` 开缓存路由键。不维护厂商名单。
+ * 2. `[compat]` 声明：用户点名的位覆盖推断。`prompt_cache = false` 一票否决缓存相关位。
+ * 3. 从端点报文反推（degradeRequestCaps）：声明错了或启发式猜不到时，按 400 剥字段。
+ *    这是兜底，不是主路径。
  *
  * 记忆范围是「一个 client 对象」（≈ 一个进程 / 会话）：降级后同一会话内不再重复踩。
  * 刻意不落盘：参数容忍度是**端点**属性，换端点或网关升级都会变，缓存一份可能过期的
@@ -48,6 +49,22 @@ export interface RequestCaps {
   promptCacheRetention: boolean;
 }
 
+/** 会话亲和头形态。`off` 不发；其余按厂商常见名字。 */
+export const SESSION_AFFINITY_FORMATS = ['openai', 'openrouter', 'off'] as const;
+export type SessionAffinityFormat = (typeof SESSION_AFFINITY_FORMATS)[number];
+
+/**
+ * 用户在 `[compat]` 里声明的覆盖。省略的字段走 URL 推断，不必一次配齐。
+ *
+ * 只暴露已经会改变请求体 / 请求头的位，不发明新抽象。
+ */
+export interface CompatProfile {
+  promptCacheKey?: boolean;
+  promptCacheRetention?: boolean;
+  streamOptions?: boolean;
+  sessionAffinity?: SessionAffinityFormat;
+}
+
 /** 七个能力位均为「现代端点默认形态」；各 adapter 的默认参数值。 */
 export const DEFAULT_REQUEST_CAPS: RequestCaps = Object.freeze({
   maxCompletionTokens: false,
@@ -75,16 +92,56 @@ function bareModelName(model: string): string {
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
 
-/** 首个请求的初始能力位。`promptCache` 来自配置，其余由模型名推断。 */
-export function initialRequestCaps(model: string, promptCache: boolean): RequestCaps {
+function hostnameOf(baseUrl: string): string | undefined {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/** 只认官方 OpenAI 域名。未知网关一律当兼容端点，不维护厂商表。 */
+export function isOfficialOpenAI(baseUrl: string): boolean {
+  const host = hostnameOf(baseUrl);
+  if (host) return host === 'api.openai.com' || host.endsWith('.api.openai.com');
+  return /(?:^|[/.])api\.openai\.com(?:[:/]|$)/i.test(baseUrl);
+}
+
+/** URL 推断亲和头格式：只把 OpenRouter 从默认 openai 形态里摘出来。 */
+export function detectSessionAffinity(baseUrl: string): SessionAffinityFormat {
+  const host = hostnameOf(baseUrl);
+  if (host === 'openrouter.ai' || host?.endsWith('.openrouter.ai')) return 'openrouter';
+  if (!host && /openrouter\.ai/i.test(baseUrl)) return 'openrouter';
+  return 'openai';
+}
+
+export interface InitialCapsOptions {
+  baseUrl?: string;
+  compat?: CompatProfile;
+}
+
+/**
+ * 首个请求的初始能力位。
+ *
+ * `promptCache` 来自配置，一票否决 Anthropic 断点与 OpenAI 系 cache 字段。
+ * 未知 URL 默认不发 `prompt_cache_key` / `prompt_cache_retention`；
+ * 只有官方 `api.openai.com` 才开 key。`[compat]` 覆盖推断。
+ */
+export function initialRequestCaps(
+  model: string,
+  promptCache: boolean,
+  options: InitialCapsOptions = {},
+): RequestCaps {
+  const official = options.baseUrl !== undefined && isOfficialOpenAI(options.baseUrl);
+  const override = options.compat;
   return {
     maxCompletionTokens: REQUIRES_MAX_COMPLETION_TOKENS.test(bareModelName(model)),
-    streamOptions: true,
+    streamOptions: override?.streamOptions ?? true,
     sendStore: true,
     sendReasoning: true,
     promptCache,
-    promptCacheKey: promptCache,
-    promptCacheRetention: promptCache,
+    promptCacheKey: promptCache && (override?.promptCacheKey ?? official),
+    promptCacheRetention: promptCache && (override?.promptCacheRetention ?? false),
   };
 }
 

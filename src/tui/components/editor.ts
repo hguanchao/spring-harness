@@ -232,7 +232,10 @@ interface LayoutLine {
 }
 
 export interface EditorTheme {
+	/** 失焦边框。 */
 	borderColor: (str: string) => string;
+	/** 聚焦边框；省略则沿用 borderColor。 */
+	focusBorderColor?: (str: string) => string;
 	selectList: SelectListTheme;
 }
 
@@ -288,7 +291,16 @@ export class Editor implements Component, Focusable {
 	};
 
 	/** Focusable interface - set by TUI when focus changes */
-	focused: boolean = false;
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		if (this._focused === value) return;
+		this._focused = value;
+		// 边框与假光标随焦点变，必须立刻重绘，不能等下一次按键。
+		this.tui.requestRender();
+	}
 
 	protected tui: TUI;
 	private theme: EditorTheme;
@@ -304,6 +316,7 @@ export class Editor implements Component, Focusable {
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
+	public focusBorderColor?: (str: string) => string;
 
 	// Autocomplete support
 	private autocompleteProvider?: AutocompleteProvider;
@@ -371,6 +384,7 @@ export class Editor implements Component, Focusable {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
+		this.focusBorderColor = theme.focusBorderColor;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -502,14 +516,19 @@ export class Editor implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	private paintBorder(border: string): string {
+		const paint = this._focused ? (this.focusBorderColor ?? this.borderColor) : this.borderColor;
+		return paint(border);
+	}
+
 	protected renderTopBorder(width: number, hiddenLineCount: number): string {
 		const border = hiddenLineCount > 0 ? createScrollBorder("↑", hiddenLineCount, width) : "─".repeat(width);
-		return this.borderColor(border);
+		return this.paintBorder(border);
 	}
 
 	protected renderBottomBorder(width: number, hiddenLineCount: number): string {
 		const border = hiddenLineCount > 0 ? createScrollBorder("↓", hiddenLineCount, width) : "─".repeat(width);
-		return this.borderColor(border);
+		return this.paintBorder(border);
 	}
 
 	render(width: number): string[] {
@@ -604,8 +623,8 @@ export class Editor implements Component, Focusable {
 			let lineVisibleWidth = visibleWidth(layoutLine.text);
 			let cursorInPadding = false;
 
-			// Add cursor if this line has it
-			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
+			// 假光标只在聚焦时画：失焦还反色会看起来像仍在输入。
+			if (this._focused && layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
 				const before = displayText.slice(0, layoutLine.cursorPos);
 				const after = displayText.slice(layoutLine.cursorPos);
 

@@ -107,6 +107,18 @@ export const WorkingLabel = {
   running: (name: string): string => `Running ${name}…`,
 } as const;
 
+/** `Retrying LLM stream (attempt 2): idle timeout` → 只留原因，次数由状态行统一加 `(N)`。 */
+export function workingWarningKey(text: string): string {
+  const match = /^Retrying LLM stream \(attempt \d+\):\s*(.*)$/.exec(text);
+  const body = (match?.[1] ?? text).trim();
+  return body || text;
+}
+
+/** 工作状态行上的警告：正文 + 本轮同一条警告出现次数。 */
+export function formatWorkingWarning(text: string, count: number): string {
+  return `${workingWarningKey(text)} (${count})`;
+}
+
 export class StatusIndicator extends Loader {
   readonly kind: StatusIndicatorKind;
 

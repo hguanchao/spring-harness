@@ -35,6 +35,7 @@ import {
 } from "./tui.js";
 import {
 	clipLineToWidth,
+	contentVisibleWidth,
 	extractAnsiCode,
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
@@ -66,6 +67,14 @@ const DOUBLE_CLICK_INTERVAL_MS = 500;
 // so mirror common terminal word-selection behavior by keeping paths and kebab-case tokens whole.
 const TERMINAL_WORD_SELECTION_JOINERS = new Set(["/", "-"]);
 const wordSegmenter = getWordSegmenter();
+
+/** 布局叶子常常是承载容器（editorContainer），焦点在子组件 Editor 上。 */
+function componentTreeContains(root: Component, target: Component): boolean {
+	if (root === target) return true;
+	const children = (root as Container).children;
+	if (!Array.isArray(children)) return false;
+	return children.some((child) => componentTreeContains(child, target));
+}
 
 interface SelectionPoint {
 	row: number;
@@ -612,6 +621,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
+		if (type === "press" && this.decodeMouseButton(raw.button) === "left" && !result?.focus) {
+			// 点在输入框以外（转录、页脚、空白）就失焦：否则 editor 永远 focused，边框看不出变化。
+			this.blurIfPressOutsideFocus(raw.x, raw.y);
+		}
 		if (result) {
 			const render = this.applyMouseDispatchResult(event, result);
 			if (type === "press") {
@@ -629,6 +642,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.requestRender();
 		}
 		this.handleSelectionMouseEvent(raw);
+	}
+
+	/** 命中点是否落在当前焦点组件（或其承载容器）上。 */
+	private isPointOnFocusedComponent(x: number, y: number): boolean {
+		const focused = this.getFocusedComponent();
+		if (!focused || !this.currentLayout) return false;
+		const boxes = getLayoutBoxesAt(this.currentLayout, x, y);
+		const deepest = boxes[0];
+		if (!deepest || deepest === this.currentLayout.root) return false;
+		return componentTreeContains(deepest.component, focused);
+	}
+
+	private blurIfPressOutsideFocus(x: number, y: number): void {
+		if (this.hasOverlay()) return;
+		if (!this.getFocusedComponent()) return;
+		if (this.isPointOnFocusedComponent(x, y)) return;
+		this.setFocus(null);
+		this.requestRender();
 	}
 
 	private parseWheelEvent(data: string): WheelEvent | undefined {
@@ -815,11 +846,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (visibleBottom < visibleTop) return undefined;
 		const pointerRow = Math.max(visibleTop, Math.min(visibleBottom, y));
 		const maxContentRow = Math.max(0, (box.scrollContentLines?.length ?? 1) - 1);
-		return {
+		return this.clampSelectionPoint({
 			row: Math.max(0, Math.min(maxContentRow, scrollView.scrollTop + pointerRow - box.rect.y)),
 			col: Math.max(0, Math.min(box.rect.width - 1, x - box.rect.x)),
 			scrollView,
-		};
+		});
 	}
 
 	private getSelectionPoint(event: SgrMouseEvent, scrollView?: ScrollView): SelectionPoint {
@@ -827,10 +858,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const point = this.getScrollSelectionPoint(scrollView, event.x, event.y);
 			if (point) return point;
 		}
-		return {
+		return this.clampSelectionPoint({
 			row: Math.max(0, Math.min(this.terminal.rows - 1, event.y)),
 			col: Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
-		};
+		});
+	}
+
+	/** 落在行尾空白上的指针收束到最后一个可见字符之后，空白本身不可选。 */
+	private clampSelectionPoint(point: SelectionPoint): SelectionPoint {
+		const maxCol = contentVisibleWidth(this.getSelectionSourceLine(point));
+		if (point.col <= maxCol) return point;
+		return { ...point, col: maxCol };
 	}
 
 	private getSelectionSourceLine(point: SelectionPoint): string {
@@ -881,7 +919,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private getLineSelection(point: SelectionPoint): SelectionRange {
 		return {
 			start: { ...point, col: 0 },
-			end: { ...point, col: visibleWidth(this.getSelectionSourceLine(point)), boundary: true },
+			end: { ...point, col: contentVisibleWidth(this.getSelectionSourceLine(point)), boundary: true },
 		};
 	}
 
@@ -1087,20 +1125,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		row: number,
 		selection: { start: SelectionPoint; end: SelectionPoint },
 		minColumn = 0,
-		maxColumn = visibleWidth(line),
+		maxColumn = contentVisibleWidth(line),
 	): { start: number; end: number } {
+		const contentEnd = contentVisibleWidth(line);
 		const lineWidth = visibleWidth(line);
+		const cap = Math.min(maxColumn, contentEnd);
 		let start = Math.max(0, minColumn);
-		let end = Math.min(lineWidth, maxColumn);
+		let end = Math.min(lineWidth, cap);
 		if (row === selection.start.row) {
-			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, lineWidth);
+			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, contentEnd);
 		}
 		if (row === selection.end.row) {
 			end = selection.end.boundary
-				? Math.min(selection.end.col, lineWidth)
-				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, lineWidth));
+				? Math.min(selection.end.col, contentEnd)
+				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, contentEnd));
 		}
-		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
+		return { start: Math.max(minColumn, start), end: Math.min(cap, end) };
 	}
 
 	private getActiveSelectionText(): string | undefined {
@@ -1124,7 +1164,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			);
 		}
 		const text = lines.join("\n");
-		return text.length === 0 ? undefined : text;
+		return text.trim().length === 0 ? undefined : text;
 	}
 
 	private async copySelectionToClipboard(): Promise<boolean> {

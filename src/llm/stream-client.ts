@@ -1,6 +1,14 @@
-import { degradeRequestCaps, degradeSilentCompat, initialRequestCaps, type RequestCaps } from './compat.js';
+import {
+  degradeRequestCaps,
+  degradeSilentCompat,
+  detectSessionAffinity,
+  initialRequestCaps,
+  type CompatProfile,
+  type RequestCaps,
+  type SessionAffinityFormat,
+} from './compat.js';
 import { ContextOverflowError } from './errors.js';
-import type { ChatMessage, LlmClient, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
+import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
 import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
 import { postSseStream } from './sse.js';
 import { backoffMs, RetryableError, sleepAbortable } from './retry.js';
@@ -16,9 +24,9 @@ export interface ProtocolAdapter {
   apply(payload: string, acc: SseAcc): { textDelta?: string; thinkingDelta?: string };
   /**
    * 会话亲和的追加请求头（OpenAI 系缓存路由用）。Anthropic 按账号 + 前缀计缓存，
-   * 没有这类头，所以是可选的。
+   * 没有这类头，所以是可选的。格式由 URL 推断或 `[compat].session_affinity` 覆盖。
    */
-  sessionHeaders?(sessionId: string, baseUrl: string): Record<string, string>;
+  sessionHeaders?(sessionId: string, format: SessionAffinityFormat): Record<string, string>;
   /**
    * 端点拒绝某个可选参数时的降级：从错误报文推断出新的能力位。
    * 返回 undefined 表示这不是参数容忍度问题，调用方按原错误抛出。
@@ -42,6 +50,8 @@ export interface SseClientOptions {
    * 省略（如独立测试）时不发缓存路由参数，行为与旧版一致。
    */
   sessionId?: string;
+  /** `[compat]` 声明，覆盖 URL 推断。 */
+  compat?: CompatProfile;
 }
 
 /**
@@ -71,9 +81,10 @@ function isSilentReject(error: unknown): boolean {
 export function createSseClient(adapter: ProtocolAdapter, options: SseClientOptions): LlmClient {
   const url = `${options.baseUrl.replace(/\/$/, '')}${adapter.path}`;
   const headers: Record<string, string> = { ...adapter.headers(options.apiKey) };
+  const sessionAffinity = options.compat?.sessionAffinity ?? detectSessionAffinity(options.baseUrl);
   // 会话亲和头在用户自定义头**之前**：config.httpHeaders 与它们同名时以用户为准。
   if (options.sessionId !== undefined && adapter.sessionHeaders) {
-    Object.assign(headers, adapter.sessionHeaders(options.sessionId, options.baseUrl));
+    Object.assign(headers, adapter.sessionHeaders(options.sessionId, sessionAffinity));
   }
   Object.assign(headers, options.headers);
   // key 为空且由自定义头补位时是显式的免鉴权约定；此时任何形式的鉴权头都必须去掉，
@@ -85,7 +96,10 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
     }
   }
   const degrade = adapter.degrade ?? degradeRequestCaps;
-  let caps: RequestCaps = initialRequestCaps(options.model, options.promptCache ?? true);
+  let caps: RequestCaps = initialRequestCaps(options.model, options.promptCache ?? true, {
+    baseUrl: options.baseUrl,
+    compat: options.compat,
+  });
 
   return {
     async complete(
@@ -93,7 +107,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
       tools: unknown[],
       signal?: AbortSignal,
       onDelta?: (delta: { text?: string; thinking?: string }) => void,
-      onRetry?: (info: { attempt: number; message: string }) => void,
+      onRetry?: (info: LlmRetryInfo) => void,
     ): Promise<StreamDelta> {
       let streamed = false;
       const wrapped = onDelta
@@ -164,7 +178,11 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
               ? degradeSilentCompat(caps)
               : undefined);
           if (next) {
-            onRetry?.({ attempt: degradations + 2, message: `${text}; dropping extra request fields` });
+            onRetry?.({
+              attempt: degradations + 2,
+              message: `${text}; dropping extra request fields`,
+              kind: 'compat',
+            });
             caps = next;
             degradations++;
             continue;
@@ -172,7 +190,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           // 字段已经剥完：空 SSE 按传输抖动退避，不再立刻失败。
           if (!(error instanceof RetryableError) || transportTries >= maxRetries) throw error;
           transportTries++;
-          onRetry?.({ attempt: transportTries + 1, message: text });
+          onRetry?.({ attempt: transportTries + 1, message: text, kind: 'transport' });
           await sleepAbortable(backoffMs(transportTries - 1), signal);
         }
       }

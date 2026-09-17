@@ -448,6 +448,16 @@ const DEFAULT_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const DEFAULT_INTERVAL_MS = 80;
 
 /**
+ * 拆出末尾 ` (N)`。工作状态警告把次数钉在文案最后；窄行只省略正文，次数本身不裁。
+ * 正文里也可以有括号（`(none)` / `(30000ms)`），只认最后一个 ` (数字)`。
+ */
+export function splitTrailingCount(message: string): { body: string; suffix: string } {
+	const match = /^(.*) \((\d+)\)$/.exec(message);
+	if (!match) return { body: message, suffix: "" };
+	return { body: match[1] ?? message, suffix: ` (${match[2]})` };
+}
+
+/**
  * Loader component that updates with an optional spinning animation.
  *
  * 状态行布局：左侧转圈 + 阶段文案，最右侧本轮已运行时长。时长跟转圈共用同一
@@ -487,18 +497,31 @@ export class Loader extends Text {
 		const rightPad = 4;
 		const inner = Math.max(1, w - leftPad - rightPad);
 		const elapsed = formatDuration(Date.now() - this.startedAt);
-		const elapsedStyled = this.messageColorFn(elapsed);
+		const { body, suffix } = splitTrailingCount(this.message);
+		const suffixW = visibleWidth(suffix);
 		const elapsedW = visibleWidth(elapsed);
-		const frame = this.getRenderedIndicator();
-		const left =
-			frame.length > 0 ? `${frame} ${this.messageColorFn(this.message)}` : this.messageColorFn(this.message);
 		const gap = 2;
-		const clipped = truncateToWidth(left, Math.max(0, inner - elapsedW - gap), "…");
-		const pad = Math.max(0, inner - visibleWidth(clipped) - elapsedW);
-		let line = `${" ".repeat(leftPad)}${clipped}${" ".repeat(pad)}${elapsedStyled}${" ".repeat(rightPad)}`;
+		// 次数优先于耗时：极窄时丢掉耗时，也不能把 `(N)` 裁成 `(1…`。
+		let showElapsed = elapsedW > 0 && suffixW + elapsedW + (suffixW > 0 ? gap : 0) <= inner;
+		if (suffix === "" && elapsedW <= inner) showElapsed = true;
+		const shownElapsed = showElapsed ? elapsed : "";
+		const shownElapsedW = showElapsed ? elapsedW : 0;
+		const leftBudget = Math.max(0, inner - shownElapsedW - (showElapsed ? gap : 0));
+		const frame = this.getRenderedIndicator();
+		const spinner = frame.length > 0 ? `${frame} ` : "";
+		const spinnerW = visibleWidth(spinner);
+		const showSpinner = spinnerW > 0 && leftBudget >= spinnerW + suffixW;
+		const lead = showSpinner ? spinner : "";
+		const leadW = showSpinner ? spinnerW : 0;
+		const bodyBudget = Math.max(0, leftBudget - leadW - suffixW);
+		const clippedBody = truncateToWidth(body, bodyBudget, "…");
+		const left = lead + this.messageColorFn(clippedBody) + (suffix === "" ? "" : this.messageColorFn(suffix));
+		const pad = Math.max(0, inner - visibleWidth(left) - shownElapsedW);
+		const elapsedStyled = shownElapsed === "" ? "" : this.messageColorFn(shownElapsed);
+		let line = `${" ".repeat(leftPad)}${left}${" ".repeat(pad)}${elapsedStyled}${" ".repeat(rightPad)}`;
 		const vis = visibleWidth(line);
 		if (vis < w) line += " ".repeat(w - vis);
-		else if (vis > w) line = truncateToWidth(line, w, "…");
+		else if (vis > w && suffix === "") line = truncateToWidth(line, w, "…");
 		return ["", line];
 	}
 
@@ -516,6 +539,11 @@ export class Loader extends Text {
 
 	setMessage(message: string): void {
 		this.message = message;
+		this.updateDisplay();
+	}
+
+	setMessageColor(colorFn: (str: string) => string): void {
+		this.messageColorFn = colorFn;
 		this.updateDisplay();
 	}
 

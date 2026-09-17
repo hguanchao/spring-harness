@@ -441,6 +441,7 @@ export interface TUI extends Component {
 	setShowHardwareCursor(enabled: boolean): void;
 	getClearOnShrink(): boolean;
 	setClearOnShrink(enabled: boolean): void;
+	getFocusedComponent(): Component | null;
 	setFocus(component: Component | null): void;
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle;
 	hideOverlay(): void;

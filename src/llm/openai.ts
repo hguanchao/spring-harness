@@ -73,6 +73,12 @@ export interface StreamDelta {
 export interface LlmRetryInfo {
   attempt: number;
   message: string;
+  /**
+   * `compat` = 按 400 报文剥字段再发，后台留痕即可。
+   * `transport` = 瞬时传输失败，TUI 需要看见正在重试。
+   * 省略按传输失败处理（旧调用方）。
+   */
+  kind?: 'compat' | 'transport';
 }
 
 export interface LlmClient {

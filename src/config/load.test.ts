@@ -60,6 +60,51 @@ describe('prompt_cache', () => {
   });
 });
 
+describe('[compat]', () => {
+  it('未配置时 undefined，走 URL 推断', () => {
+    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).compat, undefined);
+  });
+
+  it('只配部分字段，其余省略', () => {
+    const config = loadConfig({
+      configPath: configWith('[compat]\nprompt_cache_key = true\nstream_options = false\n'),
+      env: {},
+    });
+    assert.equal(config.compat?.promptCacheKey, true);
+    assert.equal(config.compat?.streamOptions, false);
+    assert.equal(config.compat?.promptCacheRetention, undefined);
+    assert.equal(config.compat?.sessionAffinity, undefined);
+  });
+
+  it('session_affinity 只接受 openai | openrouter | off', () => {
+    const config = loadConfig({
+      configPath: configWith('[compat]\nsession_affinity = "openrouter"\n'),
+      env: {},
+    });
+    assert.equal(config.compat?.sessionAffinity, 'openrouter');
+    assert.throws(
+      () => loadConfig({ configPath: configWith('[compat]\nsession_affinity = "foo"\n'), env: {} }),
+      ConfigError,
+    );
+  });
+
+  it('空表等价于未配置', () => {
+    assert.equal(loadConfig({ configPath: configWith('[compat]\n'), env: {} }).compat, undefined);
+  });
+
+  it('aux.compat 独立于主 [compat]', () => {
+    const config = loadConfig({
+      configPath: configWith(
+        '[compat]\nprompt_cache_key = true\n[aux]\nbase_url = "https://aux.example.com/v1"\n[aux.compat]\nstream_options = false\n',
+      ),
+      env: {},
+    });
+    assert.equal(config.compat?.promptCacheKey, true);
+    assert.equal(config.aux?.compat?.streamOptions, false);
+    assert.equal(config.aux?.compat?.promptCacheKey, undefined);
+  });
+});
+
 describe('[aux] 辅助端点', () => {
   it('未配置时 undefined，即复用主端点', () => {
     assert.equal(loadConfig({ configPath: configWith(''), env: {} }).aux, undefined);

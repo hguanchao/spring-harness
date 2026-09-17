@@ -635,11 +635,16 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
             }
           },
           (info) => {
-            options.listener?.({
-              type: 'status',
-              level: 'warn',
-              text: `Retrying LLM stream (attempt ${info.attempt}): ${info.message}`,
-            });
+            const text = `Retrying LLM stream (attempt ${info.attempt}): ${info.message}`;
+            if (info.kind === 'compat') {
+              options.session.appendEvent('compat_retry', {
+                attempt: info.attempt,
+                message: info.message,
+                text,
+              });
+            }
+            // 传输抖动与参数降级都进工作状态行（TUI 按同一条文案累计次数，不进转录）。
+            options.listener?.({ type: 'status', level: 'warn', text });
           },
         );
         break;

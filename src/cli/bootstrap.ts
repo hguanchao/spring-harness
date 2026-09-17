@@ -28,6 +28,7 @@ import { acquireSessionLock, SessionLockedError } from '../session/lock.js';
 import { sessionDirFor } from '../session/path.js';
 import { resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
 import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
+import type { CompatProfile } from '../llm/compat.js';
 import { applyProxy } from '../net/proxy.js';
 import { sphConfigPath } from '../home.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
@@ -59,6 +60,8 @@ export interface ClientOptions {
    * 反而让主对话与压缩摘要尽量落在同一台机器上。
    */
   sessionId?: string;
+  /** `[compat]` 声明，覆盖 URL 推断。 */
+  compat?: CompatProfile;
 }
 
 /** 按上游协议构造 client；三种协议共享同一 LlmClient 面，loop 无感知。 */
@@ -144,6 +147,11 @@ export interface Runtime {
    * 让 `compact_model` 静默失效的原因。
    */
   makeAuxClient(model: string | undefined): LlmClient | undefined;
+  /**
+   * 把会话锁换到另一个 id（TUI `/new`、`/sessions`）。
+   * 先拿到新锁再放旧锁：失败时当前会话仍占用，不会两边落空。
+   */
+  claimSession(id: string): void;
   /** 幂等清理：所有退出路径都调它。 */
   cleanup(): void;
 }
@@ -194,19 +202,10 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   const sessionDir = sessionDirFor(options.workspaceRoot);
   mkdirSync(sessionDir, { recursive: true });
 
-  let release: (() => void) | undefined;
-  try {
-    release = acquireSessionLock(sessionDir);
-  } catch (error) {
-    if (error instanceof SessionLockedError) throw new CliError(error.message, 1);
-    throw error;
-  }
-
   let sandbox: SandboxHandle;
   try {
     sandbox = await openSandbox(config.sandbox, options.workspaceRoot);
   } catch (error) {
-    release();
     if (error instanceof SandboxError) throw new CliError(error.message, 1);
     throw error;
   }
@@ -217,11 +216,19 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     const file = join(sessionDir, `${options.resumeId}.jsonl`);
     if (!existsSync(file)) {
       sandbox.dispose();
-      release();
       throw new CliError(`session not found: ${options.resumeId} (see: sph sessions)`, 1);
     }
     setCurrentSession(sessionDir, options.resumeId, options.workspaceRoot);
     session = new JsonlSession(sessionDir, options.resumeId);
+  }
+
+  let release: (() => void) | undefined;
+  try {
+    release = acquireSessionLock(sessionDir, session.id);
+  } catch (error) {
+    sandbox.dispose();
+    if (error instanceof SessionLockedError) throw new CliError(error.message, 1);
+    throw error;
   }
 
   const mcp = new McpHub();
@@ -267,7 +274,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       process.stderr.write(`worktree with uncommitted changes kept: ${path}\n`);
     }
     sandbox.dispose();
-    release();
+    release?.();
     try {
       // temp 目录可能已被外部清理掉
       rmSync(sandbox.tempDir, { recursive: true, force: true });
@@ -293,6 +300,11 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     todos,
     jobs,
     worktrees,
+    claimSession(id) {
+      const next = acquireSessionLock(sessionDir, id);
+      release?.();
+      release = next;
+    },
     makeClient(overrides) {
       return createClient({
         baseUrl: overrides.baseUrl ?? config.baseUrl,
@@ -304,6 +316,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         headers: config.httpHeaders,
         promptCache: config.promptCache,
         sessionId: session.id,
+        compat: config.compat,
       });
     },
     makeAuxClient(model) {
@@ -322,6 +335,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         headers: config.httpHeaders,
         promptCache: config.promptCache,
         sessionId: session.id,
+        // 跨端点时用 [aux.compat]；同源则复用主 [compat]。
+        compat: sharesMainEndpoint ? config.compat : config.aux?.compat,
       });
     },
     reloadMcp,

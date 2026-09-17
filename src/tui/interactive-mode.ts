@@ -90,7 +90,15 @@ import { AssistantMessageComponent } from './components/assistant-message.js';
 import { CustomEditor } from './components/custom-editor.js';
 import { FooterComponent, type FooterData } from './components/footer.js';
 import { HeaderComponent } from './components/header.js';
-import { DynamicBorder, IdleStatus, WorkingLabel, WorkingStatusIndicator, keyHint } from './components/interaction.js';
+import {
+  DynamicBorder,
+  IdleStatus,
+  WorkingLabel,
+  WorkingStatusIndicator,
+  formatWorkingWarning,
+  keyHint,
+  workingWarningKey,
+} from './components/interaction.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, toolDisplayName } from './components/tool-execution.js';
 import { SubagentTaskComponent } from './components/subagent-task.js';
 import { ToolGroupComponent } from './components/tool-group.js';
@@ -159,6 +167,8 @@ export interface TuiDeps {
   maxSessionTokens?: number;
   /** 子代理 worktree 隔离的工作树仓库（isolation: worktree 用）。 */
   worktrees?: WorktreeStore;
+  /** 把会话锁换到另一个 id；失败时抛错，当前会话仍占用。 */
+  claimSession?(id: string): void;
   /** 注入终端实现；省略用 ProcessTerminal（测试用假终端驱动整条链路）。 */
   terminal?: Terminal;
   /**
@@ -455,6 +465,13 @@ class InteractiveMode implements ApprovalUi {
     this.editor.onSubmit = (text) => {
       void this.handleSubmit(text);
     };
+    // 点转录区会把焦点从输入框拿走；任意按键再抢回来，Esc / 输入仍可用。
+    this.ui.addInputListener((data) => {
+      if (this.ui.getFocusedComponent()) return undefined;
+      if (isKeyRelease(data)) return undefined;
+      this.ui.setFocus(this.editor);
+      return undefined;
+    });
     this.editor.onCtrlD = () => this.quit();
     this.editor.onEscape = () => this.handleInterrupt();
     this.editor.onAction('app.tools.expand', () => this.toggleToolExpansion());
@@ -659,6 +676,8 @@ class InteractiveMode implements ApprovalUi {
     this.abort = controller;
     this.running = true;
     this.turnOutputStarted = false;
+    // 发出去之后输入框失焦：否则边框一直是聚焦色，像还在打字。
+    this.ui.setFocus(null);
     const indicator = new WorkingStatusIndicator(this.ui, WorkingLabel.working);
     this.setStatusIndicator(indicator);
     // 指示器已带初始文案，这里只是把 activityLabel 记上，后续 setActivity 才知道该不该重设。
@@ -849,6 +868,12 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'status': {
+        // 轮次中的 warn 叠在工作状态行上（带次数），不进转录——否则 Thinking… 会被一条
+        // notice 打断，重试/截断流看起来像聊天记录。
+        if (event.level === 'warn' && this.showWorkingWarning(event.text)) {
+          this.paint('dock');
+          return;
+        }
         this.addNotice(event.text, event.level ?? 'dim');
         this.paint('transcript');
         return;
@@ -1107,6 +1132,8 @@ class InteractiveMode implements ApprovalUi {
     this.currentIndicator?.dispose();
     this.currentIndicator = indicator;
     this.activityLabel = undefined;
+    this.workingWarningKey = undefined;
+    this.workingWarningCount = 0;
     // 状态行常驻输入框上方（grok-build 的 turn status 行位置）：空闲时是两行占位，
     // 工作时换成「转圈 + 阶段文案」+ 最右侧本轮耗时。两种形态同为两行，切换时高度不变。
     this.statusContainer.clear();
@@ -1116,12 +1143,35 @@ class InteractiveMode implements ApprovalUi {
   private currentIndicator?: WorkingStatusIndicator;
   /** 当前状态行文案；措辞未变时不重复 setMessage，流式增量不会每帧重设同一句。 */
   private activityLabel?: string;
+  /** 本轮最近一条工作状态警告（已去掉 Retrying 前缀），用来累计次数。 */
+  private workingWarningKey?: string;
+  private workingWarningCount = 0;
 
   /** 切换状态行文案。只在轮次进行中有意义（空闲时没有指示器可改）。 */
   private setActivity(message: string): void {
     if (this.activityLabel === message) return;
     this.activityLabel = message;
+    this.currentIndicator?.setMessageColor((text) => theme.fg('muted', text));
     this.currentIndicator?.setMessage(message);
+  }
+
+  /**
+   * 把 warn 写进工作状态行。同一条警告本轮累加 `(N)`；换文案从 1 重新计。
+   * 没有指示器（轮次已结束）时返回 false，调用方退回转录 notice。
+   */
+  private showWorkingWarning(text: string): boolean {
+    if (!this.currentIndicator) return false;
+    const key = workingWarningKey(text);
+    if (this.workingWarningKey === key) this.workingWarningCount += 1;
+    else {
+      this.workingWarningKey = key;
+      this.workingWarningCount = 1;
+    }
+    const label = formatWorkingWarning(text, this.workingWarningCount);
+    this.activityLabel = label;
+    this.currentIndicator.setMessageColor((content) => theme.fg('warning', content));
+    this.currentIndicator.setMessage(label);
+    return true;
   }
 
   private toggleToolExpansion(): void {
@@ -1519,7 +1569,14 @@ class InteractiveMode implements ApprovalUi {
       cancelLabel: 'Cancel',
     });
     if (!confirmed) return;
-    this.session = createSession(this.deps.sessionDir, this.deps.workspaceRoot);
+    const next = createSession(this.deps.sessionDir, this.deps.workspaceRoot);
+    try {
+      this.deps.claimSession?.(next.id);
+    } catch (error) {
+      this.addNotice(errorMessage(error), 'warn');
+      return;
+    }
+    this.session = next;
     this.clearChat();
     this.goal = undefined;
     this.lastFailure = undefined;
@@ -1582,6 +1639,12 @@ class InteractiveMode implements ApprovalUi {
 
   /** 切到指定会话并把状态从日志回放出来；调用方负责过滤「已在该会话」。 */
   private switchSession(id: string): void {
+    try {
+      this.deps.claimSession?.(id);
+    } catch (error) {
+      this.addNotice(errorMessage(error), 'warn');
+      return;
+    }
     this.session = new JsonlSession(this.deps.sessionDir, id);
     setCurrentSession(this.deps.sessionDir, id, this.deps.workspaceRoot);
     this.clearChat();
@@ -1946,12 +2009,14 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * 审批模式映射到输入框边框颜色，一眼可辨当前风险等级：
-   * ask = 中性灰（默认），auto = 黄（模型代审，半自动），yolo = 红（全部放行，危险）。
+   * 审批模式映射到输入框边框颜色，一眼可辨当前风险等级。
+   * 失焦一律弱化；聚焦时 ask 用品牌紫，auto 黄，yolo 红。
    */
   private applyApprovalBorder(): void {
-    const color = this.approval === 'yolo' ? 'error' : this.approval === 'auto' ? 'warning' : 'borderMuted';
-    this.editor.borderColor = (text: string) => theme.fg(color, text);
+    const idle = 'borderMuted';
+    const focus = this.approval === 'yolo' ? 'error' : this.approval === 'auto' ? 'warning' : 'primary';
+    this.editor.borderColor = (text: string) => theme.fg(idle, text);
+    this.editor.focusBorderColor = (text: string) => theme.fg(focus, text);
   }
 
   private clearChat(): void {

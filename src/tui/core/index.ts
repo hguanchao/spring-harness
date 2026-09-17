@@ -110,6 +110,7 @@ export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.js";
 // Utilities
 export {
 	clipLineToWidth,
+	contentVisibleWidth,
 	getOsc8LinkAtColumn,
 	OSC133_ZONE_PREFIX,
 	sliceByColumn,

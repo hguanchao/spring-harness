@@ -2,6 +2,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
 import { APPROVAL_MODES, type ApprovalMode } from '../approval/policy.js';
 import { sphConfigPath } from '../home.js';
+import {
+  SESSION_AFFINITY_FORMATS,
+  type CompatProfile,
+  type SessionAffinityFormat,
+} from '../llm/compat.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
 import type { McpServerConfig } from '../mcp/hub.js';
 import type { McpPreferences } from '../mcp/sources.js';
@@ -27,6 +32,8 @@ export interface AuxConfig {
   baseUrl?: string;
   apiKey?: string;
   api?: ApiProtocol;
+  /** 辅助端点自己的兼容声明；省略且跨端点时走该端点 URL 推断。 */
+  compat?: CompatProfile;
 }
 
 export interface SphConfig {
@@ -66,6 +73,11 @@ export interface SphConfig {
    */
   promptCache: boolean;
   /**
+   * 端点参数声明，覆盖 URL 推断。省略的字段仍走推断。
+   * `prompt_cache = false` 会在组装 caps 时关掉缓存相关位，不看这里。
+   */
+  compat?: CompatProfile;
+  /**
    * 会话累计 token 预算（prompt + completion，含子代理与压缩调用）。0 表示不限制（默认）。
    * 计数在会话折叠里，因此活过 resume；超限时在发起下一次调用**之前**中止本轮。
    */
@@ -101,6 +113,11 @@ sandbox = "workspace"
 # prompt_cache = true           # Anthropic 打 prompt-cache 断点，默认开；端点不认时自动降级
 # max_session_tokens = 0        # 会话累计 token 预算（含子代理/压缩调用）；0 = 不限制
 # proxy = "http://127.0.0.1:7890"  # 出站代理；显式 "" = 强制直连，缺省回退 HTTP(S)_PROXY 环境变量
+# [compat]                      # 端点参数声明；省略按 base_url 推断（未知网关不发 cache key）
+# prompt_cache_key = true       # 发 session 路由键；官方 api.openai.com 默认开
+# prompt_cache_retention = true # 发 prompt_cache_retention = "24h"；默认关
+# stream_options = false        # 关掉 stream_options.include_usage
+# session_affinity = "openrouter"  # openai | openrouter | off
 # [http_headers]                # 附加到每个 LLM 请求的静态头；api_key = ""（显式空）时免鉴权
 # "User-Agent" = "opencode/1.4.3"
 # "X-Opencode-Session" = "some-session-id"
@@ -209,12 +226,13 @@ export function loadConfig(options?: {
   const spillThreshold = parseSpillThreshold(file.spill_threshold);
   const subagentMaxDepth = parseSubagentMaxDepth(file.subagent_max_depth);
   const promptCache = parsePromptCache(file.prompt_cache);
+  const compat = parseCompat(file.compat, 'compat');
   const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
   const mcpPreferences = parseMcpPreferences(file.mcp);
   return {
     baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
     compactModel, reviewModel, aux, spillThreshold, httpHeaders, proxy, subagentMaxDepth, promptCache,
-    maxSessionTokens, mcpPreferences,
+    compat, maxSessionTokens, mcpPreferences,
   };
 }
 
@@ -286,7 +304,42 @@ function parseAux(value: unknown): AuxConfig | undefined {
   const apiKey = asOptionalKey(row.api_key, 'aux.api_key');
   if (apiKey !== undefined) aux.apiKey = apiKey;
   if (row.api !== undefined && row.api !== '') aux.api = parseApiProtocol(row.api);
+  const compat = parseCompat(row.compat, 'aux.compat');
+  if (compat !== undefined) aux.compat = compat;
   return Object.keys(aux).length > 0 ? aux : undefined;
+}
+
+function parseOptionalBoolean(value: unknown, key: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') throw new ConfigError(`${key} must be a boolean`);
+  return value;
+}
+
+/** `[compat]`：省略的字段走 URL 推断；空表等价于未配置。 */
+function parseCompat(value: unknown, key: string): CompatProfile | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError(`${key} must be a table`);
+  }
+  const row = value as Record<string, unknown>;
+  const profile: CompatProfile = {};
+  const promptCacheKey = parseOptionalBoolean(row.prompt_cache_key, `${key}.prompt_cache_key`);
+  if (promptCacheKey !== undefined) profile.promptCacheKey = promptCacheKey;
+  const promptCacheRetention = parseOptionalBoolean(row.prompt_cache_retention, `${key}.prompt_cache_retention`);
+  if (promptCacheRetention !== undefined) profile.promptCacheRetention = promptCacheRetention;
+  const streamOptions = parseOptionalBoolean(row.stream_options, `${key}.stream_options`);
+  if (streamOptions !== undefined) profile.streamOptions = streamOptions;
+  if (row.session_affinity !== undefined) {
+    if (typeof row.session_affinity !== 'string') {
+      throw new ConfigError(`${key}.session_affinity must be openai | openrouter | off`);
+    }
+    const affinity = row.session_affinity.trim();
+    if (!(SESSION_AFFINITY_FORMATS as readonly string[]).includes(affinity)) {
+      throw new ConfigError(`${key}.session_affinity must be openai | openrouter | off`);
+    }
+    profile.sessionAffinity = affinity as SessionAffinityFormat;
+  }
+  return Object.keys(profile).length > 0 ? profile : undefined;
 }
 
 /** 会话 token 预算：非负整数，0 = 不限制（默认）。 */

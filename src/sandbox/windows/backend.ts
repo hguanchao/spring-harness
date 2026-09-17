@@ -1,6 +1,7 @@
 import { errorMessage } from '../../util.js';
 import { canonicalize } from '../../workspace/boundary.js';
-import { hasOtherLiveSession } from '../../session/lock.js';
+import { hasOtherLiveSession, hasOtherLiveSessionIn } from '../../session/lock.js';
+import { sessionDirFor } from '../../session/path.js';
 import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../open.js';
 import { SandboxError, type SandboxMode, type SandboxStatus } from '../types.js';
 import { grantWrite, revokeWrite } from './acl.js';
@@ -36,8 +37,11 @@ export class WindowsAclSandbox implements SandboxHandle {
   readonly status: SandboxStatus;
   readonly tempDir: string;
   private token: Handle | null = null;
-  /** 退出时要撤销的授权。`shared` = 所有工作区会话共用同一路径，撤销前要确认没有别人在跑。 */
-  private readonly revocable: { path: string; sddl: string; shared: boolean }[] = [];
+  /**
+   * 退出时要撤销的授权。
+   * `home` = ~/.sph 跨工作区共用；`workspace` = 同目录多实例共用一条 ACE。
+   */
+  private readonly revocable: { path: string; sddl: string; retain?: 'home' | 'workspace' }[] = [];
   private readonly owned: Handle[] = [];
 
   constructor(private readonly options: WindowsAclOptions) {
@@ -58,9 +62,9 @@ export class WindowsAclSandbox implements SandboxHandle {
         const workspaceSid = workspaceWriteSid(workspace);
         const tmpSid = tempWriteSid(temp);
         // 不给 ~/.sph 授写：配置/会话/密钥由父进程写，沙箱子进程不该改 api_key。
-        const grants: Array<{ path: string; sddl: string; shared: boolean }> = [
-          { path: workspace, sddl: workspaceSid, shared: false },
-          { path: temp, sddl: tmpSid, shared: false },
+        const grants: Array<{ path: string; sddl: string; retain?: 'home' | 'workspace' }> = [
+          { path: workspace, sddl: workspaceSid, retain: 'workspace' },
+          { path: temp, sddl: tmpSid },
         ];
         for (const grant of grants) {
           grantWrite(grant.path, grant.sddl);
@@ -133,9 +137,11 @@ export class WindowsAclSandbox implements SandboxHandle {
     // ~/.sph 的授权是跨工作区共享的：另一个工作区的会话正靠它让 shell 写 ~/.sph，而它在本进程
     // 退出前不会重新申请。还有别人活着就跳过这一条，留给最后一个退出的进程收——否则会留下一个
     // 「授权被别的进程悄悄撤掉」的间歇性写失败，比脏 ACE 难查得多。
-    const dropShared = !hasOtherLiveSession();
+    const dropHome = !hasOtherLiveSession();
+    const dropWorkspace = !hasOtherLiveSessionIn(sessionDirFor(this.options.workspaceRoot));
     for (const grant of this.revocable) {
-      if (grant.shared && !dropShared) continue;
+      if (grant.retain === 'home' && !dropHome) continue;
+      if (grant.retain === 'workspace' && !dropWorkspace) continue;
       try {
         revokeWrite(grant.path, grant.sddl);
       } catch {

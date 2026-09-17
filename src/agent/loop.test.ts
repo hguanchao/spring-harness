@@ -184,6 +184,51 @@ function usage(promptTokens: number, cachedTokens?: number): TokenUsage {
   };
 }
 
+describe('参数降级进工作状态', () => {
+  it('compat 重试既落会话事件，也发 status warn；传输抖动同样上屏', async () => {
+    const { session, root, cleanup } = makeSession();
+    const events: AgentEvent[] = [];
+    const client: LlmClient = {
+      async complete(_messages, _tools, _signal, _onDelta, onRetry) {
+        onRetry?.({
+          attempt: 2,
+          message: 'LLM HTTP 400: unsupported prompt_cache_key; dropping extra request fields',
+          kind: 'compat',
+        });
+        onRetry?.({ attempt: 2, message: 'socket hang up', kind: 'transport' });
+        return { text: 'ok', finishReason: 'stop', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      },
+    };
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client,
+        session,
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        listener: (event) => events.push(event),
+      });
+      const retries = session.readAll().flatMap((record) =>
+        record.type === 'event' && record.kind === 'compat_retry' ? [record.data] : [],
+      );
+      assert.equal(retries.length, 1);
+      assert.match(String(retries[0]?.message ?? ''), /prompt_cache_key/);
+      assert.ok(
+        events.some((event) => event.type === 'status' && event.level === 'warn' && /dropping extra request fields/.test(event.text)),
+        '参数降级应进工作状态行',
+      );
+      assert.ok(
+        events.some((event) => event.type === 'status' && /socket hang up/.test(event.text)),
+        '传输抖动仍应上屏',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe('提示缓存未命中记录', () => {
   /** 从会话记录里找出 cache_miss 事件；`describeCacheMiss` 的全文存在 data.text。 */
   const missEvents = (session: JsonlSession): Array<Record<string, unknown>> =>

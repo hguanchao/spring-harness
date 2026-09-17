@@ -450,11 +450,15 @@ function replaceScrollbarCell(
 		targetPrefix += ansi.code;
 		targetIndex += ansi.length;
 	}
-	const beforePadding = " ".repeat(Math.max(0, start - visibleWidth(before)));
+	const beforeWidth = visibleWidth(before);
+	// 空隙行（转录区与输入框之间的 gap）原先用空格铺到滑块列。Windows Terminal 上
+	// 这些空格会显出一条浅底，滚到最底、滑块接到 until 时最明显。缺列用 CHA 跳过去。
+	const skip = Math.max(0, start - beforeWidth);
+	const lead = skip > 0 ? `\x1b[${start + 1}G` : "";
 	const cellPaddingBefore = " ".repeat(Math.max(0, column - start));
 	const cellPaddingAfter = " ".repeat(Math.max(0, end - column - 1));
 	const targetStyle = `\x1b[0m\x1b]8;;\x07${preserveTargetBackground ? getActiveBackgroundAnsi(targetPrefix) : ""}`;
-	return `${before}${beforePadding}${targetStyle}${cellPaddingBefore}${replacement}${cellPaddingAfter}${after}`;
+	return `${before}${lead}${targetStyle}${cellPaddingBefore}${replacement}${cellPaddingAfter}${after}`;
 }
 
 export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false): ScrollbarGeometry | undefined {

@@ -76,7 +76,8 @@ describe('scrollbarUntil', () => {
     assert.ok(editorBox);
     assert.ok(editorBox.rect.y > scrollBox.rect.y + scrollBox.rect.height);
     const gutter = editorBox.rect.y - 1;
-    const cell = stripTerminalSequences(frame.lines[gutter] ?? '').slice(geo.column, geo.column + 1);
-    assert.equal(cell, '▐');
+    const gutterLine = frame.lines[gutter] ?? '';
+    assert.equal(stripTerminalSequences(gutterLine), '▐');
+    assert.match(gutterLine, /\x1b\[\d+G/, '空隙行用 CHA 落到滑块列，不铺空格');
   });
 });

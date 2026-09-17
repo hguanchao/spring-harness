@@ -43,7 +43,7 @@ Key facts:
 - `api` selects the upstream protocol; default is `chat-completions`.
 - `compact_model` / `review_model` point the summariser and the `auto`-approval reviewer at cheaper models.
 - `[aux]` (optional) gives those auxiliary calls a *different* endpoint — `base_url` / `api_key` / `api`, each individually optional. This is what makes a cross-vendor cheap summariser possible.
-- `prompt_cache` (default `true`) places Anthropic prompt-cache breakpoints and sends OpenAI-side cache routing (`prompt_cache_key` + session affinity headers + 24h retention). Rejected parameters are dropped automatically on the next attempt. The system prompt is frozen within a turn and the mechanical-stub boundary is pinned once it first engages, so the request prefix stays byte-stable; whole-prompt cache misses are logged as `cache_miss` events in the session file rather than shown in the UI.
+- `prompt_cache` (default `true`) places Anthropic prompt-cache breakpoints. OpenAI-side cache routing (`prompt_cache_key`) is sent only for `api.openai.com`, or when `[compat]` opts in. `prompt_cache_retention` is off unless declared. Unknown gateways get a conservative first request; rejected optional fields are dropped, logged as `compat_retry` in the session file, and shown on the working-status line with a count. The system prompt is frozen within a turn and the mechanical-stub boundary is pinned once it first engages, so the request prefix stays byte-stable; whole-prompt cache misses are logged as `cache_miss` events in the session file rather than shown in the UI.
 - `max_session_tokens` (default `0` = unlimited) caps cumulative prompt+completion tokens for the whole agent tree, including subagents and compaction. The count survives `--resume`; the turn stops before the next request when the budget is gone, and warns at 80%.
 - `subagent_max_depth` (default `1`) — `0` forbids delegation entirely.
 
@@ -120,7 +120,7 @@ Everything user-level lives under `~/.sph/` and never in the repository:
 | `models.json` | per-endpoint model catalog cache and user-entered capacity hints |
 | `spill/` | oversized tool results, kept out of context and referenced by path |
 
-Malformed session lines are skipped rather than failing the file, and a second `sph` on the same workspace exits immediately (session lock).
+Malformed session lines are skipped rather than failing the file. Multiple `sph` processes can run in the same directory (each gets its own conversation); `-c` / `--resume` of a session that is already open exits immediately.
 
 ## Architecture
 

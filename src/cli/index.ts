@@ -164,6 +164,7 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       maxSubagentDepth: rt.config.subagentMaxDepth,
       maxSessionTokens: rt.config.maxSessionTokens,
       worktrees: rt.worktrees,
+      claimSession: (id) => rt.claimSession(id),
       mcpWarnings: rt.mcpWarnings,
       ...(ui === undefined ? {} : { ui }),
     });

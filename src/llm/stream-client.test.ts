@@ -115,6 +115,38 @@ describe('参数降级重试', () => {
     assert.equal(bodies[1]?.stream_options, undefined);
   });
 
+  it('参数降级回调标记 kind=compat，传输抖动标记 kind=transport', async () => {
+    const kinds: string[] = [];
+    stubFetch([], () => errorResponse(400, 'Unrecognized request argument supplied: stream_options'));
+    await client().complete(messages, [], undefined, undefined, (info) => {
+      kinds.push(info.kind ?? '');
+    });
+    assert.deepEqual(kinds, ['compat']);
+
+    kinds.length = 0;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response('', { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return okResponse('ok');
+    }) as typeof fetch;
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      promptCache: false,
+      maxRetries: 2,
+      compat: { streamOptions: false },
+    });
+    await c.complete(messages, [], undefined, undefined, (info) => {
+      kinds.push(info.kind ?? '');
+    });
+    assert.ok(kinds.includes('transport'));
+    assert.equal(kinds.includes('compat'), false);
+  });
+
   it('端点持续拒收同一参数时在上限内停止，不无限重发', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
@@ -314,7 +346,7 @@ describe('会话缓存路由', () => {
     }) as typeof fetch;
   }
 
-  it('sessionId 进请求体（key + retention）与亲和头', async () => {
+  it('未知网关有 sessionId 也不发 cache key / retention，仍带 openai 形态亲和头', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const headers: Array<Record<string, string>> = [];
     stubWithHeaders(bodies, headers);
@@ -328,13 +360,67 @@ describe('会话缓存路由', () => {
     });
     await c.complete(messages, []);
 
-    assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
-    assert.equal(bodies[0]?.prompt_cache_retention, '24h');
+    assert.equal(bodies[0]?.prompt_cache_key, undefined);
+    assert.equal(bodies[0]?.prompt_cache_retention, undefined);
     assert.equal(headers[0]?.session_id, 'sess-abc');
     assert.equal(headers[0]?.['x-session-affinity'], 'sess-abc');
   });
 
-  it('不传 sessionId 时不发缓存路由参数，行为与旧版一致', async () => {
+  it('官方 OpenAI 发 prompt_cache_key，不发 retention', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const headers: Array<Record<string, string>> = [];
+    stubWithHeaders(bodies, headers);
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      sessionId: 'sess-abc',
+    });
+    await c.complete(messages, []);
+
+    assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
+    assert.equal(bodies[0]?.prompt_cache_retention, undefined);
+    assert.equal(headers[0]?.session_id, 'sess-abc');
+  });
+
+  it('[compat] 可让未知网关发 key 与 retention', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const headers: Array<Record<string, string>> = [];
+    stubWithHeaders(bodies, headers);
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      sessionId: 'sess-abc',
+      compat: { promptCacheKey: true, promptCacheRetention: true },
+    });
+    await c.complete(messages, []);
+
+    assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
+    assert.equal(bodies[0]?.prompt_cache_retention, '24h');
+  });
+
+  it('OpenRouter URL 只发 x-session-id', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const headers: Array<Record<string, string>> = [];
+    stubWithHeaders(bodies, headers);
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      sessionId: 'sess-abc',
+    });
+    await c.complete(messages, []);
+
+    assert.equal(headers[0]?.['x-session-id'], 'sess-abc');
+    assert.equal(headers[0]?.session_id, undefined);
+    assert.equal(bodies[0]?.prompt_cache_key, undefined);
+  });
+
+  it('不传 sessionId 时不发缓存路由参数与亲和头', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const headers: Array<Record<string, string>> = [];
     stubWithHeaders(bodies, headers);
@@ -343,8 +429,25 @@ describe('会话缓存路由', () => {
 
     assert.equal(bodies[0]?.prompt_cache_key, undefined);
     assert.equal(headers[0]?.session_id, undefined);
-    // retention 与路由无关（只要求端点把前缀缓存留久点），没有 key 也照发。
-    assert.equal(bodies[0]?.prompt_cache_retention, '24h');
+    assert.equal(bodies[0]?.prompt_cache_retention, undefined);
+  });
+
+  it('session_affinity=off 不发亲和头', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const headers: Array<Record<string, string>> = [];
+    stubWithHeaders(bodies, headers);
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      sessionId: 'sess-abc',
+      compat: { sessionAffinity: 'off' },
+    });
+    await c.complete(messages, []);
+    assert.equal(headers[0]?.session_id, undefined);
+    assert.equal(headers[0]?.['x-session-affinity'], undefined);
+    assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
   });
 
   it('用户自定义头与亲和头同名时以用户为准', async () => {

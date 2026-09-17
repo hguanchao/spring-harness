@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { TUI } from '../core/index.js';
+import type { TUI, TuiMouseEvent } from '../core/index.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from './tool-execution.js';
 import { ToolGroupComponent } from './tool-group.js';
 
@@ -149,7 +149,70 @@ describe('ToolGroupComponent 缩进分层', () => {
   });
 });
 
+function thinkingOf(group: ToolGroupComponent, index = 0): { expanded: boolean } {
+  const members = (
+    group as unknown as { members: Array<{ kind: string; thinking?: { expanded: boolean } }> }
+  ).members;
+  const thinkings = members.flatMap((member) =>
+    member.kind === 'thinking' && member.thinking ? [member.thinking] : [],
+  );
+  const hit = thinkings[index];
+  assert.ok(hit, `没有第 ${index} 段思考`);
+  return hit;
+}
+
+function clickGroup(group: ToolGroupComponent, y: number, x = 10): void {
+  const lines = group.render(100);
+  const event: TuiMouseEvent = {
+    type: 'click',
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width: 100,
+    height: lines.length,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  };
+  group.handleMouse(event);
+}
+
+function lineIndex(group: ToolGroupComponent, needle: string): number {
+  const lines = group.render(100);
+  const index = lines.findIndex((line) => line.replace(STRIP, '').includes(needle));
+  assert.ok(index >= 0, `没找到含「${needle}」的行`);
+  return index;
+}
+
 describe('ToolGroupComponent 思考段的独立展开', () => {
+  it('双击详情正文也能收起，不必滚回 Thinking 标题', () => {
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    group.setThinking('第一轮：先看目录结构。\n第二段仍是详情。', false, 1000);
+    expandThinkings(group, [0]);
+    assert.equal(thinkingOf(group).expanded, true);
+    assert.ok(rowsOf(group).some((row) => row.includes('第一轮')));
+
+    const detailY = lineIndex(group, '第一轮');
+    clickGroup(group, detailY);
+    clickGroup(group, detailY);
+    assert.equal(thinkingOf(group).expanded, false, '双击详情应收起');
+    assert.ok(!rowsOf(group).some((row) => row.includes('第一轮')), '收起后详情不应再出现');
+  });
+
+  it('双击 Thinking 标题仍能展开', () => {
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    group.setThinking('第一轮：先看目录结构。', false, 1000);
+    const titleY = lineIndex(group, 'Thought for');
+    clickGroup(group, titleY);
+    clickGroup(group, titleY);
+    assert.equal(thinkingOf(group).expanded, true);
+    assert.ok(rowsOf(group).some((row) => row.includes('第一轮')));
+  });
+
   it('展开某一段不牵动其他段', () => {
     const group = buildThreeIterationGroup();
     group.setExpanded(true, false);

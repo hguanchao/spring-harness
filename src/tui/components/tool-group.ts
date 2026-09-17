@@ -137,7 +137,7 @@ function summarize(tools: readonly ToolExecutionComponent[]): GroupSummary {
 /**
  * 组内一段思考。同一组可以有多段——每次 LLM 调用一份，按发生顺序与工具行交错排列。
  *
- * 每段自带展开态：双击它的行只开合它自己的正文，不牵动分组、也不牵动别的思考段。
+ * 每段自带展开态：双击标题或详情都只开合这一段正文，不牵动分组、也不牵动别的思考段。
  */
 class ThinkingMember {
   text = '';
@@ -148,12 +148,20 @@ class ThinkingMember {
   bodyIndent = TOOL_DETAIL_INDENT;
   readonly row = new Text('', 0, 0);
   readonly body = new Container();
+  /**
+   * 标题行 + 详情共处一块：双击详情也要能收起。
+   * 旧实现 region 只包标题，正文是旁边的独立节点——详情一长，标题滚出视口后
+   * 就只能滚回去点 Thinking 才能折上。
+   */
+  readonly block = new Container();
   readonly region: MouseRegion;
   readonly click = new DoubleClickTracker();
   markdown?: Markdown;
 
   constructor(onToggle: (self: ThinkingMember, event: TuiMouseEvent) => TuiMouseEventResult | undefined) {
-    this.region = asSelectableRow(new MouseRegion(this.row, (event) => onToggle(this, event)));
+    this.block.addChild(this.row);
+    this.block.addChild(this.body);
+    this.region = asSelectableRow(new MouseRegion(this.block, (event) => onToggle(this, event)));
   }
 }
 
@@ -416,7 +424,6 @@ export class ToolGroupComponent extends VStack {
       if (entry.kind === 'thinking') {
         if (!visible(entry.thinking)) continue;
         this.addChild(entry.thinking.region);
-        if (entry.thinking.expanded) this.addChild(entry.thinking.body);
         continue;
       }
       if (this.expanded) this.addChild(entry.tool);

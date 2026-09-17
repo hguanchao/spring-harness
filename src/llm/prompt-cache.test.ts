@@ -28,17 +28,21 @@ describe('clampPromptCacheKey', () => {
 });
 
 describe('openaiSessionHeaders', () => {
-  it('普通端点带上三个常见亲和头', () => {
-    const headers = openaiSessionHeaders('s-123', 'https://api.openai.com/v1');
+  it('openai 形态带上三个常见亲和头', () => {
+    const headers = openaiSessionHeaders('s-123', 'openai');
     assert.equal(headers.session_id, 's-123');
     assert.equal(headers['x-client-request-id'], 's-123');
     assert.equal(headers['x-session-affinity'], 's-123');
   });
 
-  it('OpenRouter 只认 x-session-id，多发无益', () => {
-    const headers = openaiSessionHeaders('s-123', 'https://openrouter.ai/api/v1');
+  it('openrouter 只认 x-session-id，多发无益', () => {
+    const headers = openaiSessionHeaders('s-123', 'openrouter');
     assert.equal(headers['x-session-id'], 's-123');
     assert.equal(headers.session_id, undefined);
     assert.equal(headers['x-session-affinity'], undefined);
+  });
+
+  it('off 不发任何亲和头', () => {
+    assert.deepEqual(openaiSessionHeaders('s-123', 'off'), {});
   });
 });

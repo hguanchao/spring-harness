@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFile
 import { join } from 'node:path';
 import { sphSessionsRoot } from '../home.js';
 
-const LOCK_NAME = 'session.lock';
-
 export class SessionLockedError extends Error {
   constructor(message: string) {
     super(message);
@@ -11,8 +9,9 @@ export class SessionLockedError extends Error {
   }
 }
 
-export function lockPath(sessionDir: string): string {
-  return join(sessionDir, LOCK_NAME);
+/** 锁按会话 id 落盘：同一工作区可以开多个 sph，但不能两个进程写同一份 JSONL。 */
+export function lockPath(sessionDir: string, sessionId: string): string {
+  return join(sessionDir, `${sessionId}.lock`);
 }
 
 function isPidAlive(pid: number): boolean {
@@ -24,23 +23,49 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-/** 同工作区第二实例立刻退出，避免两份进程同时 append JSONL。 */
-export function acquireSessionLock(sessionDir: string, pid = process.pid): () => void {
+function livePidAt(path: string): number | undefined {
+  if (!existsSync(path)) return undefined;
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8').trim();
+  } catch {
+    return undefined;
+  }
+  const pid = Number(raw);
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  return isPidAlive(pid) ? pid : undefined;
+}
+
+/**
+ * 锁住这一份会话文件。同工作区的其它会话互不影响。
+ *
+ * 两个进程同时 append 同一份 JSONL 会把半行写穿；`-c` / `--resume` 撞上已打开的
+ * 同一 id 才拒绝。默认新建会话不会撞锁。
+ */
+export function acquireSessionLock(sessionDir: string, sessionId: string, pid = process.pid): () => void {
   mkdirSync(sessionDir, { recursive: true });
-  const path = lockPath(sessionDir);
+  const path = lockPath(sessionDir, sessionId);
+  const existing = livePidAt(path);
+  if (existing !== undefined) {
+    throw new SessionLockedError(
+      `session ${sessionId} already in use by pid ${existing}\nstart without -c/--resume to open a new conversation in this directory.`,
+    );
+  }
   if (existsSync(path)) {
-    const existing = Number(readFileSync(path, 'utf8').trim());
-    if (Number.isInteger(existing) && existing > 0 && isPidAlive(existing)) {
-      throw new SessionLockedError(`session already in use by pid ${existing} (${path})`);
+    try {
+      unlinkSync(path);
+    } catch {
+      // 死锁文件清不掉时走下面 wx，EEXIST 同样报占用
     }
-    unlinkSync(path);
   }
   try {
     writeFileSync(path, String(pid), { flag: 'wx' });
   } catch (error) {
     const code = error !== null && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : '';
     if (code === 'EEXIST') {
-      throw new SessionLockedError(`session already in use (${path})`);
+      throw new SessionLockedError(
+        `session ${sessionId} already in use (${path})\nstart without -c/--resume to open a new conversation in this directory.`,
+      );
     }
     throw error;
   }
@@ -53,6 +78,32 @@ export function acquireSessionLock(sessionDir: string, pid = process.pid): () =>
   };
 }
 
+function dirHasOtherLiveLock(dir: string, ownPid: number): boolean {
+  let names: string[];
+  try {
+    if (!existsSync(dir)) return false;
+    names = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.lock')) continue;
+    const pid = livePidAt(join(dir, name));
+    if (pid !== undefined && pid !== ownPid) return true;
+  }
+  return false;
+}
+
+/**
+ * 这个工作区目录里是否还有**别的** sph 进程活着。
+ *
+ * Windows 工作区 ACL 的能力 SID 由路径派生，同目录多实例共享一条 ACE；先退出的
+ * 那个不能把授权撤掉。
+ */
+export function hasOtherLiveSessionIn(sessionDir: string, ownPid = process.pid): boolean {
+  return dirHasOtherLiveLock(sessionDir, ownPid);
+}
+
 /**
  * 是否还有**别的** sph 进程活着（跨工作区）。
  *
@@ -61,9 +112,7 @@ export function acquireSessionLock(sessionDir: string, pid = process.pid): () =>
  * 正靠这条授权写 ~/.sph），而那条会话在本进程退出前不会重新申请授权。所以撤销前先问一句，
  * 还有别人活着就留给最后一个退出的进程收。
  *
- * 工作区授权没有这个问题：它受会话锁保护，同一工作区同时只允许一个实例。
- *
- * 判断依据就是各工作区目录里的 session.lock（已有状态，不新增簿记）。扫描不到或读不出来
+ * 判断依据是各工作区目录里的 `*.lock`（含旧的 `session.lock`）。扫描不到或读不出来
  * 一律当作「没有别人」——宁可多撤销一次，也不要把授权永久留在盘上。
  */
 export function hasOtherLiveSession(ownPid = process.pid, root = sphSessionsRoot()): boolean {
@@ -75,16 +124,7 @@ export function hasOtherLiveSession(ownPid = process.pid, root = sphSessionsRoot
     return false;
   }
   for (const name of names) {
-    const path = lockPath(join(root, name));
-    let raw: string;
-    try {
-      if (!existsSync(path)) continue;
-      raw = readFileSync(path, 'utf8').trim();
-    } catch {
-      continue;
-    }
-    const pid = Number(raw);
-    if (Number.isInteger(pid) && pid > 0 && pid !== ownPid && isPidAlive(pid)) return true;
+    if (dirHasOtherLiveLock(join(root, name), ownPid)) return true;
   }
   return false;
 }

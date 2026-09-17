@@ -1,3 +1,5 @@
+import type { SessionAffinityFormat } from './compat.js';
+
 /**
  * OpenAI 系端点的提示缓存参数。
  *
@@ -32,13 +34,14 @@ export function clampPromptCacheKey(key: string | undefined): string | undefined
  * 会话亲和的追加请求头。
  *
  * `session_id` / `x-client-request-id` / `x-session-affinity` 是 OpenAI 形态端点常见的
- * 三个名字；OpenRouter 认的是 `x-session-id`。多带一个名字的代价是被忽略，少带一个的
- * 代价是缓存路由失效，所以宁可把常见的都带上。
+ * 三个名字；OpenRouter 认的是 `x-session-id`。格式由 URL 推断或 `[compat].session_affinity`
+ * 覆盖，adapter 只负责按格式填头。
  *
  * 只挂在 OpenAI 系 adapter 上：Anthropic 的缓存按账号 + 前缀计，没有这类头。
  */
-export function openaiSessionHeaders(sessionId: string, baseUrl: string): Record<string, string> {
-  if (/openrouter\./i.test(baseUrl)) return { 'x-session-id': sessionId };
+export function openaiSessionHeaders(sessionId: string, format: SessionAffinityFormat): Record<string, string> {
+  if (format === 'off') return {};
+  if (format === 'openrouter') return { 'x-session-id': sessionId };
   return {
     session_id: sessionId,
     'x-client-request-id': sessionId,

@@ -314,6 +314,14 @@ export function stripTerminalSequences(str: string): string {
 	return result;
 }
 
+/**
+ * 去掉行尾铺满终端的空白后的列宽。
+ * 全屏选区按这个宽度截断，避免空白格子被反色、拖动复制出一串空格。
+ */
+export function contentVisibleWidth(line: string): number {
+	return visibleWidth(stripTerminalSequences(line).trimEnd());
+}
+
 interface GraphemeCellRange {
 	start: number;
 	end: number;

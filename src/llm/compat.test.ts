@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { degradeRequestCaps, degradeSilentCompat, initialRequestCaps, type RequestCaps } from './compat.js';
+import {
+  degradeRequestCaps,
+  degradeSilentCompat,
+  detectSessionAffinity,
+  initialRequestCaps,
+  isOfficialOpenAI,
+  type RequestCaps,
+} from './compat.js';
+
+/** 降级用例需要 key/retention 都开着，才能断言报文剥的是哪一位。 */
+function cacheOn(caps = initialRequestCaps('gpt-4o', true)): RequestCaps {
+  return { ...caps, promptCacheKey: true, promptCacheRetention: true };
+}
 
 /** 从默认能力位出发做一次降级，避免每条用例都手写整份对象。 */
 function after(text: string, caps = initialRequestCaps('gpt-4o', true)) {
@@ -31,6 +43,58 @@ describe('initialRequestCaps 模型名启发式', () => {
     assert.equal(caps.streamOptions, true);
     assert.equal(caps.sendStore, true);
     assert.equal(caps.sendReasoning, true);
+    assert.equal(caps.promptCacheKey, false);
+    assert.equal(caps.promptCacheRetention, false);
+  });
+});
+
+describe('未知端点默认少发缓存字段', () => {
+  it('只认官方 api.openai.com', () => {
+    assert.equal(isOfficialOpenAI('https://api.openai.com/v1'), true);
+    assert.equal(isOfficialOpenAI('https://api.openai.com'), true);
+    assert.equal(isOfficialOpenAI('https://proxy.example.com/v1'), false);
+    assert.equal(isOfficialOpenAI('https://openrouter.ai/api/v1'), false);
+    assert.equal(isOfficialOpenAI('http://example.invalid/v1'), false);
+  });
+
+  it('OpenRouter 只改亲和头格式，不当成官方 OpenAI', () => {
+    assert.equal(detectSessionAffinity('https://openrouter.ai/api/v1'), 'openrouter');
+    assert.equal(detectSessionAffinity('https://api.openai.com/v1'), 'openai');
+    assert.equal(detectSessionAffinity('https://proxy.example.com/v1'), 'openai');
+  });
+
+  it('未知 URL 不发 key 与 retention', () => {
+    const caps = initialRequestCaps('gpt-4o', true, { baseUrl: 'https://proxy.example.com/v1' });
+    assert.equal(caps.promptCache, true);
+    assert.equal(caps.promptCacheKey, false);
+    assert.equal(caps.promptCacheRetention, false);
+    assert.equal(caps.streamOptions, true);
+  });
+
+  it('官方 OpenAI 发 key，不发 retention', () => {
+    const caps = initialRequestCaps('gpt-4o', true, { baseUrl: 'https://api.openai.com/v1' });
+    assert.equal(caps.promptCacheKey, true);
+    assert.equal(caps.promptCacheRetention, false);
+  });
+
+  it('[compat] 覆盖推断', () => {
+    const caps = initialRequestCaps('gpt-4o', true, {
+      baseUrl: 'https://proxy.example.com/v1',
+      compat: { promptCacheKey: true, promptCacheRetention: true, streamOptions: false },
+    });
+    assert.equal(caps.promptCacheKey, true);
+    assert.equal(caps.promptCacheRetention, true);
+    assert.equal(caps.streamOptions, false);
+  });
+
+  it('prompt_cache=false 否决官方 OpenAI 与 [compat] 的 cache 字段', () => {
+    const caps = initialRequestCaps('gpt-4o', false, {
+      baseUrl: 'https://api.openai.com/v1',
+      compat: { promptCacheKey: true, promptCacheRetention: true },
+    });
+    assert.equal(caps.promptCache, false);
+    assert.equal(caps.promptCacheKey, false);
+    assert.equal(caps.promptCacheRetention, false);
   });
 });
 
@@ -107,7 +171,7 @@ describe('degradeRequestCaps', () => {
 });
 
 describe('缓存路由参数的降级', () => {
-  const after = (text: string): RequestCaps | undefined => degradeRequestCaps(initialRequestCaps('gpt-4o', true), text);
+  const after = (text: string): RequestCaps | undefined => degradeRequestCaps(cacheOn(), text);
 
   it('prompt_cache_retention 被拒时先降 retention，key 保留', () => {
     const next = after("Unsupported parameter: 'prompt_cache_retention' is not supported with this model.");
@@ -131,7 +195,7 @@ describe('缓存路由参数的降级', () => {
 
 describe('degradeSilentCompat', () => {
   it('按 stream_options → retention → key 的顺序剥，没有 unsupported 字样也能降', () => {
-    let caps = initialRequestCaps('gpt-4o', true);
+    let caps = cacheOn();
     caps = degradeSilentCompat(caps)!;
     assert.equal(caps.streamOptions, false);
     assert.equal(caps.promptCacheRetention, true);

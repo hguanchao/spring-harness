@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { acquireSessionLock, SessionLockedError, hasOtherLiveSession, lockPath } from './lock.js';
+import { acquireSessionLock, SessionLockedError, hasOtherLiveSession, hasOtherLiveSessionIn, lockPath } from './lock.js';
 
 /**
  * `hasOtherLiveSession` 决定 Windows 沙箱退出时要不要撤销 `~/.sph` 的共享写授权
@@ -24,7 +24,7 @@ describe('hasOtherLiveSession', () => {
     try {
       const dir = join(root, 'ws-a');
       mkdirSync(dir, { recursive: true });
-      writeFileSync(lockPath(dir), String(process.pid));
+      writeFileSync(lockPath(dir, 'self'), String(process.pid));
       assert.equal(hasOtherLiveSession(process.pid, root), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -40,13 +40,14 @@ describe('hasOtherLiveSession', () => {
       assert.ok(pid !== undefined);
       const dir = join(root, 'ws-b');
       mkdirSync(dir, { recursive: true });
-      writeFileSync(lockPath(dir), String(pid));
+      writeFileSync(lockPath(dir, 'other'), String(pid));
 
       assert.equal(hasOtherLiveSession(process.pid, root), true, '活着的外来进程要能认出来');
 
       child.kill();
       await once(child, 'exit');
       assert.equal(hasOtherLiveSession(process.pid, root), false, '进程退出后不该再拦住撤销');
+      assert.equal(hasOtherLiveSessionIn(dir, process.pid), false);
     } finally {
       child.kill();
       rmSync(root, { recursive: true, force: true });
@@ -55,16 +56,28 @@ describe('hasOtherLiveSession', () => {
 });
 
 describe('acquireSessionLock', () => {
-  it('活跃锁挡住第二个实例，释放后可重新获取', () => {
+  it('同一会话挡住第二个实例，释放后可重新获取', () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-lock-'));
     try {
       const dir = join(root, 'ws');
-      const release = acquireSessionLock(dir);
-      // 同进程重入也应当被挡住：锁的语义是「这个工作区已被占用」，不区分是谁。
-      assert.throws(() => acquireSessionLock(dir), SessionLockedError);
+      const release = acquireSessionLock(dir, 'sess-a');
+      assert.throws(() => acquireSessionLock(dir, 'sess-a'), SessionLockedError);
       release();
-      const again = acquireSessionLock(dir);
+      const again = acquireSessionLock(dir, 'sess-a');
       again();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('同一工作区不同会话可以同时持锁', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-lock-multi-'));
+    try {
+      const dir = join(root, 'ws');
+      const a = acquireSessionLock(dir, 'sess-a');
+      const b = acquireSessionLock(dir, 'sess-b');
+      a();
+      b();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -260,6 +260,7 @@ export function getSelectListTheme(): SelectListTheme {
 export function getEditorTheme(): EditorTheme {
   return {
     borderColor: (text: string) => theme.fg('borderMuted', text),
+    focusBorderColor: (text: string) => theme.fg('primary', text),
     selectList: getSelectListTheme(),
   };
 }
