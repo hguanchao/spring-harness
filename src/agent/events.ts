@@ -20,6 +20,8 @@ export type SubagentEvent =
 
 export type AgentEvent =
   | { type: 'status'; text: string; level?: 'dim' | 'warn' | 'error' }
+  /** 传输重试：丢掉本步已流出、尚未落盘的思考/正文。 */
+  | { type: 'stream_retry' }
   | { type: 'text'; text: string }
   /** 一次 LLM 调用的思考期开始：TUI 在对话流中挂出对应的 thinking 行。 */
   | { type: 'thinking_start'; id: string }

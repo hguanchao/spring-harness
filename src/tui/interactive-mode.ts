@@ -62,7 +62,7 @@ import {
   listSessions,
   setCurrentSession,
 } from '../session/store.js';
-import { repairDanglingTools } from '../session/repair.js';
+import { closeInterruptedTurn } from '../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../session/types.js';
 import {
   BLOCK_GAP,
@@ -300,12 +300,16 @@ class InteractiveMode implements ApprovalUi {
   /** 本段思考链的起点，用来给收尾文案算 `Thought for 1.2s`。 */
   private thinkingStartedAt?: number;
   /**
-   * 本轮模型是否已经吐出过内容（正文或思考）。
-   *
-   * 不能用「助手组件是否已创建」代替：`runTurn` 在把请求发给模型**之前**就先广播
-   * `thinking_start`，组件那时就已经建好了，用它判断会把「还没回复」误判成「正在输出」。
+   * 本轮模型是否已经真正响应（思考/正文/工具）。
+   * 不能用「助手组件是否已创建」代替：`thinking_start` 在请求发出前就会广播。
+   * stream_retry 会丢掉半截画面，但一旦响应过就不能再把原文塞回输入框
+   * （对齐 grok in_flight_prompt 在 first activity 后作废）。
    */
-  private turnOutputStarted = false;
+  private modelResponded = false;
+  /** 本轮可 rewind 的用户原文；后台唤醒注入的通知不能塞回输入框。 */
+  private inFlightPrompt?: string;
+  /** 取消时把原文放回输入框（等 abort 收尾后再做，避免和 thinking_start 抢）。 */
+  private pendingRewind?: string;
   private readonly pendingTools = new Map<string, ToolExecutionComponent>();
   private readonly toolGroups: ToolGroupComponent[] = [];
   /** 当前正在累积的工具分组；助手正文/通知/轮次结束都会把它断开。 */
@@ -517,7 +521,7 @@ class InteractiveMode implements ApprovalUi {
     let records = this.session.readAll();
     if (records.length === 0) return;
     const messages = messagesOf(records);
-    if (repairDanglingTools(this.session, messages) > 0) records = this.session.readAll();
+    if (closeInterruptedTurn(this.session, messages) > 0) records = this.session.readAll();
 
     this.replayRecords(records);
     this.pinLatestUserMessage();
@@ -661,10 +665,10 @@ class InteractiveMode implements ApprovalUi {
       this.addNotice('A turn is already running — press Esc to interrupt.', 'warn');
       return;
     }
-    await this.executeTurn(text);
+    await this.executeTurn(text, true);
   }
 
-  private async executeTurn(prompt: string): Promise<void> {
+  private async executeTurn(prompt: string, rewindable = false): Promise<void> {
     this.chatContainer.addChild(new UserMessageComponent(prompt, getMarkdownTheme()));
     this.pinLatestUserMessage();
     this.ui.requestRender();
@@ -675,7 +679,9 @@ class InteractiveMode implements ApprovalUi {
     const controller = new AbortController();
     this.abort = controller;
     this.running = true;
-    this.turnOutputStarted = false;
+    this.modelResponded = false;
+    this.inFlightPrompt = rewindable ? prompt : undefined;
+    this.pendingRewind = undefined;
     // 发出去之后输入框失焦：否则边框一直是聚焦色，像还在打字。
     this.ui.setFocus(null);
     const indicator = new WorkingStatusIndicator(this.ui, WorkingLabel.working);
@@ -688,6 +694,7 @@ class InteractiveMode implements ApprovalUi {
         prompt,
         workspaceRoot: this.deps.workspaceRoot,
         client: this.client,
+        model: this.model,
         session: this.session,
         sandbox: this.deps.sandbox,
         approver: this.approver,
@@ -719,6 +726,14 @@ class InteractiveMode implements ApprovalUi {
       this.finalizeStreaming();
       this.running = false;
       this.abort = undefined;
+      const rewind = this.pendingRewind;
+      this.pendingRewind = undefined;
+      this.inFlightPrompt = undefined;
+      if (rewind !== undefined) {
+        this.dropLastUserBubble();
+        this.editor.setText(rewind);
+        this.pinLatestUserMessage();
+      }
       // 空闲计时从轮次收尾算起：一轮跑两分钟不该把那两分钟算成「用户离开」。
       this.lastActivityAt = Date.now();
       this.setStatusIndicator(undefined);
@@ -752,25 +767,43 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * Esc：终止当前轮次。
+   * Esc / Ctrl+C：终止当前轮次。
    *
-   * 模型还没吐出任何内容（含思考）时是「取消」，已经开始输出时是「打断」——两者都只中止
-   * 这一轮，会话本身照常保留。没有轮次在跑时，Esc 让位给浮层做关闭。
+   * 对齐 grok cancel-rewind：模型还没有任何响应时把原文放回输入框，转录里那条气泡也撤掉
+   * （看起来像没按过发送）。已经开始思考/正文/工具则只打断，不回填。
+   * 输入框里已有新草稿时不覆盖（grok 同样不 clobber composer）。
    */
   private handleInterrupt(): void {
     if (this.abort) {
-      // 状态行先落到「取消中」：abort 传导到 loop 收尾可能有可见延迟（正在跑的工具要
-      // 等它自己退出），这段窗口里不能还挂着「Running Bash…」。
       this.setActivity(WorkingLabel.cancelling);
+      const composerEmpty = this.editor.getText().trim() === '';
+      const rewind = !this.modelResponded && this.inFlightPrompt !== undefined && composerEmpty;
+      this.pendingRewind = rewind ? this.inFlightPrompt : undefined;
       this.abort.abort();
       this.addNotice(
-        this.turnOutputStarted ? 'Interrupted — output stopped.' : 'Cancelled before the model replied.',
+        rewind
+          ? 'Cancelled — prompt restored to the input.'
+          : this.modelResponded
+            ? 'Interrupted — output stopped.'
+            : 'Cancelled before the model replied.',
         'warn',
       );
       return;
     }
     if (this.ui.hasOverlay()) {
       this.ui.hideOverlay();
+    }
+  }
+
+  /** 取消未响应的一轮：撤掉刚贴上的用户气泡，界面回到发送前。 */
+  private dropLastUserBubble(): void {
+    const children = this.chatContainer.children;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const child = children[i];
+      if (child instanceof UserMessageComponent) {
+        this.chatContainer.removeChild(child);
+        return;
+      }
     }
   }
 
@@ -787,8 +820,20 @@ class InteractiveMode implements ApprovalUi {
 
   private readonly listener: AgentListener = (event) => {
     switch (event.type) {
+      case 'stream_retry': {
+        this.thinkingGroup?.dropStreamingThinking();
+        this.thinkingBuffer = '';
+        this.thinkingStartedAt = Date.now();
+        this.thinkingGroup?.beginThinking();
+        if (this.streamingAssistant) {
+          this.chatContainer.removeChild(this.streamingAssistant);
+          this.streamingAssistant = undefined;
+        }
+        this.paint('transcript');
+        return;
+      }
       case 'text': {
-        this.turnOutputStarted = true;
+        this.modelResponded = true;
         this.setActivity(WorkingLabel.responding);
         const assistant = this.ensureAssistant();
         assistant.appendText(event.text);
@@ -807,7 +852,7 @@ class InteractiveMode implements ApprovalUi {
       }
       case 'thinking_delta': {
         if (event.id === this.thinkingId) {
-          this.turnOutputStarted = true;
+          this.modelResponded = true;
           this.setActivity(WorkingLabel.thinking);
           this.thinkingBuffer += event.text;
           this.thinkingGroup?.setThinking(this.thinkingBuffer, true);
@@ -835,6 +880,7 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'tool_start': {
+        this.modelResponded = true;
         // 工具活动切断当前助手段：下一个 thinking/text 事件经 ensureAssistant 在工具组
         // 下方新起组件。否则整轮文字都挤进轮首那个组件里，最终总结会排在工具汇总之上，
         // 变成「全部回答在上、工具组沉底」——时间线要按真实顺序交错（grok-build 语义）。
@@ -1064,7 +1110,8 @@ class InteractiveMode implements ApprovalUi {
   /** 待办区显示一行「正在跑的工具」；按 toolCallId 记账，tool_end 时精确移除。 */
   private addPendingToolLine(id: string, name: string, args: Record<string, unknown>): void {
     const detail = typeof args.command === 'string' ? args.command : (typeof args.path === 'string' ? args.path : '');
-    const text = new Text(theme.fg('muted', `  ${name}${detail ? ` ${detail}` : ''}`), 0, 0);
+    const oneLine = flattenWhitespace(`${name}${detail ? ` ${detail}` : ''}`).slice(0, 100);
+    const text = new Text(theme.fg('muted', `  ${oneLine}`), 0, 0);
     this.pendingContainer.addChild(text);
     this.pendingToolLines.set(id, text);
   }
@@ -1264,8 +1311,9 @@ class InteractiveMode implements ApprovalUi {
   }
 
   async requestApproval(request: ApprovalRequest, note?: string): Promise<boolean> {
-    const detail = request.command ?? request.path ?? '(no detail)';
-    const body = note ? `${detail}\n\n${theme.fg('warning', note)}` : detail;
+    const detail = flattenWhitespace(request.command ?? request.path ?? '(no detail)');
+    const preview = detail.length > 400 ? `${detail.slice(0, 400)}…` : detail;
+    const body = note ? `${preview}\n\n${theme.fg('warning', note)}` : preview;
     const choice = await showSelectDialog(this.ui, {
       title: `Approve ${request.tool}?`,
       bodyText: body,
@@ -1359,8 +1407,8 @@ class InteractiveMode implements ApprovalUi {
     for (const command of COMMANDS) lines.push(`- \`${command.label}\` — ${command.hint}`);
     lines.push('');
     lines.push('## Key bindings');
-    lines.push('- `Esc` — cancel a turn that has not replied yet, interrupt one that is streaming, or close a dialog');
-    lines.push('- `Ctrl+C` — interrupt the running turn; with no turn running, clear the input, and press it twice to quit');
+    lines.push('- `Esc` — before the model replies, cancel and restore the prompt to the input; after it starts, interrupt output; or close a dialog');
+    lines.push('- `Ctrl+C` — same interrupt as Esc while a turn is running; with no turn running, clear the input, and press it twice to quit');
     lines.push('- `Ctrl+D` — quit when the input is empty');
     lines.push('- `Ctrl+O` — expand or collapse tool output');
     lines.push('- `Ctrl+P` — open the command palette');
@@ -1768,6 +1816,7 @@ class InteractiveMode implements ApprovalUi {
       compaction: loadCompaction(this.session),
       system: buildSystemPrompt({
         workspaceRoot: this.deps.workspaceRoot,
+        model: this.model,
         sandbox: this.deps.sandbox.status.mode,
         skills: scanSkills(this.deps.workspaceRoot).catalog,
         mcpTools: this.deps.mcp.listTools(),

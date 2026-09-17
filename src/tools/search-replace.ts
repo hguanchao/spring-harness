@@ -4,7 +4,7 @@ import { asOptionalBool, asString, asStringOrEmpty, guardReadOnlyWrite, type Too
 
 export const searchReplaceTool: ToolSpec = {
   name: 'search_replace',
-  description: 'Replace an exact old_string in a workspace file — not sed or awk. old_string must match exactly once: when it is ambiguous, add surrounding lines to make it unique, or set replace_all to change every occurrence. The line-number prefix shown by read_file is not part of the file — match only the content after it.',
+  description: 'Replace an exact old_string in a workspace file — not sed or awk. Read the file first unless you created or edited it in this turn. old_string must match exactly once: when it is ambiguous, add surrounding lines to make it unique, or set replace_all to change every occurrence. The line-number prefix shown by read_file is not part of the file — match only the content after it.',
   schema: {
     type: 'object',
     properties: {
@@ -24,6 +24,8 @@ export const searchReplaceTool: ToolSpec = {
     const replaceAll = asOptionalBool(args, 'replace_all');
     const abs = assertInsideWorkspace(ctx.workspaceRoot, rel);
     if (!existsSync(abs)) return { ok: false, content: `file not found: ${rel}` };
+    const unseen = ctx.observation?.denyIfUnseen(abs);
+    if (unseen) return unseen;
     const raw = readFileSync(abs);
     if (!looksLikeText(abs, raw.subarray(0, TEXT_SNIFF_BYTES))) return { ok: false, content: `refused binary file: ${rel}` };
     const text = raw.toString('utf8');
@@ -42,6 +44,7 @@ export const searchReplaceTool: ToolSpec = {
       ? text.replaceAll(oldString, newString)
       : text.slice(0, first) + newString + text.slice(first + oldString.length);
     writeFileSync(abs, next, 'utf8');
+    ctx.observation?.noteWritten(abs);
     return {
       ok: true,
       content: `updated ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${replaceAll ? count : 1} replacement)`,

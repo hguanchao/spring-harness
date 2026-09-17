@@ -151,6 +151,7 @@ export const readFileTool: ToolSpec = {
       }
       const dataUrl = `data:${mime};base64,${readFileSync(abs).toString('base64')}`;
       ctx.noteMemoryTouch(abs);
+      ctx.observation?.noteRead(abs);
       return {
         ok: true,
         content: `${toWorkspaceRelative(ctx.workspaceRoot, abs)} — image attached (${(size / 1024).toFixed(0)}KB)`,
@@ -173,6 +174,7 @@ export const readFileTool: ToolSpec = {
     const numbered = lines.map((line, i) => `${String(offset + i).padStart(4, ' ')}|${line}`).join('\n');
     const suffix = window.truncated ? `\n...[truncated at ${READ_BYTE_LIMIT} bytes from line ${offset}]` : '';
     ctx.noteMemoryTouch(abs);
+    ctx.observation?.noteRead(abs);
     return { ok: true, content: `${toWorkspaceRelative(ctx.workspaceRoot, abs)}\n${clip(numbered)}${suffix}` };
   },
 };

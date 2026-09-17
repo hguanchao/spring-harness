@@ -72,6 +72,22 @@ describe('foldSessionState recap', () => {
   });
 });
 
+describe('foldSessionState lastTurnInterrupted', () => {
+  it('turn_end interrupted 折叠为 true，新 turn_start 清掉', () => {
+    const state = foldSessionState([
+      { type: 'event', ts: 't', kind: 'turn_start', data: { depth: 0 } },
+      { type: 'event', ts: 't', kind: 'turn_end', data: { interrupted: true, depth: 0 } },
+    ]);
+    assert.equal(state.lastTurnInterrupted, true);
+    const next = foldSessionState([
+      { type: 'event', ts: 't', kind: 'turn_start', data: { depth: 0 } },
+      { type: 'event', ts: 't', kind: 'turn_end', data: { interrupted: true, depth: 0 } },
+      { type: 'event', ts: 't', kind: 'turn_start', data: { depth: 0 } },
+    ]);
+    assert.equal(next.lastTurnInterrupted, false);
+  });
+});
+
 describe('foldSessionState tokensUsed', () => {
   function event(kind: string, data: Record<string, unknown>): SessionRecord {
     return { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind, data };

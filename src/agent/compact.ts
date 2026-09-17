@@ -6,8 +6,6 @@ import { parseSessionLine, type JsonlSession } from '../session/store.js';
 const KEEP_RECENT_TURNS = 4;
 /** 触发压缩的水位线。 */
 const PRESSURE_RATIO = 0.8;
-/** 单条旧消息送入摘要请求的截断长度，防止摘要请求本身撑爆上下文。 */
-const SUMMARY_ITEM_LIMIT = 2000;
 /** 摘要产物长度上限（词），约束模型输出别失控。 */
 const SUMMARY_WORD_LIMIT = 700;
 
@@ -35,6 +33,9 @@ export const COMPACTION_SYSTEM = [
   '',
   '## Goal and Acceptance Criteria',
   '- [what the user asked for and what "done" means; quote the request verbatim when exact wording matters]',
+  '',
+  '## Key Technical Concepts',
+  '- [languages, frameworks, patterns, and conventions in play]',
   '',
   '## Decisions and Rationale',
   '- [what was chosen and why]',
@@ -127,15 +128,24 @@ export interface CompactionEvent {
   covered: number;
 }
 
+const STUB_HEAD = 500;
+const STUB_TAIL = 300;
+
 function stubTool(message: ChatMessage): ChatMessage {
-  const match = /exit (-?\d+|timeout)/.exec(message.content);
-  const pathMatch = /^(wrote|updated|file)[^\n]*/.exec(message.content);
-  const stub = [
+  const text = message.content;
+  if (text.length <= STUB_HEAD + STUB_TAIL) return message;
+  const pathLine = /^(wrote|updated|file)[^\n]*/.exec(text)?.[0];
+  const exit = /exit (-?\d+|timeout)/.exec(text);
+  const header = [
     '[compacted tool result]',
-    pathMatch?.[0] ?? '',
-    match ? `exit ${match[1]}` : '',
+    pathLine,
+    exit ? `exit ${exit[1]}` : '',
+    `${text.length} chars; head/tail kept, middle dropped.`,
   ].filter(Boolean).join(' ');
-  return { ...message, content: stub || '[compacted tool result]' };
+  return {
+    ...message,
+    content: `${header}\n${text.slice(0, STUB_HEAD)}\n...\n${text.slice(-STUB_TAIL)}`,
+  };
 }
 
 function turnStarts(messages: ChatMessage[]): number[] {
@@ -371,25 +381,15 @@ export function toChatMessages(messages: SessionMessage[], compaction?: Compacti
 
 async function summarize(
   client: LlmClient,
-  previous: CompactionEvent | undefined,
-  range: SessionMessage[],
+  prefix: ChatMessage[],
+  tools: unknown[],
   signal?: AbortSignal,
   onUsage?: (usage: TokenUsage) => void,
 ): Promise<string> {
-  const transcript = range
-    .filter((row) => row.role !== 'system')
-    .map((row) => `${row.role}: ${row.content.slice(0, SUMMARY_ITEM_LIMIT)}`)
-    .join('\n');
-  const body = [
-    previous ? `Summary of even earlier turns:\n${previous.summary}` : '',
-    `Newer turns to fold in:\n${transcript}`,
-  ].filter(Boolean).join('\n\n');
+  // 对齐 dsh：压缩走对话前缀（system + 历史），指令垫在最后一条 user，吃 KV 缓存。
   const reply = await client.complete(
-    [
-      { role: 'system', content: COMPACTION_SYSTEM },
-      { role: 'user', content: body },
-    ],
-    [],
+    [...prefix, { role: 'user', content: COMPACTION_SYSTEM }],
+    tools,
     signal,
   );
   if (reply.usage) onUsage?.(reply.usage);
@@ -451,6 +451,8 @@ export async function projectContext(options: {
    * 窗口因此涨大也无妨，水位线会照常触发 LLM 摘要，摘要才是真正的系列边界。
    */
   stubFromSession?: number;
+  /** 主轮工具表；压缩请求带上才能与上一跳共享前缀。 */
+  tools?: unknown[];
 }): Promise<ProjectionResult> {
   const { messages, contextWindow, client, signal } = options;
   const compaction = options.compaction;
@@ -489,7 +491,8 @@ export async function projectContext(options: {
   const range = messages.slice(rangeFrom, Math.max(rangeFrom, keepOriginal));
   if (range.length > 0 && range.some((row) => row.role !== 'system')) {
     try {
-      const summary = await summarize(client, compaction, range, signal, options.onUsage);
+      const prefix = withSystem(toChatMessages(messages.slice(0, rangeFrom + range.length), compaction));
+      const summary = await summarize(client, prefix, options.tools ?? [], signal, options.onUsage);
       const covered = rangeFrom + range.length;
       const next: CompactionEvent = { summary, covered };
       const projected = toChatMessages(messages, next);

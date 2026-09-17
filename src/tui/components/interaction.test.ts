@@ -10,39 +10,38 @@ const ui = {
   },
 } as unknown as TUI;
 
-function statusLine(indicator: WorkingStatusIndicator, width: number): string {
+function statusLines(indicator: WorkingStatusIndicator, width: number): { raw: string; plain: string } {
   const lines = indicator.render(width);
   assert.equal(lines.length, 2);
-  return stripTerminalSequences(lines[1] ?? '');
+  const raw = lines[1] ?? '';
+  return { raw, plain: stripTerminalSequences(raw) };
 }
 
 describe('WorkingStatusIndicator elapsed', () => {
-  it('耗时在右侧但离开滚动条列（末尾 4 列空白）', () => {
+  it('耗时用 CHA 落到右侧，整行不铺空格', () => {
     const indicator = new WorkingStatusIndicator(ui, WorkingLabel.working);
     try {
       const width = 40;
-      const plain = statusLine(indicator, width);
-      assert.equal(visibleWidth(plain), width);
+      const { raw, plain } = statusLines(indicator, width);
       assert.match(plain, /Working…/);
-      const trimmed = plain.trimEnd();
-      assert.match(trimmed, /\d+\.\ds$/);
-      const duration = trimmed.match(/(\d+\.\ds)$/)?.[1] ?? '';
-      assert.equal(plain.endsWith(' '.repeat(4)), true);
-      assert.equal(trimmed.endsWith(duration), true);
-      assert.equal(plain.indexOf(duration), width - duration.length - 4);
+      assert.match(plain.trimEnd(), /\d+\.\ds$/);
+      const duration = plain.trimEnd().match(/(\d+\.\ds)$/)?.[1] ?? '';
+      assert.match(raw, new RegExp(`\\x1b\\[${width - 4 - duration.length + 1}G`));
+      assert.equal(/\s{4,}/.test(plain.trim()), false, '中间不应铺空格');
+      assert.ok(visibleWidth(plain) < width, '可见宽度应小于终端宽，留给 2K 填底');
     } finally {
       indicator.dispose();
     }
   });
 
-  it('切换阶段文案后耗时仍离开滚动条列', () => {
+  it('切换阶段文案后耗时仍在右侧', () => {
     const indicator = new WorkingStatusIndicator(ui, WorkingLabel.working);
     try {
       indicator.setMessage(WorkingLabel.thinking);
-      const plain = statusLine(indicator, 40);
+      const { raw, plain } = statusLines(indicator, 40);
       assert.match(plain, /Thinking…/);
       assert.match(plain.trimEnd(), /\d+\.\ds$/);
-      assert.equal(plain.endsWith(' '.repeat(4)), true);
+      assert.match(raw, /\x1b\[\d+G/);
     } finally {
       indicator.dispose();
     }
@@ -72,7 +71,7 @@ describe('WorkingStatusIndicator elapsed', () => {
     const indicator = new WorkingStatusIndicator(ui, WorkingLabel.thinking);
     try {
       indicator.setMessage(formatWorkingWarning('Stream ended without a finish reason (none) — continuing the turn.', 2));
-      const plain = statusLine(indicator, 120);
+      const { plain } = statusLines(indicator, 120);
       assert.match(plain, /Stream ended without a finish reason \(none\) — continuing the turn\. \(2\)/);
       assert.equal(plain.includes('Thinking'), false);
     } finally {
@@ -89,7 +88,7 @@ describe('WorkingStatusIndicator elapsed', () => {
           12,
         ),
       );
-      const plain = statusLine(indicator, 48);
+      const { plain } = statusLines(indicator, 48);
       assert.match(plain, /\(12\)/, '次数不能被省略号吃掉');
       assert.equal(/\(\d+…/.test(plain), false, '不能裁成 (1…');
       assert.match(plain.trimEnd(), /\d+\.\ds$/, '耗时仍在右侧');
@@ -102,7 +101,7 @@ describe('WorkingStatusIndicator elapsed', () => {
   it('窄宽度时仍保留右侧耗时', () => {
     const indicator = new WorkingStatusIndicator(ui, WorkingLabel.running('Bash'));
     try {
-      const plain = statusLine(indicator, 12);
+      const { plain } = statusLines(indicator, 12);
       assert.match(plain.trimEnd(), /\d+\.\ds$/);
     } finally {
       indicator.dispose();

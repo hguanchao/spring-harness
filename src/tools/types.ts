@@ -1,3 +1,4 @@
+import type { FileObservation } from './observe.js';
 import type { McpHub } from '../mcp/hub.js';
 import type { JobBoard } from '../runtime/jobs.js';
 import type { TodoList } from '../runtime/todos.js';
@@ -29,6 +30,8 @@ export interface ToolContext {
   escalateReadOnlyWrite?(path: string): Promise<boolean>;
   /** 工具触碰文件后调用，用于把触碰到的嵌套 AGENTS.md 注入上下文。 */
   noteMemoryTouch(absPath: string): void;
+  /** 本轮读/写观察；省略则不强制先读后写（测试可关掉）。 */
+  observation?: FileObservation;
   spawnSubagent(input: {
     prompt: string;
     type: 'explore' | 'general';

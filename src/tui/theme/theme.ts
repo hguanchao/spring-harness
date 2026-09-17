@@ -181,7 +181,7 @@ export class Theme {
     return `${ansi}${text}\x1b[49m`;
   }
 
-  /** 裸背景 SGR，给清屏/清行用。不能包 49m，否则 2K 填回默认底。 */
+  /** 裸背景 SGR。清屏/清行请用 49m（OSC 11），不要用 bg 的真彩填充。 */
   bgSeq(color: ThemeColor): string {
     const ansi = this.bgColors.get(color);
     if (!ansi) throw new Error(`Unknown theme background color: ${color}`);

@@ -205,6 +205,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       prompt,
       workspaceRoot,
       client,
+      model: args.model ?? config.model,
       session,
       sandbox,
       approver: new HeadlessApprover(

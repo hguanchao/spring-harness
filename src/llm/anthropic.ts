@@ -1,3 +1,4 @@
+import { firstString, TEXT_KEYS, THINKING_KEYS } from './aliases.js';
 import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
 import { llmError } from './errors.js';
 import type { ChatMessage, ContentPart, ReasoningEffort, RequestBodyOptions } from './openai.js';
@@ -255,11 +256,14 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
       return {};
     case 'content_block_delta':
       // thinking_delta：Anthropic 思考链增量，与 signature_delta 不同，对用户有展示价值。
-      if (data.delta?.type === 'thinking_delta' && data.delta.thinking) {
-        return appendStreamDelta(acc, undefined, data.delta.thinking);
+      if (data.delta?.type === 'thinking_delta') {
+        const thinking = firstString(data.delta as unknown as Record<string, unknown>, THINKING_KEYS)
+          ?? (typeof data.delta.text === 'string' && data.delta.text ? data.delta.text : undefined);
+        if (thinking) return appendStreamDelta(acc, undefined, thinking);
       }
-      if (data.delta?.type === 'text_delta' && data.delta.text) {
-        return appendStreamDelta(acc, data.delta.text);
+      if (data.delta?.type === 'text_delta') {
+        const text = firstString(data.delta as unknown as Record<string, unknown>, TEXT_KEYS);
+        if (text) return appendStreamDelta(acc, text);
       }
       if (data.delta?.type === 'input_json_delta' && data.delta.partial_json) {
         const tool = acc.tools.get(data.index ?? 0);

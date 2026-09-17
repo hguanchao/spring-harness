@@ -41,15 +41,46 @@ const OVERFLOW_PATTERNS = [
   'exceeds the maximum',
 ];
 
+const STRUCTURED_CONTEXT_OVERFLOW = /(?:^|[^a-z0-9])context[\s_-](?:length|window)[\s_-](?:exceed(?:ed|s)?|overflow(?:ed)?|limit[\s_-]exceeded)(?:$|[^a-z0-9])/i;
+const TOO_LARGE_FOR_CONTEXT = /\b(?:request|prompt|input|messages?)\s+(?:is\s+|are\s+)?too\s+(?:large|long)\s+for\s+(?:(?:this|the)\s+)?(?:model(?:'s)?\s+)?context(?:\s+window)?\b/i;
+const EXCEEDS_MODEL_CONTEXT = /\b(?:input|prompt|request|messages?)\b.{0,40}\b(?:exceed(?:s|ed)?|overflows?|is\s+larger\s+than)\b.{0,40}\b(?:the\s+)?(?:model(?:'s)?\s+)?context(?:\s+(?:length|window))?\b/i;
+
 /**
  * 判定一段错误文本是否表示上下文超限。
  *
  * 刻意不把「413」单独当判据：413 是通用「载荷过大」，一张超限图片也会触发，
  * 对它做压缩重试纯属浪费一次调用。413 只有在正文命中措辞时才归类。
+ * 结构化措辞对齐 dsh `isContextWindowExceededError`，避免漏掉 `context_window_limit_exceeded`。
  */
 export function looksLikeContextOverflow(text: string): boolean {
   const lower = text.toLowerCase();
-  return OVERFLOW_PATTERNS.some((pattern) => lower.includes(pattern));
+  return OVERFLOW_PATTERNS.some((pattern) => lower.includes(pattern))
+    || STRUCTURED_CONTEXT_OVERFLOW.test(text)
+    || TOO_LARGE_FOR_CONTEXT.test(text)
+    || EXCEEDS_MODEL_CONTEXT.test(text);
+}
+
+/** 对齐 dsh `isQuotaExceededError`：额度用尽不是瞬时 429。 */
+export function looksLikeQuotaExceeded(text: string): boolean {
+  return /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/i.test(text)
+    || /\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|exhausted|reached)\b/i.test(text)
+    || /\bexceed(?:ed|s)?[\s_-]+(?:(?:your|the)[\s_-]+)?(?:current[\s_-]+)?quota\b/i.test(text)
+    || /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b/i.test(text)
+    || /\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b/i.test(text);
+}
+
+/**
+ * HTTP 状态 → 稳定码。对齐 dsh `httpErrorCode`：401/403 AUTH，429 RATE_LIMIT，
+ * 5xx SERVER，400 超窗单独识别。额度用尽不当成可重试限流。
+ */
+export function classifyHttpError(status: number, detail: string): string {
+  if (status === 401 || status === 403) return 'AUTH';
+  if (looksLikeQuotaExceeded(detail)) return 'QUOTA';
+  if (status === 429) return 'RATE_LIMIT';
+  if (status === 400 && looksLikeContextOverflow(detail)) return 'CONTEXT_WINDOW_EXCEEDED';
+  if (status === 400 || status === 413) return 'INVALID_REQUEST';
+  if (status >= 500) return 'SERVER';
+  return `HTTP_${status}`;
 }
 
 /** 供各协议的 error 抛出点共用：命中超限措辞就产出专用错误类型。 */

@@ -86,6 +86,71 @@ describe('estimateTokens', () => {
   });
 });
 
+describe('stub 头尾预览', () => {
+  it('长 tool result 保留头尾，不整段换成一行', async () => {
+    const explodingClient = {
+      complete: async (): Promise<never> => {
+        throw new Error('summary path must not run');
+      },
+    } as unknown as Parameters<typeof projectContext>[0]['client'];
+    const messages: SessionMessage[] = [];
+    for (let i = 1; i <= 6; i++) {
+      messages.push(session({ role: 'user', content: `turn ${i}` }));
+      messages.push(session({
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: `c${i}`, name: 'read_file', arguments: { path: `f${i}` } }],
+      }));
+      messages.push(session({
+        role: 'tool',
+        content: 'x'.repeat(40_000),
+        toolCallId: `c${i}`,
+        toolName: 'read_file',
+      }));
+    }
+    const result = await projectContext({
+      messages,
+      contextWindow: 68_750,
+      client: explodingClient,
+    });
+    const stubbed = result.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c1');
+    assert.ok(stubbed?.content.includes('[compacted tool result]'));
+    assert.ok(stubbed.content.includes('...'));
+    assert.ok(stubbed.content.length > 800);
+  });
+});
+
+describe('压缩请求复用对话前缀', () => {
+  it('摘要调用以原 system 打头、压缩指令垫在最后一条 user', async () => {
+    const captured: Array<{ messages: ChatMessage[]; tools: unknown[] }> = [];
+    const client = {
+      async complete(messages: ChatMessage[], tools: unknown[]) {
+        captured.push({ messages, tools });
+        return { text: '## Goal and Acceptance Criteria\n- done', finishReason: 'stop' };
+      },
+    } as unknown as Parameters<typeof projectContext>[0]['client'];
+    const messages: SessionMessage[] = [];
+    for (let i = 1; i <= 12; i++) {
+      messages.push(session({ role: 'user', content: `turn ${i} ${'q'.repeat(2000)}` }));
+      messages.push(session({ role: 'assistant', content: `a${i} ${'z'.repeat(2000)}` }));
+    }
+    await projectContext({
+      messages,
+      contextWindow: 800,
+      client,
+      system: 'You are sph',
+      tools: [{ type: 'function', function: { name: 'read_file' } }],
+    });
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0]?.messages[0]?.role, 'system');
+    assert.equal(captured[0]?.messages[0]?.content, 'You are sph');
+    const last = captured[0]?.messages.at(-1);
+    assert.equal(last?.role, 'user');
+    assert.match(String(last?.content), /compaction engine/);
+    assert.equal((captured[0]?.tools as { function?: { name?: string } }[])[0]?.function?.name, 'read_file');
+  });
+});
+
 describe('stub 边界冻结', () => {
   const TOOL_BYTES = 40_000;
   const CONTEXT_WINDOW = 68_750; // 水位线 = 55_000 tokens：6 轮全量超线、4 轮完好低于线

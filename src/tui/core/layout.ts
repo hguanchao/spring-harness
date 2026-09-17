@@ -464,19 +464,23 @@ function replaceScrollbarCell(
 export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false): ScrollbarGeometry | undefined {
 	if (!box.scrollView || box.rect.width <= 0 || box.rect.height <= 0) return undefined;
 
-	const contentHeight = box.scrollView.scrollHeight;
+	const view = box.scrollView;
+	const scrollHeight = view.scrollHeight;
 	const trackHeight = box.rect.height;
-	const canRevealHiddenAuto = includeHiddenAuto && box.scrollView.scrollbar === "auto" && contentHeight > trackHeight;
-	if (!box.scrollView.isScrollbarVisible && !canRevealHiddenAuto) return undefined;
+	if (trackHeight <= 0) return undefined;
+	const canRevealHiddenAuto = includeHiddenAuto && view.scrollbar === "auto" && scrollHeight > trackHeight;
+	if (!view.isScrollbarVisible && !canRevealHiddenAuto) return undefined;
 
+	// 滑块高度按真实内容算，不含 pin-reserve 空行；位置仍按可滚范围（含留白）走，拖到底才能钉住用户消息。
+	const documentHeight = Math.max(trackHeight, view.contentHeight);
 	const minThumbHeight = Math.min(2, trackHeight);
 	const thumbHeight = Math.max(
 		minThumbHeight,
-		Math.min(trackHeight, Math.round((trackHeight * trackHeight) / contentHeight)),
+		Math.min(trackHeight, Math.round((trackHeight * trackHeight) / documentHeight)),
 	);
-	const maxScrollTop = Math.max(0, contentHeight - trackHeight);
+	const maxScrollTop = Math.max(0, scrollHeight - trackHeight);
 	const maxThumbTop = trackHeight - thumbHeight;
-	const thumbOffset = maxScrollTop === 0 ? 0 : Math.round((box.scrollView.scrollTop / maxScrollTop) * maxThumbTop);
+	const thumbOffset = maxScrollTop === 0 ? 0 : Math.round((view.scrollTop / maxScrollTop) * maxThumbTop);
 	const column = box.rect.x + box.rect.width - 1;
 	if (column < box.clip.x || column >= box.clip.x + box.clip.width) return undefined;
 
@@ -534,6 +538,8 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	}
 
 	// scrollbarUntil：滑块在转录区底时，把 ▐ 接到 until 组件顶（对话框上沿）。
+	// pin-reserve 时空行已经填满视口，再接到输入框会让滑块掉进 Responding 行。
+	if (box.scrollView.pinPad > 0) return;
 	const until = box.scrollView.scrollbarUntil;
 	if (!until) return;
 	const untilBox = findLayoutBox(layoutRoot(box), until);

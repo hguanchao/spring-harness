@@ -6,9 +6,16 @@
  */
 import { sessionEventData } from './fold.js';
 import type { JsonlSession } from './store.js';
-import type { SessionMessage } from './types.js';
+import type { SessionMessage, SessionRecord } from './types.js';
 
-export const INTERRUPTED_TOOL = 'interrupted (session resumed before tool completed)';
+/**
+ * 工具已记录、结果未落盘：可能已有副作用，禁止盲着重试。
+ * 对齐 dsh TOOL_OUTCOME_UNKNOWN。
+ */
+export const INTERRUPTED_TOOL =
+  'The tool call was interrupted after it was recorded, but no result was durably recorded. '
+  + 'Its outcome is unknown. Retry only if the operation is read-only or idempotent; '
+  + 'if it may have side effects, first verify external state or ask the user. Do not retry blindly.';
 
 export interface DanglingToolCall {
   id: string;
@@ -53,4 +60,26 @@ export function repairDanglingTools(session: JsonlSession, messages: SessionMess
     });
   }
   return dangling.length;
+}
+
+/** 打开的 turn_start 没有对应 turn_end：崩溃尾。 */
+export function hasOpenTurn(records: readonly SessionRecord[]): boolean {
+  let open = 0;
+  for (const record of records) {
+    if (record.type !== 'event') continue;
+    if (record.kind === 'turn_start') open++;
+    else if (record.kind === 'turn_end' && open > 0) open--;
+  }
+  return open > 0;
+}
+
+/**
+ * 崩溃尾：补悬挂工具结果，再关未结束的 turn。
+ * 对齐 dsh interruptedTurnClosers——先 tool result，再 turn/end interrupted。
+ */
+export function closeInterruptedTurn(session: JsonlSession, messages: SessionMessage[]): number {
+  const repaired = repairDanglingTools(session, messages);
+  if (!hasOpenTurn(session.readAll())) return repaired;
+  session.appendEvent('turn_end', { interrupted: true, depth: 0 });
+  return repaired + 1;
 }

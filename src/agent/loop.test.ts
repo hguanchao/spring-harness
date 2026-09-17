@@ -411,3 +411,38 @@ describe('截断流继续', () => {
     }
   });
 });
+
+describe('取消 rewind：首次响应前中止不落盘用户消息', () => {
+  it('abort 发生在 complete 返回之前时，会话里没有 user / turn_start', async () => {
+    const { session, root, cleanup } = makeSession();
+    const controller = new AbortController();
+    const client: LlmClient = {
+      async complete(_messages, _tools, signal) {
+        controller.abort();
+        if (signal?.aborted) throw new Error('aborted');
+        throw new Error('aborted');
+      },
+    };
+    try {
+      await assert.rejects(
+        () =>
+          runTurn({
+            prompt: 'restore me',
+            workspaceRoot: root,
+            client,
+            session,
+            sandbox,
+            approver,
+            contextWindow: 100_000,
+            signal: controller.signal,
+          }),
+        /aborted/,
+      );
+      const records = session.readAll();
+      assert.equal(records.some((row) => row.type === 'message' && row.role === 'user'), false);
+      assert.equal(records.some((row) => row.type === 'event' && row.kind === 'turn_start'), false);
+    } finally {
+      cleanup();
+    }
+  });
+});

@@ -158,8 +158,8 @@ export class IdleStatus implements Component {
     // 无缓存状态。
   }
 
-  render(width: number): string[] {
-    const emptyLine = ' '.repeat(width);
-    return [emptyLine, emptyLine];
+  render(_width: number): string[] {
+    // 空行不要铺空格：铺满的空格在 Windows Terminal 上会显出浅底。
+    return ['', ''];
   }
 }

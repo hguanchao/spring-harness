@@ -11,7 +11,7 @@ import { ContextOverflowError } from './errors.js';
 import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
 import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
 import { postSseStream } from './sse.js';
-import { backoffMs, RetryableError, sleepAbortable } from './retry.js';
+import { backoffMs, RetryableError, sleepAbortable, StreamClosedError } from './retry.js';
 import { errorMessage } from '../util.js';
 
 /** 一个上游协议的静态差异：端点、鉴权头、请求体编码、SSE 事件解码。 */
@@ -73,8 +73,9 @@ function isSilentReject(error: unknown): boolean {
  * 三种协议共用的流式客户端。
  *
  * 两条不变量在这里：
- * 1. 一旦流出了文本或思考 delta 就绝不重试，否则用户会看到重复内容。因此 `withRetries`
- *    只覆盖「连接未建立 / 尚无输出」的失败，参数降级也一样受此约束。
+ * 1. 传输失败不提交半截（对齐 dsh：failed chunks 不进会话，同一步再打）。
+ *    思考或正文已经上屏也一样——重试会再流一遍，TUI 可能短暂重复，但不会留下空 assistant。
+ *    参数降级只在尚未向用户输出任何内容时发生。
  * 2. 参数降级的结果记在**闭包**里（一个 client ≈ 一个进程/会话），同一会话内换完就不再踩，
  *    不必每步重交一次学费。
  */
@@ -112,7 +113,6 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
       let streamed = false;
       const wrapped = onDelta
         ? (delta: { text?: string; thinking?: string }) => {
-            // 思考链也算「已经给用户看过的东西」：此时再重试会让他看到重复的推理过程。
             streamed = true;
             onDelta(delta);
           }
@@ -137,12 +137,6 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           // 否则会把失败当成 stop 收工。
           if (signal?.aborted) throw error;
           if (error instanceof ContextOverflowError) throw error;
-          if (
-            error instanceof RetryableError
-            && (acc.text || acc.thinking || acc.tools.size > 0 || acc.reasoningItems.size > 0)
-          ) {
-            return finishStream(acc);
-          }
           throw error;
         }
         const result = finishStream(acc);
@@ -171,12 +165,15 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
         try {
           return await attempt(body);
         } catch (error) {
-          if (streamed || signal?.aborted) throw error;
+          if (signal?.aborted) throw error;
+          // 参数降级只在还没给用户看过任何增量时做；已经流过思考/正文就只走传输重试。
           const text = errorMessage(error);
-          const next = degrade(caps, text)
-            ?? (isSilentReject(error) && degradations < MAX_DEGRADATIONS
-              ? degradeSilentCompat(caps)
-              : undefined);
+          const next = streamed
+            ? undefined
+            : degrade(caps, text)
+              ?? (isSilentReject(error) && degradations < MAX_DEGRADATIONS
+                ? degradeSilentCompat(caps)
+                : undefined);
           if (next) {
             onRetry?.({
               attempt: degradations + 2,
@@ -188,7 +185,9 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             continue;
           }
           // 字段已经剥完：空 SSE 按传输抖动退避，不再立刻失败。
-          if (!(error instanceof RetryableError) || transportTries >= maxRetries) throw error;
+          if (error instanceof StreamClosedError || !(error instanceof RetryableError) || transportTries >= maxRetries) {
+            throw error;
+          }
           transportTries++;
           onRetry?.({ attempt: transportTries + 1, message: text, kind: 'transport' });
           await sleepAbortable(backoffMs(transportTries - 1), signal);

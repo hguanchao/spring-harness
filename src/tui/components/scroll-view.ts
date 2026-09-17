@@ -49,7 +49,7 @@ export class ScrollView extends Container {
 	readonly scrollbarUntil?: Component;
 	private currentScrollbar: ScrollViewScrollbar;
 	private currentScrollTop = 0;
-	private contentHeight = 0;
+	private realContentHeight = 0;
 	private currentViewportHeight = 0;
 	private followingEnd: boolean;
 	private followSuppressedAtEnd = false;
@@ -58,7 +58,7 @@ export class ScrollView extends Container {
 	/** 最新用户消息在内容中的 y；follow-end 时优先把它留在视口顶，答过长再贴底。 */
 	private pinY: number | undefined;
 	/** 为把 pinY 滚到视口顶而加在内容底的空行（grok pin-reserve）。 */
-	private pinPad = 0;
+	private reservedPad = 0;
 
 	constructor(component: Component, options: ScrollViewOptions = {}) {
 		super();
@@ -98,9 +98,19 @@ export class ScrollView extends Container {
 		return this.scrollbar === "auto" && this.scrollHeight > this.currentViewportHeight;
 	}
 
-	/** 含 pin-reserve 留白的可滚高度，滚动条用这个。 */
+	/** 真实内容高度，不含 pin-reserve 留白。 */
+	get contentHeight(): number {
+		return this.realContentHeight;
+	}
+
+	/** follow-end 为把用户消息钉在视口顶而加的空行。 */
+	get pinPad(): number {
+		return this.reservedPad;
+	}
+
+	/** 含 pin-reserve 留白的可滚高度。 */
 	get scrollHeight(): number {
-		return this.contentHeight + this.pinPad;
+		return this.realContentHeight + this.reservedPad;
 	}
 
 	private maxScrollTop(): number {
@@ -193,10 +203,10 @@ export class ScrollView extends Container {
 	}
 
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
-		this.contentHeight = Math.max(0, Math.floor(contentHeight));
+		this.realContentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
-		this.pinPad = pinReservePad(this.contentHeight, this.currentViewportHeight, this.pinY);
+		this.reservedPad = pinReservePad(this.realContentHeight, this.currentViewportHeight, this.pinY);
 		const maxScrollTop = this.maxScrollTop();
 		if (this.followingEnd) {
 			const pin = this.pinY;

@@ -267,6 +267,18 @@ export class ToolGroupComponent extends VStack {
    * 收尾的思考随组折叠（组收起时不占行）——组里没有工具时是例外，那时没有别的行能代表
    * 它，留着才不会让整段推理凭空消失。
    */
+  /** 传输重试：丢掉当前思考段（含尚未吐字的占位），不进最终转录。 */
+  dropStreamingThinking(): void {
+    if (!this.currentThinking) return;
+    const index = this.members.findLastIndex(
+      (member) => member.kind === 'thinking' && member.thinking === this.currentThinking,
+    );
+    if (index >= 0) this.members.splice(index, 1);
+    this.currentThinking = undefined;
+    this.markDirty();
+    this.ui.requestRender();
+  }
+
   setThinking(text: string, running: boolean, durationMs?: number): void {
     // 没先 beginThinking 就更新（旧调用序）时补一段，别把已经流出的增量丢掉。
     const thinking = this.currentThinking ?? this.startThinking();

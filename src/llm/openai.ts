@@ -1,3 +1,12 @@
+import {
+  COMPLETION_TOKEN_KEYS,
+  firstFiniteNumber,
+  firstString,
+  PROMPT_TOKEN_KEYS,
+  TEXT_KEYS,
+  THINKING_KEYS,
+  TOTAL_TOKEN_KEYS,
+} from './aliases.js';
 import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
 import { llmError } from './errors.js';
 import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_RETENTION } from './prompt-cache.js';
@@ -199,8 +208,10 @@ export function llmErrorMessage(error: unknown): string {
 
 type ChatDelta = {
   content?: string | null;
-  /** DeepSeek reasoner 等兼容端点的思考链增量。 */
+  text?: string | null;
   reasoning_content?: string | null;
+  reasoning?: string | null;
+  thinking?: string | null;
   tool_calls?: Array<{
     index?: number;
     id?: string;
@@ -211,12 +222,11 @@ type ChatDelta = {
 function applyChatDelta(acc: SseAcc, delta: ChatDelta): { textDelta?: string; thinkingDelta?: string } {
   let textDelta: string | undefined;
   let thinkingDelta: string | undefined;
-  if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
-    thinkingDelta = appendStreamDelta(acc, undefined, delta.reasoning_content).thinkingDelta;
-  }
-  if (typeof delta.content === 'string' && delta.content.length > 0) {
-    textDelta = appendStreamDelta(acc, delta.content).textDelta;
-  }
+  const row = delta as unknown as Record<string, unknown>;
+  const thinking = firstString(row, THINKING_KEYS);
+  if (thinking) thinkingDelta = appendStreamDelta(acc, undefined, thinking).thinkingDelta;
+  const text = firstString(row, TEXT_KEYS);
+  if (text) textDelta = appendStreamDelta(acc, text).textDelta;
   for (const call of delta.tool_calls ?? []) {
     const index = call.index ?? 0;
     const current = acc.tools.get(index) ?? { id: '', name: '', arguments: '' };
@@ -241,11 +251,9 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
   const usageRaw = json.usage;
   if (usageRaw && typeof usageRaw === 'object') {
     const usage = usageRaw as Record<string, unknown>;
-    const asNum = (value: unknown): number | undefined =>
-      typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-    const prompt = asNum(usage.prompt_tokens) ?? asNum(usage.input_tokens);
-    const completion = asNum(usage.completion_tokens) ?? asNum(usage.output_tokens);
-    const total = asNum(usage.total_tokens);
+    const prompt = firstFiniteNumber(usage, PROMPT_TOKEN_KEYS);
+    const completion = firstFiniteNumber(usage, COMPLETION_TOKEN_KEYS);
+    const total = firstFiniteNumber(usage, TOTAL_TOKEN_KEYS);
     // 部分网关在工具调用首包塞 usage: {prompt_tokens:0}，不能把后面的真值盖掉，
     // 也不能让界面显示 0 / 1.0M。
     if ((prompt !== undefined && prompt > 0) || (completion !== undefined && completion > 0)) {

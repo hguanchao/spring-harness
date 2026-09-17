@@ -3,7 +3,7 @@ import { afterEach, describe, it } from 'node:test';
 import { createSseClient } from './stream-client.js';
 import { openaiAdapter, type ChatMessage } from './openai.js';
 import { ContextOverflowError } from './errors.js';
-import { RetryableError } from './retry.js';
+import { RetryableError, StreamClosedError } from './retry.js';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -260,21 +260,89 @@ describe('空流与截断', () => {
     assert.equal(reply.text, 'via-json');
   });
 
-  it('已经输出过正文后流中断：交回半截而不是抛错', async () => {
+  it('只有思考链时流中断：重试整轮，不当成成功空回复', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
-      return streamThenFail('partial');
+      if (calls === 1) {
+        let pulled = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (pulled++ === 0) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `data: ${JSON.stringify({ choices: [{ delta: { reasoning: 'hmm' } }] })}\n\n`,
+                  ),
+                );
+                return;
+              }
+              controller.error(new RetryableError('socket died'));
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      return okResponse('ok');
     }) as typeof fetch;
 
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      maxRetries: 2,
+      promptCache: false,
+    });
+    const reply = await c.complete(messages, []);
+    assert.equal(reply.text, 'ok');
+    assert.equal(calls, 2);
+  });
+
+  it('已经输出过正文后流中断：丢弃半截并重打（对齐 dsh partial_disconnect）', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return streamThenFail('partial');
+      return okResponse('recovered');
+    }) as typeof fetch;
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      maxRetries: 2,
+      promptCache: false,
+    });
     const seen: string[] = [];
-    const reply = await client().complete(messages, [], undefined, (delta) => {
+    const reply = await c.complete(messages, [], undefined, (delta) => {
       if (delta.text) seen.push(delta.text);
     });
-    assert.deepEqual(seen, ['partial']);
-    assert.equal(reply.text, 'partial');
-    assert.equal(reply.finishReason, undefined);
-    assert.equal(calls, 1, '半截不重发同一请求，交给 loop 再打一轮');
+    assert.deepEqual(seen, ['partial', 'recovered']);
+    assert.equal(reply.text, 'recovered');
+    assert.equal(calls, 2);
+  });
+
+  it('干净 EOF 无 [DONE] 标 STREAM_CLOSED，不按传输失败重打', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return sseResponse([
+        `data: ${JSON.stringify({ choices: [{ delta: { content: 'cut' } }] })}\n\n`,
+      ]);
+    }) as typeof fetch;
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      maxRetries: 2,
+      promptCache: false,
+    });
+    await assert.rejects(
+      () => c.complete(messages, []),
+      (error: unknown) => error instanceof StreamClosedError && /without \[DONE\]/.test(error.message),
+    );
+    assert.equal(calls, 1);
   });
 
   it('半截之后的协议 error 事件上抛，不当成 stop 收工', async () => {

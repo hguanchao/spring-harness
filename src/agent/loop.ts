@@ -27,10 +27,11 @@ import { errorMessage } from '../util.js';
 import { createSession, JsonlSession } from '../session/store.js';
 import { foldSessionState, sessionEventData, type SessionFailure } from '../session/fold.js';
 import { lastAssistantMessage } from '../session/query.js';
-import { repairDanglingTools } from '../session/repair.js';
+import { closeInterruptedTurn } from '../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../session/types.js';
 import { scanSkills } from '../skills/scan.js';
 import { EXPLORE_TOOLS, ROOT_ONLY_TOOLS, findTool, isConcurrencySafe, openaiTools, tools } from '../tools/index.js';
+import { FileObservation } from '../tools/observe.js';
 import { SUBAGENT_CONCURRENCY, type ToolContext, type ToolResult } from '../tools/types.js';
 import { subagentPrompt, type SubagentRole } from './subagent-prompt.js';
 import { existsSync } from 'node:fs';
@@ -60,6 +61,8 @@ export interface RunTurnOptions {
   prompt: string;
   workspaceRoot: string;
   client: LlmClient;
+  /** 当前模型名，写入系统提示词身份段。省略则身份段不写 Model。 */
+  model?: string;
   session: JsonlSession;
   sandbox: SandboxHandle;
   approver: Approver;
@@ -173,6 +176,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const systemPrompt = ((): string => {
     const system = buildSystemPrompt({
       workspaceRoot: options.workspaceRoot,
+      model: options.model,
       sandbox: options.sandbox.status.mode,
       skills: skills.catalog,
       mcpTools: mcp.listTools(),
@@ -189,9 +193,6 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       ? `${system}\n\n${subagentPrompt(options.subagentRole)}`
       : system;
   })();
-  options.session.appendMessage({ role: 'user', content: options.prompt, images: options.userImages });
-  options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
-
   // token 预算：整棵代理树的累计量（自己的 usage + 各子代理 end 事件里的 tokens）。
   const budget = Math.max(0, Math.floor(options.maxSessionTokens ?? 0));
   const budgetWarnAt = budget > 0 ? Math.floor(budget * BUDGET_WARN_RATIO) : 0;
@@ -227,7 +228,28 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
   // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。
   const mirror: SessionMessage[] = options.session.readMessages();
-  repairDanglingTools(options.session, mirror);
+  closeInterruptedTurn(options.session, mirror);
+  // 用户消息先只进内存。首次模型活动再落盘——取消时 TUI 把原文放回输入框，
+  // JSONL 里也不该留下一条没有回复的 user（对齐 grok cancel-rewind）。
+  const pendingUser: SessionMessage = {
+    type: 'message',
+    ts: new Date().toISOString(),
+    role: 'user',
+    content: options.prompt,
+    images: options.userImages,
+  };
+  mirror.push(pendingUser);
+  let turnPersisted = false;
+  const persistTurnStart = (): void => {
+    if (turnPersisted) return;
+    turnPersisted = true;
+    options.session.appendMessage({
+      role: 'user',
+      content: options.prompt,
+      images: options.userImages,
+    });
+    options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
+  };
   let compaction: CompactionEvent | undefined = loadCompaction(options.session);
   let wire: WireState = wireFromMessages(mirror, compaction);
   let lastUsage: TokenUsage | undefined;
@@ -395,6 +417,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         prompt: input.prompt,
         workspaceRoot: childWorkspaceRoot,
         client: options.client,
+        model: options.model,
         session: childSession,
         sandbox: options.sandbox,
         approver: options.approver,
@@ -450,6 +473,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     }
   };
 
+  const observation = new FileObservation();
   const ctx: ToolContext = {
     workspaceRoot: options.workspaceRoot,
     sandboxMode: options.sandbox.status.mode,
@@ -506,6 +530,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     noteMemoryTouch(absPath) {
       memory.noteTouch(absPath);
     },
+    observation,
     spillRoot: options.spill?.root,
     async spawnSubagent(input) {
       // 深度预算守卫（对齐 grok-build 的扁平代理树）：工具保持对子代理可见，运行时统一拒绝
@@ -579,6 +604,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         // stub 边界冻结：首次由投影回报，之后不再随轮次前移——前移一格就是一次
         // 历史中段改写，缓存从切点起全部作废。摘要落地时重置（摘要即新边界）。
         stubFromSession,
+        tools: openaiTools(allowed),
         // 压缩摘要的花费也是真花钱，一样计入预算（未配 onAuxUsage 时也要计）。
         onUsage: (usage: TokenUsage) => {
           chargeTokens(usage.promptTokens, usage.completionTokens);
@@ -626,10 +652,12 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           options.signal,
           (delta) => {
             if (delta.thinking) {
+              persistTurnStart();
               streamed.thinking = true;
               options.listener?.({ type: 'thinking_delta', id: thinkingId, text: delta.thinking });
             }
             if (delta.text) {
+              persistTurnStart();
               streamed.text = true;
               options.listener?.({ type: 'text', text: delta.text });
             }
@@ -642,6 +670,11 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
                 message: info.message,
                 text,
               });
+            }
+            if (info.kind === 'transport') {
+              streamed.text = false;
+              streamed.thinking = false;
+              options.listener?.({ type: 'stream_retry' });
             }
             // 传输抖动与参数降级都进工作状态行（TUI 按同一条文案累计次数，不进转录）。
             options.listener?.({ type: 'status', level: 'warn', text });
@@ -664,6 +697,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         projected = await buildProjection(true);
       }
     }
+    persistTurnStart();
     options.listener?.({ type: 'thinking_end', id: thinkingId, content: reply.thinking ?? '' });
     if (reply.text && !streamed.text) options.listener?.({ type: 'text', text: reply.text });
     if (reply.usage) {
@@ -714,7 +748,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       const toolFinish = finish === 'tool_calls' || finish === 'tool-calls' || finish === 'tool_use';
       const stopped = finish !== undefined && !toolFinish && finish !== 'unknown';
       if (!stopped) {
-        // 截断流：有正文才落盘再继续。空回复不写脏历史——否则下一步会看到一条空白 assistant。
+        // 对齐 dsh：没有明确 finish 且没有工具，不当成成功空消息。有半截才落盘再续。
         if (reply.text || reply.thinking || reply.reasoning?.length) {
           appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
         }

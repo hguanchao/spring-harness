@@ -46,7 +46,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils.js";
-import { oscResetCanvasBackground, oscSetCanvasBackground, theme } from "../theme/theme.js";
+import { oscResetCanvasBackground, oscSetCanvasBackground } from "../theme/theme.js";
 
 const ENTER_ALT_SCREEN = "\x1b[?1049h";
 const EXIT_ALT_SCREEN = "\x1b[?1049l";
@@ -117,6 +117,8 @@ interface WheelEvent {
 interface ScrollbarDrag {
 	scrollView: ScrollView;
 	grabOffset: number;
+	/** 按下时冻结，拖动中不重算，避免滑块高度跟着 pin-reserve / 流式内容乱跳。 */
+	geometry: ScrollbarGeometry;
 }
 
 interface ScrollbarTarget {
@@ -287,7 +289,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? ENABLE_BUTTON_MOTION_MOUSE
 				: ENABLE_ALL_MOTION_MOUSE;
 		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}${oscSetCanvasBackground()}${theme.bgSeq("bg")}\x1b[2J\x1b[H\x1b[?25l`,
+			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}${oscSetCanvasBackground()}\x1b[49m\x1b[2J\x1b[H\x1b[?25l`,
 		);
 	}
 
@@ -784,27 +786,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const maxThumbOffset = geometry.trackHeight - geometry.thumbHeight;
 		const thumbOffset = Math.max(0, Math.min(maxThumbOffset, pointerY - geometry.trackTop - grabOffset));
 		const scrollTop = maxThumbOffset === 0 ? 0 : Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
-		scrollView.scrollTo(scrollTop);
+		scrollView.scrollTo(scrollTop, { disableFollow: true });
 	}
 
 	private handleScrollbarMouseEvent(event: SgrMouseEvent): boolean {
 		if (this.scrollbarDrag) {
 			if (event.release) {
+				const drag = this.scrollbarDrag;
 				this.stopScrollbarDrag();
+				if (drag.scrollView.scrollTop >= drag.geometry.maxScrollTop) drag.scrollView.scrollToEnd();
+				this.requestViewportRender();
 				return true;
 			}
-			const box = this.currentLayout
-				? getScrollViewBox(this.currentLayout, this.scrollbarDrag.scrollView)
-				: undefined;
-			const geometry = box ? getScrollbarGeometry(box) : undefined;
-			if (geometry) {
-				this.scrollScrollbarToPointer(
-					this.scrollbarDrag.scrollView,
-					geometry,
-					event.y,
-					this.scrollbarDrag.grabOffset,
-				);
-			}
+			this.scrollScrollbarToPointer(
+				this.scrollbarDrag.scrollView,
+				this.scrollbarDrag.geometry,
+				event.y,
+				this.scrollbarDrag.grabOffset,
+			);
 			return true;
 		}
 
@@ -825,6 +824,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.scrollbarDrag = {
 			scrollView: target.scrollView,
 			grabOffset,
+			geometry: target.geometry,
 		};
 		return true;
 	}
@@ -1322,16 +1322,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const fullRedraw =
 			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;
 
-		const canvasBg = theme.bgSeq("bg");
+		// 清行/清屏用默认底（OSC 11），不要再铺 SGR 48;2;#141414。
+		// Windows Terminal 上不透明真彩填充和 OSC 11 画布（含亚克力）不是同一块颜色，
+		// 状态行每帧 2K 就会在转录区深色空行上画出一条 #141414 浅带。
 		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
-			buffer += `${canvasBg}\x1b[2J`;
+			buffer += `\x1b[49m\x1b[2J`;
 		}
 
 		for (let row = 0; row < height; row++) {
 			if (!fullRedraw && screen[row] === this.previousScreen[row]) continue;
-			buffer += `\x1b[${row + 1};1H${canvasBg}\x1b[2K${screen[row] ?? ""}`;
+			buffer += `\x1b[${row + 1};1H\x1b[49m\x1b[2K${screen[row] ?? ""}`;
 		}
 
 		if (cursorPos) {

@@ -52,6 +52,8 @@ export interface FoldedSessionState {
   lastRecap?: string;
   /** 计划模式是否激活（last-wins）。 */
   planMode: boolean;
+  /** 最近一次 turn 是否因崩溃/中断收尾（last-wins）。 */
+  lastTurnInterrupted: boolean;
   /**
    * 本会话**整棵代理树**的累计 token 用量，供预算判断。
    *
@@ -71,6 +73,7 @@ export function emptySessionState(): FoldedSessionState {
     depth: 0,
     lastRecapMainTurn: 0,
     planMode: false,
+    lastTurnInterrupted: false,
     tokensUsed: 0,
   };
 }
@@ -130,13 +133,21 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
         else state.goal = text;
         break;
       }
-      case 'turn_start':
+      case 'turn_start': {
+        state.lastTurnInterrupted = false;
+        const startDepth = data.depth;
+        if (typeof startDepth === 'number' && Number.isFinite(startDepth) && startDepth > state.depth) {
+          state.depth = Math.floor(startDepth);
+        }
+        break;
+      }
       case 'turn_end': {
         // 深度取历史最大值：单调递增的持久化预算，resume 后不会因从零计数而越权派生。
         const eventDepth = data.depth;
         if (typeof eventDepth === 'number' && Number.isFinite(eventDepth) && eventDepth > state.depth) {
           state.depth = Math.floor(eventDepth);
         }
+        state.lastTurnInterrupted = data.interrupted === true;
         break;
       }
       case 'recap': {

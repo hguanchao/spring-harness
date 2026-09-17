@@ -10,6 +10,7 @@ import {
 	type Component,
 	Container,
 	dispatchMouseEvent,
+	isViewportTUI,
 	type TUI,
 	type TuiMouseDispatchResult,
 	type TuiMouseEvent,
@@ -516,12 +517,15 @@ export class Loader extends Text {
 		const bodyBudget = Math.max(0, leftBudget - leadW - suffixW);
 		const clippedBody = truncateToWidth(body, bodyBudget, "…");
 		const left = lead + this.messageColorFn(clippedBody) + (suffix === "" ? "" : this.messageColorFn(suffix));
-		const pad = Math.max(0, inner - visibleWidth(left) - shownElapsedW);
 		const elapsedStyled = shownElapsed === "" ? "" : this.messageColorFn(shownElapsed);
-		let line = `${" ".repeat(leftPad)}${left}${" ".repeat(pad)}${elapsedStyled}${" ".repeat(rightPad)}`;
-		const vis = visibleWidth(line);
-		if (vis < w) line += " ".repeat(w - vis);
-		else if (vis > w && suffix === "") line = truncateToWidth(line, w, "…");
+		const leftPart = `${" ".repeat(leftPad)}${left}`;
+		// 不把空格铺满整行：Windows Terminal 会把这些空格画成一条浅底（滚到底时和转录区 2K 空行对比最明显）。
+		let line = leftPart;
+		if (shownElapsed !== "") {
+			const elapsedCol = Math.max(visibleWidth(leftPart) + gap, w - rightPad - shownElapsedW);
+			line += `\x1b[${elapsedCol + 1}G${elapsedStyled}`;
+		}
+		if (visibleWidth(line) > w && suffix === "") line = truncateToWidth(line, w, "…");
 		return ["", line];
 	}
 
@@ -581,7 +585,9 @@ export class Loader extends Text {
 		const indicator = renderedFrame.length > 0 ? `${renderedFrame} ` : "";
 		this.setText(`${indicator}${this.messageColorFn(this.message)}`);
 		if (this.ui) {
-			this.ui.requestRender();
+			// 转圈只改 dock，不要 bump contentGeneration：否则拖滚动条时每帧打掉转录缓存，又卡又抖。
+			if (isViewportTUI(this.ui)) this.ui.requestViewportRender();
+			else this.ui.requestRender();
 		}
 	}
 }

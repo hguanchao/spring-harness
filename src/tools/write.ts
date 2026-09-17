@@ -20,8 +20,11 @@ export const writeTool: ToolSpec = {
     if (denial) return denial;
     const content = asStringOrEmpty(args, 'content');
     const abs = assertInsideWorkspace(ctx.workspaceRoot, rel);
+    const unseen = ctx.observation?.denyIfUnseen(abs);
+    if (unseen) return unseen;
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, 'utf8');
+    ctx.observation?.noteWritten(abs);
     return { ok: true, content: `wrote ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${content.length} bytes)` };
   },
 };

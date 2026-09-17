@@ -7,12 +7,21 @@
  */
 import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
-/** 直连时复用连接：建 TLS 会话比 keepalive 贵一个数量级。代理路径由 EnvHttpProxyAgent 自己管池。 */
-const keepAliveAgent = new Agent({
+/**
+ * undici 默认 allowH2=true。不少中转 / 本地代理的 CONNECT 隧道只稳 HTTP/1.1，
+ * ALPN 谈到 h2 后握手直接失败，表现就是 `fetch failed`。zcode / 多数 Python 客户端
+ * 走 HTTP/1.1，所以同一网关它们没事。
+ */
+const dispatcherOpts = {
   connections: 8,
   keepAliveTimeout: 30_000,
   pipelining: 0,
-});
+  allowH2: false,
+  connect: { timeout: 20_000 },
+} as const;
+
+/** 直连时复用连接：建 TLS 会话比 keepalive 贵一个数量级。代理路径由 EnvHttpProxyAgent 自己管池。 */
+const keepAliveAgent = new Agent(dispatcherOpts);
 
 /** 标准代理环境变量是否存在（大小写都认，与 undici 自身的读取习惯一致）。 */
 function hasEnvProxy(env: NodeJS.ProcessEnv): boolean {
@@ -34,11 +43,15 @@ export function applyProxy(
     return;
   }
   if (configProxy !== undefined) {
-    setGlobalDispatcher(new EnvHttpProxyAgent({ httpProxy: configProxy, httpsProxy: configProxy }));
+    setGlobalDispatcher(new EnvHttpProxyAgent({
+      httpProxy: configProxy,
+      httpsProxy: configProxy,
+      ...dispatcherOpts,
+    }));
     return;
   }
   if (hasEnvProxy(env)) {
-    setGlobalDispatcher(new EnvHttpProxyAgent());
+    setGlobalDispatcher(new EnvHttpProxyAgent(dispatcherOpts));
     return;
   }
   setGlobalDispatcher(keepAliveAgent);

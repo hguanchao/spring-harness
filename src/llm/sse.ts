@@ -1,9 +1,9 @@
 // 流类型显式从 node:stream/web 取：新版 @types/node 收紧了全局 DOM 流类型，
 // 依赖 lock 重算后全局名不再可用（教训：类型别依赖传递全局）。
 import type { ReadableStreamDefaultReader, ReadableStreamReadResult } from 'node:stream/web';
-import { errorMessage, flattenWhitespace } from '../util.js';
-import { llmError } from './errors.js';
-import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
+import { formatFetchError, flattenWhitespace } from '../util.js';
+import { classifyHttpError, llmError } from './errors.js';
+import { isRetryableStatus, RetryableError, retryAfterMs, StreamClosedError } from './retry.js';
 
 /** 两次 SSE chunk 之间的默认空闲上限。交互 CLI 比 grok 的 300s 更短，避免 TUI 挂死。 */
 export const SSE_IDLE_TIMEOUT_MS = 120_000;
@@ -68,6 +68,10 @@ function deliverSseLine(line: string, onData: (payload: string) => void): boolea
   return true;
 }
 
+function isDonePayload(payload: string): boolean {
+  return payload.trim() === '[DONE]';
+}
+
 export async function postSseStream(params: SseStreamParams): Promise<void> {
   let response: Response;
   try {
@@ -79,19 +83,20 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
     });
   } catch (error) {
     if (params.signal?.aborted) throw error;
-    throw new RetryableError(`network error: ${errorMessage(error)}`);
+    throw new RetryableError(`network error: ${formatFetchError(error)}`);
   }
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 400);
-    if (isRetryableStatus(response.status)) {
+    const code = classifyHttpError(response.status, detail);
+    if (code === 'CONTEXT_WINDOW_EXCEEDED') throw llmError(`LLM HTTP ${response.status}`, detail);
+    if (isRetryableStatus(response.status) && code !== 'QUOTA') {
       throw new RetryableError(
-        `LLM HTTP ${response.status}: ${detail}`,
+        `LLM HTTP ${response.status} [${code}]: ${detail}`,
         response.status,
         retryAfterMs(response.headers.get('retry-after')),
       );
     }
-    // 400/413 里可能是「上下文超窗」——那一种压缩后重试就能成功，必须让 loop 认得出来。
-    throw llmError(`LLM HTTP ${response.status}`, detail);
+    throw llmError(`LLM HTTP ${response.status} [${code}]`, detail);
   }
   if (!response.body) throw new RetryableError('LLM response missing body');
 
@@ -116,6 +121,7 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
   const firstByteMs = params.firstByteTimeoutMs ?? SSE_FIRST_BYTE_TIMEOUT_MS;
   let buffer = '';
   let sawData = false;
+  let sawDone = false;
   let sample = '';
   let gotByte = false;
   try {
@@ -128,7 +134,10 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
       const lines = buffer.split(/\r?\n/);
       buffer = done ? '' : (lines.pop() ?? '');
       for (const line of lines) {
-        if (deliverSseLine(line, params.onData)) {
+        if (deliverSseLine(line, (payload) => {
+          if (isDonePayload(payload)) sawDone = true;
+          params.onData(payload);
+        })) {
           sawData = true;
           continue;
         }
@@ -145,6 +154,8 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
       }
       throw emptyStreamError(contentType, flattenWhitespace(raw) || '(empty body)');
     }
+    // 对齐 dsh parseSse：流正常结束但没 [DONE] → STREAM_CLOSED，不是成功完成。
+    if (!sawDone) throw new StreamClosedError();
   } finally {
     // 提前退出（idle 超时 / onData 抛错 / 取消）时流还没读完：不 cancel 的话 undici 会把这条
     // 连接一直占着直到超时。重试与参数降级都可能连发多次请求，泄漏会按请求数累积。

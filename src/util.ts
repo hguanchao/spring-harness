@@ -10,6 +10,22 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Node `fetch` 失败时常只给 `fetch failed`，真正原因在 `error.cause`（ECONNRESET、
+ * UND_ERR_CONNECT_TIMEOUT、证书）。沿 cause 链拼出来，状态行才看得出是代理还是 TLS。
+ */
+export function formatFetchError(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth++) {
+    const code = 'code' in current && typeof current.code === 'string' ? current.code : undefined;
+    const piece = code && !current.message.includes(code) ? `${current.message} (${code})` : current.message;
+    if (piece && !parts.some((existing) => existing.includes(piece))) parts.push(piece);
+    current = current.cause;
+  }
+  return parts.join(' → ') || String(error);
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

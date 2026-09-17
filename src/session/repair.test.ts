@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { findDanglingToolCalls, INTERRUPTED_TOOL, repairDanglingTools } from './repair.js';
+import { closeInterruptedTurn, findDanglingToolCalls, INTERRUPTED_TOOL, repairDanglingTools } from './repair.js';
 import { JsonlSession } from './store.js';
 import type { SessionMessage } from './types.js';
 
@@ -40,6 +40,32 @@ describe('findDanglingToolCalls', () => {
       { id: 'c1', name: 'read_file' },
       { id: 'c2', name: 'grep' },
     ]);
+  });
+});
+
+describe('closeInterruptedTurn', () => {
+  it('悬挂工具补完后关掉未结束的 turn', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sph-close-turn-'));
+    try {
+      const session = new JsonlSession(dir, 's1');
+      session.appendEvent('turn_start', { depth: 0 });
+      const messages: SessionMessage[] = [
+        msg({
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c1', name: 'shell', arguments: {} }],
+        }),
+      ];
+      assert.equal(closeInterruptedTurn(session, messages), 2);
+      const records = session.readAll();
+      const ends = records.filter((row) => row.type === 'event' && row.kind === 'turn_end');
+      assert.equal(ends.length, 1);
+      assert.equal((ends[0] as { data: { interrupted?: boolean } }).data.interrupted, true);
+      const tool = records.find((row) => row.type === 'message' && row.role === 'tool');
+      assert.match(String(tool && 'content' in tool ? tool.content : ''), /Do not retry blindly/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

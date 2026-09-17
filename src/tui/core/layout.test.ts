@@ -80,4 +80,63 @@ describe('scrollbarUntil', () => {
     assert.equal(stripTerminalSequences(gutterLine), '▐');
     assert.match(gutterLine, /\x1b\[\d+G/, '空隙行用 CHA 落到滑块列，不铺空格');
   });
+
+  it('pin-reserve 时轨道仍铺满转录区，但不接到 until', () => {
+    const body = Array.from({ length: 16 }, (_, i) => `L${i}`).join('\n');
+    const editor = new Text('prompt', 0, 0);
+    const view = new ScrollView(new Text(body, 0, 0), {
+      follow: 'end',
+      primary: true,
+      scrollbar: 'auto',
+      scrollbarUntil: editor,
+    });
+    view.setPinY(12);
+    const root = new VStack(
+      [
+        { component: view, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+        { component: editor, basis: 'auto', grow: 0, shrink: 0, minSize: 1 },
+      ],
+      { gap: 1 },
+    );
+    const frame = renderLayoutFrame(root, 20, 14, () => {});
+    const scrollBox = getScrollViewBox(frame, view);
+    assert.ok(scrollBox);
+    assert.ok(view.pinPad > 0, '短回复应有 pin-reserve');
+    const geo = getScrollbarGeometry(scrollBox);
+    assert.ok(geo);
+    assert.equal(geo.trackHeight, scrollBox.rect.height, '轨道高度等于转录视口');
+    assert.ok(geo.thumbTop >= scrollBox.rect.y);
+    assert.ok(geo.thumbTop + geo.thumbHeight <= scrollBox.rect.y + scrollBox.rect.height);
+    const longBody = Array.from({ length: 40 }, (_, i) => `L${i}`).join('\n');
+    const longView = new ScrollView(new Text(longBody, 0, 0), {
+      follow: 'end',
+      primary: true,
+      scrollbar: 'auto',
+    });
+    longView.setPinY(30);
+    const withPadFrame = renderLayoutFrame(longView, 20, 20, () => {});
+    const withPadBox = getScrollViewBox(withPadFrame, longView);
+    assert.ok(withPadBox);
+    assert.ok(longView.pinPad > 0);
+    const withPad = getScrollbarGeometry(withPadBox);
+    longView.setPinY(undefined);
+    const noPadFrame = renderLayoutFrame(longView, 20, 20, () => {});
+    const noPadBox = getScrollViewBox(noPadFrame, longView);
+    assert.ok(noPadBox && withPad);
+    const noPad = getScrollbarGeometry(noPadBox);
+    assert.ok(noPad);
+    assert.equal(withPad.thumbHeight, noPad.thumbHeight, '滑块高度不该被 pin-reserve 空行拉长缩短');
+    const visit = (box: typeof frame.root): typeof frame.root | undefined => {
+      if (box.component === editor) return box;
+      for (const child of box.children) {
+        const found = visit(child);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const editorBox = visit(frame.root);
+    assert.ok(editorBox);
+    const gutter = editorBox.rect.y - 1;
+    assert.equal(stripTerminalSequences(frame.lines[gutter] ?? '').includes('▐'), false);
+  });
 });

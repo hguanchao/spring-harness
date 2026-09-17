@@ -42,6 +42,14 @@ describe('主系统提示词的结构', () => {
     // 必须点名具体 shell：Windows 上是 pwsh 而非 bash，bash-only 语法会静默失败。
     assert.ok(/Shell: .*(pwsh|sh)/.test(p), 'shell 必须说清是 pwsh 还是 sh');
     assert.ok(p.includes('Sandbox: workspace'));
+    assert.match(p, /Today: \d{4}-\d{2}-\d{2} \([^)]+\)/, '身份段必须带本地日期，否则模型会用训练截止日当今天');
+    assert.ok(p.includes(`OS: ${process.platform}`));
+  });
+
+  it('传入 model 时身份段写模型名，省略则不出现空 Model 行', () => {
+    assert.ok(base({ model: 'DeepSeek-V4-Flash-0731' }).includes('Model: DeepSeek-V4-Flash-0731'));
+    assert.equal(/\nModel:\n/.test(base()), false);
+    assert.equal(base().includes('Model:'), false);
   });
 
   it('Windows 沙箱说明嵌套 spawn EPERM 是 token 策略，不许当命令写错来重试', {
@@ -127,6 +135,13 @@ describe('工具段的条件拼装', () => {
       assert.ok(p.includes(wrong), `应点名禁止 ${wrong}`);
     }
   });
+
+  it('grep 命中后用 read_file 看上下文；shell 非零退出先查再继续', () => {
+    const p = base();
+    assert.ok(p.includes('Use read_file on a matched file when you need surrounding context'));
+    assert.ok(p.includes('investigate a non-zero exit before moving on'));
+    assert.ok(p.includes('do not poll, sleep-wait, or duplicate a running job'));
+  });
 });
 
 describe('计划模式引导', () => {
@@ -169,9 +184,10 @@ describe('压缩摘要', () => {
     assert.ok(COMPACTION_SYSTEM.includes('it will NOT see any tool call or'));
   });
 
-  it('七个分段齐全且要求空段写 (none)', () => {
+  it('八段齐全且要求空段写 (none)', () => {
     for (const section of [
       '## Goal and Acceptance Criteria',
+      '## Key Technical Concepts',
       '## Decisions and Rationale',
       '## Files, Commands, and Symbols',
       '## Errors and Fixes',
