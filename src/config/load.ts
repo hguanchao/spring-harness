@@ -8,6 +8,7 @@ import {
   type SessionAffinityFormat,
 } from '../llm/compat.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
+import { DEFAULT_MAX_RETRIES } from '../llm/retry.js';
 import type { McpServerConfig } from '../mcp/hub.js';
 import type { McpPreferences } from '../mcp/sources.js';
 import { DEFAULT_SPILL_THRESHOLD } from '../runtime/spill.js';
@@ -83,6 +84,11 @@ export interface SphConfig {
    */
   maxSessionTokens: number;
   /**
+   * 上游请求失败后的最多重试次数（不含首次）。默认 {@link DEFAULT_MAX_RETRIES}。
+   * 0 = 失败即停。只对 408/429/5xx、网络抖动、idle timeout、空响应生效。
+   */
+  maxRetries: number;
+  /**
    * MCP 的本地启停偏好（`[mcp]` 段）。
    *
    * 来自外部工具配置（Claude / Codex / `.mcp.json`）的 server 一概不写回原文件，启停只在
@@ -112,6 +118,7 @@ sandbox = "workspace"
 # subagent_max_depth = 1        # 子代理嵌套深度预算；0 禁止派生，默认 1（扁平，子代理不再派生）
 # prompt_cache = true           # Anthropic 打 prompt-cache 断点，默认开；端点不认时自动降级
 # max_session_tokens = 0        # 会话累计 token 预算（含子代理/压缩调用）；0 = 不限制
+# max_retries = 10              # 上游失败重试次数（不含首次）；0 = 失败即停
 # proxy = "http://127.0.0.1:7890"  # 出站代理；显式 "" = 强制直连，缺省回退 HTTP(S)_PROXY 环境变量
 # [compat]                      # 端点参数声明；省略按 base_url 推断（未知网关不发 cache key）
 # prompt_cache_key = true       # 发 session 路由键；官方 api.openai.com 默认开
@@ -228,11 +235,12 @@ export function loadConfig(options?: {
   const promptCache = parsePromptCache(file.prompt_cache);
   const compat = parseCompat(file.compat, 'compat');
   const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
+  const maxRetries = parseMaxRetries(file.max_retries);
   const mcpPreferences = parseMcpPreferences(file.mcp);
   return {
     baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
     compactModel, reviewModel, aux, spillThreshold, httpHeaders, proxy, subagentMaxDepth, promptCache,
-    compat, maxSessionTokens, mcpPreferences,
+    compat, maxSessionTokens, maxRetries, mcpPreferences,
   };
 }
 
@@ -346,6 +354,12 @@ function parseCompat(value: unknown, key: string): CompatProfile | undefined {
 function parseMaxSessionTokens(value: unknown): number {
   if (value === undefined) return 0;
   return requireInt(value, 0, 'max_session_tokens must be a non-negative integer (0 disables the budget)');
+}
+
+/** 上游失败重试：非负整数，缺省 {@link DEFAULT_MAX_RETRIES}，0 = 失败即停。 */
+function parseMaxRetries(value: unknown): number {
+  if (value === undefined) return DEFAULT_MAX_RETRIES;
+  return requireInt(value, 0, 'max_retries must be a non-negative integer (0 fails immediately)');
 }
 
 /** prompt-cache 断点开关：默认开，只有显式 false 才关。 */

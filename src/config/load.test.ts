@@ -152,3 +152,21 @@ describe('max_session_tokens', () => {
     );
   });
 });
+
+describe('max_retries', () => {
+  it('未配置时默认 10', () => {
+    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).maxRetries, 10);
+  });
+
+  it('接受非负整数，0 表示失败即停', () => {
+    assert.equal(loadConfig({ configPath: configWith('max_retries = 3'), env: {} }).maxRetries, 3);
+    assert.equal(loadConfig({ configPath: configWith('max_retries = 0'), env: {} }).maxRetries, 0);
+  });
+
+  it('负数拒绝启动', () => {
+    assert.throws(
+      () => loadConfig({ configPath: configWith('max_retries = -1'), env: {} }),
+      ConfigError,
+    );
+  });
+});

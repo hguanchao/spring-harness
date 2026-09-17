@@ -449,6 +449,11 @@ export async function projectContext(options: {
   stubFromSession?: number;
   /** 主轮工具表；压缩请求带上才能与上一跳共享前缀。 */
   tools?: unknown[];
+  /**
+   * LLM 摘要即将开始。TUI 用来把状态行切到 Folding context…——stub 是同步的，
+   * 只有这一步会卡住数秒，不通知的话状态行会一直停在 Calling model…。
+   */
+  onCompacting?: () => void;
 }): Promise<ProjectionResult> {
   const { messages, contextWindow, client, signal } = options;
   const compaction = options.compaction;
@@ -488,6 +493,7 @@ export async function projectContext(options: {
   if (range.length > 0 && range.some((row) => row.role !== 'system')) {
     try {
       const prefix = withSystem(toChatMessages(messages.slice(0, rangeFrom + range.length), compaction));
+      options.onCompacting?.();
       const summary = await summarize(client, prefix, options.tools ?? [], signal, options.onUsage);
       const covered = rangeFrom + range.length;
       const next: CompactionEvent = { summary, covered };

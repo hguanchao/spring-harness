@@ -124,6 +124,7 @@ describe('stub 头尾预览', () => {
 describe('压缩请求复用对话前缀', () => {
   it('摘要调用以原 system 打头、压缩指令垫在最后一条 user', async () => {
     const captured: Array<{ messages: ChatMessage[]; tools: unknown[] }> = [];
+    let compactingBeforeRequest = false;
     const client = {
       async complete(messages: ChatMessage[], tools: unknown[]) {
         captured.push({ messages, tools });
@@ -141,7 +142,11 @@ describe('压缩请求复用对话前缀', () => {
       client,
       system: 'You are sph',
       tools: [{ type: 'function', function: { name: 'read_file' } }],
+      onCompacting: () => {
+        compactingBeforeRequest = captured.length === 0;
+      },
     });
+    assert.equal(compactingBeforeRequest, true, 'onCompacting 必须在摘要请求发出之前');
     assert.equal(captured.length, 1);
     assert.equal(captured[0]?.messages[0]?.role, 'system');
     assert.equal(captured[0]?.messages[0]?.content, 'You are sph');

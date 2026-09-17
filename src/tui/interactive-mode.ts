@@ -107,7 +107,7 @@ import {
   keyHint,
   workingWarningKey,
 } from './components/interaction.js';
-import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, toolDisplayName } from './components/tool-execution.js';
+import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, summarizeArgs, toolDisplayName } from './components/tool-execution.js';
 import { SubagentTaskComponent } from './components/subagent-task.js';
 import { ToolGroupComponent } from './components/tool-group.js';
 import { UserMessageComponent } from './components/user-message.js';
@@ -242,7 +242,7 @@ function subagentActivity(event: SubagentEvent): string | undefined {
     case 'text':
       return WorkingLabel.responding;
     case 'tool_start':
-      return WorkingLabel.running(toolDisplayName(event.name));
+      return WorkingLabel.running(toolDisplayName(event.name), summarizeArgs(event.name, event.args));
     case 'error':
       return flattenWhitespace(event.text).slice(0, 80);
     default:
@@ -728,6 +728,7 @@ class InteractiveMode implements ApprovalUi {
     // 发出去之后输入框失焦：否则边框一直是聚焦色，像还在打字。
     this.ui.setFocus(null);
     const indicator = new WorkingStatusIndicator(this.ui, WorkingLabel.working);
+    if (this.contextTokens !== undefined) indicator.setTokens(this.contextTokens);
     this.setStatusIndicator(indicator);
     // 指示器已带初始文案，这里只是把 activityLabel 记上，后续 setActivity 才知道该不该重设。
     this.setActivity(WorkingLabel.working);
@@ -893,6 +894,8 @@ class InteractiveMode implements ApprovalUi {
         this.thinkingBuffer = '';
         this.thinkingStartedAt = Date.now();
         // 不在 start 切 Thinking…：无 reasoning 的工具轮次永远等不到 delta，状态行会假死。
+        // 压缩刚结束时要把 Folding context… 收回去，否则会一直挂到第一条 delta。
+        if (this.activityLabel === WorkingLabel.compacting) this.setActivity(WorkingLabel.working);
         this.thinkingGroup = this.ensureToolGroup();
         this.thinkingGroup.beginThinking();
         this.paint('transcript');
@@ -938,7 +941,7 @@ class InteractiveMode implements ApprovalUi {
         tool.markExecutionStarted();
         this.ensureToolGroup().addTool(tool);
         this.pendingTools.set(event.id, tool);
-        this.setActivity(WorkingLabel.running(toolDisplayName(event.name)));
+        this.setActivity(WorkingLabel.running(toolDisplayName(event.name), summarizeArgs(event.name, event.args)));
         // subagent 的实时进度由转录内任务块承担，不进底部「正在跑」区。
         if (event.name !== 'subagent') this.addPendingToolLine(event.id, event.name, event.args);
         this.paint('transcript');
@@ -962,6 +965,15 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'status': {
+        // 压缩开始由 loop 发同一句 WorkingLabel.compacting，只改状态行，不进转录。
+        if (event.text === WorkingLabel.compacting) {
+          this.setActivity(WorkingLabel.compacting);
+          this.paint('dock');
+          return;
+        }
+        if (event.text.startsWith('context compacted') && this.activityLabel === WorkingLabel.compacting) {
+          this.setActivity(WorkingLabel.working);
+        }
         // 轮次中的 warn 叠在工作状态行上（带次数），不进转录——否则 Thinking… 会被一条
         // notice 打断，重试/截断流看起来像聊天记录。
         if (event.level === 'warn' && this.showWorkingWarning(event.text)) {
@@ -1184,6 +1196,7 @@ class InteractiveMode implements ApprovalUi {
     }
     if (typeof completion === 'number') this.usage.completionTokens += completion;
     if (typeof cached === 'number') this.usage.cachedTokens += cached;
+    this.currentIndicator?.setTokens(this.contextTokens);
   }
 
   private recordAuxUsage(usage: TokenUsage, purpose: string): void {
@@ -1231,8 +1244,8 @@ class InteractiveMode implements ApprovalUi {
     this.activityLabel = undefined;
     this.workingWarningKey = undefined;
     this.workingWarningCount = 0;
-    // 状态行常驻输入框上方（grok-build 的 turn status 行位置）：空闲时是两行占位，
-    // 工作时换成「转圈 + 阶段文案」+ 最右侧本轮耗时。两种形态同为两行，切换时高度不变。
+    // 状态行常驻输入框上方：空闲时两行占位，工作时换成转圈 + 活动 + 阶段耗时，
+    // 右侧本轮耗时与 token。两种形态同为两行，切换时高度不变。
     this.statusContainer.clear();
     this.statusContainer.addChild(indicator ?? this.idleStatus);
   }

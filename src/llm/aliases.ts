@@ -2,7 +2,7 @@
  * 响应字段并集。
  *
  * 请求侧未知字段会 400，所以要少发；响应侧多读一个空键几乎免费，少读一个
- * 就是 TUI 停在 Working…（中转站写 `delta.reasoning`、官方写 `reasoning_content`）。
+ * 就是 TUI 停在 Calling model…（中转站写 `delta.reasoning`、官方写 `reasoning_content`）。
  *
  * 只覆盖「同一个 JSON 对象上换了键名」。Anthropic / Responses 靠事件 type 分路，
  * 不把协议事件表塞进这里。

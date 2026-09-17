@@ -11,7 +11,7 @@ import { ContextOverflowError } from './errors.js';
 import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
 import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
 import { postSseStream } from './sse.js';
-import { backoffMs, RetryableError, sleepAbortable } from './retry.js';
+import { backoffMs, DEFAULT_MAX_RETRIES, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../util.js';
 
 /** 一个上游协议的静态差异：端点、鉴权头、请求体编码、SSE 事件解码。 */
@@ -64,7 +64,7 @@ export interface SseClientOptions {
  */
 const MAX_DEGRADATIONS = 8;
 
-/** 空 SSE / 空完成：再发同一份请求没有意义，应立刻降级字段而不是连打 8 次。 */
+/** 空 SSE / 空完成：再发同一份请求没有意义，应立刻降级字段而不是连打 maxRetries 次。 */
 function isSilentReject(error: unknown): boolean {
   return error instanceof RetryableError && /no SSE data events|no content/.test(error.message);
 }
@@ -148,7 +148,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
         return result;
       };
 
-      const maxRetries = options.maxRetries ?? 8;
+      const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
       let transportTries = 0;
       for (let degradations = 0; ; ) {
         const body = adapter.buildBody(

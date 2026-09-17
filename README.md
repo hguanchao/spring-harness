@@ -45,6 +45,7 @@ Key facts:
 - `[aux]` (optional) gives those auxiliary calls a *different* endpoint — `base_url` / `api_key` / `api`, each individually optional. This is what makes a cross-vendor cheap summariser possible.
 - `prompt_cache` (default `true`) places Anthropic prompt-cache breakpoints. OpenAI-side cache routing (`prompt_cache_key`) is sent only for `api.openai.com`, or when `[compat]` opts in. `prompt_cache_retention` is off unless declared. Unknown gateways get a conservative first request; rejected optional fields are dropped, logged as `compat_retry` in the session file, and shown on the working-status line with a count. The system prompt is frozen within a turn and the mechanical-stub boundary is pinned once it first engages, so the request prefix stays byte-stable; whole-prompt cache misses are logged as `cache_miss` events in the session file rather than shown in the UI.
 - `max_session_tokens` (default `0` = unlimited) caps cumulative prompt+completion tokens for the whole agent tree, including subagents and compaction. The count survives `--resume`; the turn stops before the next request when the budget is gone, and warns at 80%.
+- `max_retries` (default `10`) is how many times a failed upstream request is retried, not counting the first attempt. `0` fails immediately. Only 408/429/5xx, network errors, idle timeouts, and empty responses retry.
 - `subagent_max_depth` (default `1`) — `0` forbids delegation entirely.
 
 ## Usage

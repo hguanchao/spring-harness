@@ -67,6 +67,8 @@ export interface ClientOptions {
   sessionId?: string;
   /** `[compat]` 声明，覆盖 URL 推断。 */
   compat?: CompatProfile;
+  /** 上游失败重试次数（不含首次）；省略走 client 内置默认。 */
+  maxRetries?: number;
 }
 
 const adapters = new Map<ApiProtocol, ProtocolAdapter>([
@@ -338,6 +340,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         promptCache: config.promptCache,
         sessionId: session.id,
         compat: config.compat,
+        maxRetries: config.maxRetries,
       });
     },
     makeAuxClient(model) {
@@ -358,6 +361,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         sessionId: session.id,
         // 跨端点时用 [aux.compat]；同源则复用主 [compat]。
         compat: sharesMainEndpoint ? config.compat : config.aux?.compat,
+        maxRetries: config.maxRetries,
       });
     },
     reloadMcp,

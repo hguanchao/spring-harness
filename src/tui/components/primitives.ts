@@ -17,7 +17,7 @@ import {
 	type TuiMouseEventResult,
 } from "../core/tui.js";
 import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../core/utils.js";
-import { formatDuration } from "../../util.js";
+import { formatStatusElapsed, formatStatusTokens } from "../../util.js";
 
 
 type RenderCache = {
@@ -461,8 +461,8 @@ export function splitTrailingCount(message: string): { body: string; suffix: str
 /**
  * Loader component that updates with an optional spinning animation.
  *
- * 状态行布局：左侧转圈 + 阶段文案，最右侧本轮已运行时长。时长跟转圈共用同一
- * 个 interval，避免再开一只定时器。
+ * 状态行布局：转圈 + 活动文案 + 阶段耗时，右侧本轮耗时与 `↓token`。
+ * 两个时钟跟转圈共用同一个 interval，避免再开一只定时器。
  */
 export class Loader extends Text {
 	private frames = [...DEFAULT_FRAMES];
@@ -473,8 +473,12 @@ export class Loader extends Text {
 	private renderIndicatorVerbatim = false;
 	private spinnerColorFn: (str: string) => string;
 	private messageColorFn: (str: string) => string;
+	/** 时钟单独着色：警告把文案染成 warning 时，耗时仍保持 muted。 */
+	private timerColorFn: (str: string) => string;
 	private message: string = "Loading...";
 	private readonly startedAt = Date.now();
+	private phaseStartedAt = Date.now();
+	private tokens?: number;
 
 	constructor(
 		ui: TUI,
@@ -487,6 +491,7 @@ export class Loader extends Text {
 		this.ui = ui;
 		this.spinnerColorFn = spinnerColorFn;
 		this.messageColorFn = messageColorFn;
+		this.timerColorFn = messageColorFn;
 		this.message = message;
 		this.setIndicator(indicator);
 	}
@@ -497,33 +502,50 @@ export class Loader extends Text {
 		// 右缘：1 列给滚动条 ▐，再空两格，耗时不要贴着滑块。
 		const rightPad = 4;
 		const inner = Math.max(1, w - leftPad - rightPad);
-		const elapsed = formatDuration(Date.now() - this.startedAt);
+		const now = Date.now();
+		const turnStr = formatStatusElapsed(now - this.startedAt);
+		const phaseStr = ` ${formatStatusElapsed(now - this.phaseStartedAt)}`;
+		const tokenStr = this.tokens !== undefined && this.tokens > 0 ? ` ↓${formatStatusTokens(this.tokens)}` : "";
 		const { body, suffix } = splitTrailingCount(this.message);
 		const suffixW = visibleWidth(suffix);
-		const elapsedW = visibleWidth(elapsed);
+		const turnW = visibleWidth(turnStr);
+		const tokenW = visibleWidth(tokenStr);
+		const phaseW = visibleWidth(phaseStr);
 		const gap = 2;
-		// 次数优先于耗时：极窄时丢掉耗时，也不能把 `(N)` 裁成 `(1…`。
-		let showElapsed = elapsedW > 0 && suffixW + elapsedW + (suffixW > 0 ? gap : 0) <= inner;
-		if (suffix === "" && elapsedW <= inner) showElapsed = true;
-		const shownElapsed = showElapsed ? elapsed : "";
-		const shownElapsedW = showElapsed ? elapsedW : 0;
-		const leftBudget = Math.max(0, inner - shownElapsedW - (showElapsed ? gap : 0));
+		// 极窄时先丢掉 token，本轮耗时尽量留着；次数 `(N)` 仍不能被省略号吃掉。
+		let right = turnStr + tokenStr;
+		let rightW = turnW + tokenW;
+		if (rightW + (suffixW > 0 ? gap : 0) > inner && tokenW > 0) {
+			right = turnStr;
+			rightW = turnW;
+		}
+		let showRight = rightW > 0 && suffixW + rightW + (suffixW > 0 ? gap : 0) <= inner;
+		if (suffix === "" && rightW <= inner) showRight = true;
+		const shownRight = showRight ? right : "";
+		const shownRightW = showRight ? rightW : 0;
+		const leftBudget = Math.max(0, inner - shownRightW - (showRight ? gap : 0));
 		const frame = this.getRenderedIndicator();
 		const spinner = frame.length > 0 ? `${frame} ` : "";
 		const spinnerW = visibleWidth(spinner);
 		const showSpinner = spinnerW > 0 && leftBudget >= spinnerW + suffixW;
 		const lead = showSpinner ? spinner : "";
 		const leadW = showSpinner ? spinnerW : 0;
-		const bodyBudget = Math.max(0, leftBudget - leadW - suffixW);
+		const showPhase = phaseW > 0 && leadW + suffixW + phaseW <= leftBudget;
+		const shownPhaseW = showPhase ? phaseW : 0;
+		const bodyBudget = Math.max(0, leftBudget - leadW - suffixW - shownPhaseW);
 		const clippedBody = truncateToWidth(body, bodyBudget, "…");
-		const left = lead + this.messageColorFn(clippedBody) + (suffix === "" ? "" : this.messageColorFn(suffix));
-		const elapsedStyled = shownElapsed === "" ? "" : this.messageColorFn(shownElapsed);
+		const left =
+			lead
+			+ this.messageColorFn(clippedBody)
+			+ (suffix === "" ? "" : this.messageColorFn(suffix))
+			+ (showPhase ? this.timerColorFn(phaseStr) : "");
+		const rightStyled = shownRight === "" ? "" : this.timerColorFn(shownRight);
 		const leftPart = `${" ".repeat(leftPad)}${left}`;
 		// 不把空格铺满整行：Windows Terminal 会把这些空格画成一条浅底（滚到底时和转录区 2K 空行对比最明显）。
 		let line = leftPart;
-		if (shownElapsed !== "") {
-			const elapsedCol = Math.max(visibleWidth(leftPart) + gap, w - rightPad - shownElapsedW);
-			line += `\x1b[${elapsedCol + 1}G${elapsedStyled}`;
+		if (shownRight !== "") {
+			const elapsedCol = Math.max(visibleWidth(leftPart) + gap, w - rightPad - shownRightW);
+			line += `\x1b[${elapsedCol + 1}G${rightStyled}`;
 		}
 		if (visibleWidth(line) > w && suffix === "") line = truncateToWidth(line, w, "…");
 		return ["", line];
@@ -542,12 +564,28 @@ export class Loader extends Text {
 	}
 
 	setMessage(message: string): void {
-		this.message = message;
+		if (this.message !== message) {
+			this.message = message;
+			this.phaseStartedAt = Date.now();
+		}
 		this.updateDisplay();
 	}
 
 	setMessageColor(colorFn: (str: string) => string): void {
 		this.messageColorFn = colorFn;
+		this.updateDisplay();
+	}
+
+	/** 时钟颜色与文案解耦：重试把活动染黄时，两侧耗时仍是 muted。 */
+	setTimerColor(colorFn: (str: string) => string): void {
+		this.timerColorFn = colorFn;
+	}
+
+	/** 本轮上下文 token；`undefined` / 0 不画右侧 `↓Nk`。 */
+	setTokens(tokens: number | undefined): void {
+		const next = tokens !== undefined && tokens > 0 ? tokens : undefined;
+		if (this.tokens === next) return;
+		this.tokens = next;
 		this.updateDisplay();
 	}
 

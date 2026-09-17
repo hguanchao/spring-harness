@@ -3,10 +3,14 @@
  *
  * 已开始流式输出后不重试，避免向用户重复吐字。
  * 429 常见 Retry-After 数秒到几十秒：3 次 / 总等待 <6s 会直接报错，
- * 默认 8 次、退避封顶 20s、Retry-After 封顶 60s。
+ * 默认 {@link DEFAULT_MAX_RETRIES} 次、退避封顶 20s、Retry-After 封顶 60s。
  */
+
+/** 传输层默认重试次数（不含首次）。config.toml `max_retries` 未写时用这个。 */
+export const DEFAULT_MAX_RETRIES = 10;
+
 export interface RetryOptions {
-  /** 最多重试次数（不含首次）。默认 8。 */
+  /** 最多重试次数（不含首次）。默认 {@link DEFAULT_MAX_RETRIES}。 */
   maxRetries?: number;
   /** 退避基准毫秒。默认 1000，指数递增并加抖动。 */
   baseDelayMs?: number;
@@ -69,7 +73,7 @@ export async function withRetries<T>(
   shouldRetry: (error: unknown) => boolean,
   options?: RetryOptions & { signal?: AbortSignal },
 ): Promise<T> {
-  const maxRetries = options?.maxRetries ?? 8;
+  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
   const base = options?.baseDelayMs ?? 1000;
   for (let attempt = 0; ; attempt++) {
     try {

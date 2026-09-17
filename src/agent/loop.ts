@@ -628,6 +628,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           chargeTokens(usage.promptTokens, usage.completionTokens);
           auxUsage?.(usage, 'compaction');
         },
+        onCompacting: () => {
+          options.listener?.({ type: 'status', text: 'Folding context…' });
+        },
       });
       if (projection.stubbedFromSession !== undefined && stubFromSession === undefined) {
         stubFromSession = projection.stubbedFromSession;

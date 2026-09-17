@@ -38,7 +38,8 @@ export function flattenWhitespace(text: string): string {
 /**
  * 时长的紧凑显示：一分钟内 `43.2s`，以上 `2m13s`。
  *
- * 工具分组（思考链耗时）、子代理活动行、状态行右侧耗时共用同一套写法。
+ * 工具分组（思考链耗时）、子代理活动行共用。状态行的阶段/本轮耗时走
+ * {@link formatStatusElapsed}：10s 以上不再带小数，避免一行上两个时钟都在跳十分位。
  */
 export function formatDuration(ms: number): string {
   const totalSeconds = ms / 1000;
@@ -46,6 +47,46 @@ export function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = Math.round(totalSeconds - minutes * 60);
   return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+}
+
+/**
+ * 状态行时钟：阶段耗时与本轮耗时同一套粒度。
+ *
+ * 10s 以内留一位小数（`2.9s`），之上取整（`17s` / `1m20s` / `1h2m`）。
+ * 和 footer 的累计时长分开，是因为状态行两个时钟并排，十分位连跳会抢注意力。
+ */
+export function formatStatusElapsed(ms: number): string {
+  const seconds = Math.max(0, ms) / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) {
+    const rounded = Math.round(seconds);
+    return rounded === 60 ? '1m0s' : `${rounded}s`;
+  }
+  if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    const rest = Math.round(seconds - minutes * 60);
+    if (rest === 60) return `${minutes + 1}m0s`;
+    return `${minutes}m${rest}s`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds - hours * 3600) / 60);
+  if (minutes === 60) return `${hours + 1}h0m`;
+  return `${hours}h${minutes}m`;
+}
+
+/**
+ * 状态行右侧的上下文 token 缩写：`1.47k` / `10.1k` / `147k` / `1.47m`。
+ *
+ * footer 的 `formatTokens` 是水位展示（一位小数、大写 M）；这里跟在本轮耗时后面，
+ * 需要更紧、和截图里 `↓1.47k` 同一数量级，所以单独一套。
+ */
+export function formatStatusTokens(count: number): string {
+  if (count < 1000) return String(Math.round(count));
+  if (count < 10_000) return `${(count / 1000).toFixed(2)}k`;
+  if (count < 100_000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
+  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(2)}m`;
+  return `${(count / 1_000_000).toFixed(1)}m`;
 }
 
 /**
