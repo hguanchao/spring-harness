@@ -19,7 +19,6 @@ import {
 	SelectList,
 	type OverlayHandle,
 	type SizeValue,
-	Text,
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -30,6 +29,7 @@ import { getMarkdownTheme, getSelectListTheme, theme } from './theme/theme.js';
 
 const DEFAULT_HINT = '↑/↓ select · Enter confirm · Esc cancel';
 const SCROLL_HINT = '↑/↓ scroll';
+const SELECT_SCROLL_HINT = '↑/↓ scroll · Tab select · Enter confirm · Esc cancel';
 /** 正文挤占列表行数时，列表至少要留下的可见行数。 */
 const LIST_RESERVE_ROWS = 3;
 
@@ -199,41 +199,114 @@ class SelectBody extends DialogBody {
 	/** 上一次渲染时列表在正文里的起始行与高度，鼠标事件按它换算坐标。 */
 	private listTop = 0;
 	private listRows = 0;
+	private readonly markdown: Markdown | undefined;
+	private offset = 0;
+	private textHeight = 0;
+	private textViewport = 0;
 
 	constructor(
 		private readonly list: SelectList,
-		private readonly text: Text | undefined,
+		bodyText: string | undefined,
 		budget: () => number,
 		private readonly hint: string,
 	) {
 		super(budget);
+		this.markdown = bodyText
+			? new Markdown(bodyText, 1, 0, getMarkdownTheme(), {
+					color: (content: string) => theme.fg('mdText', content),
+				})
+			: undefined;
 	}
 
-	private textLines(width: number): string[] {
-		return this.text ? this.text.render(width) : [];
+	getScrollInfo(): string {
+		if (this.textHeight <= this.textViewport) return '';
+		return `(${this.offset + 1}-${this.offset + this.textViewport}/${this.textHeight})`;
+	}
+
+	get scrollable(): boolean {
+		return this.textHeight > this.textViewport;
+	}
+
+	scrollBy(lines: number): void {
+		const max = Math.max(0, this.textHeight - this.textViewport);
+		this.offset = Math.max(0, Math.min(max, this.offset + lines));
+	}
+
+	scrollByPage(direction: -1 | 1): void {
+		this.scrollBy(direction * Math.max(1, this.textViewport - 1));
+	}
+
+	scrollToStart(): void {
+		this.offset = 0;
+	}
+
+	scrollToEnd(): void {
+		this.offset = Math.max(0, this.textHeight - this.textViewport);
+	}
+
+	/** 正文可滚时方向键滚正文；Tab 切选项。返回 true 表示已消费。 */
+	handleNav(data: string): boolean {
+		if (matchesKey(data, 'tab')) {
+			this.list.cycle(1);
+			return true;
+		}
+		if (matchesKey(data, 'shift+tab')) {
+			this.list.cycle(-1);
+			return true;
+		}
+		if (!this.scrollable) return false;
+		if (matchesKey(data, 'up')) {
+			this.scrollBy(-1);
+			return true;
+		}
+		if (matchesKey(data, 'down')) {
+			this.scrollBy(1);
+			return true;
+		}
+		if (matchesKey(data, 'pageUp')) {
+			this.scrollByPage(-1);
+			return true;
+		}
+		if (matchesKey(data, 'pageDown')) {
+			this.scrollByPage(1);
+			return true;
+		}
+		if (matchesKey(data, 'home')) {
+			this.scrollToStart();
+			return true;
+		}
+		if (matchesKey(data, 'end')) {
+			this.scrollToEnd();
+			return true;
+		}
+		return false;
 	}
 
 	protected override minContentRows(): number {
-		// 列表至少要能露出几行才算可用；正文（提示文字）再挤占剩下的行。
+		// 列表至少要能露出几行才算可用；正文再挤占剩下的行。
 		return Math.min(this.list.itemCount, LIST_RESERVE_ROWS);
 	}
 
 	protected override footerText(): string {
-		return this.hint;
+		return this.scrollable ? SELECT_SCROLL_HINT : this.hint;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === 'wheel' && event.wheelDelta && event.y < this.listTop) {
+			this.scrollBy(event.wheelDelta);
+			return { handled: true, render: true };
+		}
 		return this.list.handleMouse?.({ ...event, y: event.y - this.listTop, height: this.listRows });
 	}
 
 	protected override renderContent(width: number, rows: number, leadingRows: number): string[] {
-		const textLines = this.textLines(width);
-		const maxTextRows = Math.max(0, rows - Math.min(this.list.itemCount, LIST_RESERVE_ROWS));
-		const visibleText =
-			textLines.length > maxTextRows
-				? [...textLines.slice(0, Math.max(0, maxTextRows - 1)), truncateToWidth(theme.fg('dim', ' …'), width, '')]
-				: textLines;
-		// 列表自身溢出时还会多渲染一行 `(n/m)` 滚动提示,得把它算进可见行数。
+		const textLines = this.markdown ? this.markdown.render(width) : [];
+		this.textHeight = textLines.length;
+		const listReserve = Math.min(this.list.itemCount, LIST_RESERVE_ROWS);
+		const maxTextRows = Math.max(0, rows - listReserve);
+		this.textViewport = Math.min(maxTextRows, Math.max(0, textLines.length));
+		this.offset = Math.max(0, Math.min(this.offset, Math.max(0, textLines.length - this.textViewport)));
+		const visibleText = textLines.slice(this.offset, this.offset + this.textViewport);
 		const available = Math.max(1, rows - visibleText.length);
 		const overflow = this.list.itemCount > available;
 		this.list.setMaxVisible(overflow ? Math.max(1, available - 1) : available);
@@ -299,6 +372,7 @@ class DialogShell extends Container {
 
 class SelectDialog extends DialogShell {
 	private readonly list: SelectList;
+	private readonly body: SelectBody;
 
 	constructor(
 		title: string,
@@ -310,8 +384,9 @@ class SelectDialog extends DialogShell {
 	) {
 		super(title);
 		this.list = new SelectList(items, maxVisible, getSelectListTheme());
-		const text = bodyText ? new Text(theme.fg('muted', ` ${bodyText}`), 0, 0) : undefined;
-		this.addBody(new SelectBody(this.list, text, budget, hint));
+		this.body = new SelectBody(this.list, bodyText, budget, hint);
+		this.setBottomInfo(() => this.body.getScrollInfo());
+		this.addBody(this.body);
 	}
 
 	onSelect(handler: (item: SelectItem) => void): void {
@@ -323,6 +398,7 @@ class SelectDialog extends DialogShell {
 	}
 
 	handleInput(data: string): void {
+		if (this.body.handleNav(data)) return;
 		this.list.handleInput(data);
 	}
 }

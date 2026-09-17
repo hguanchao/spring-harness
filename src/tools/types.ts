@@ -59,6 +59,12 @@ export interface ToolSpec {
   name: string;
   description: string;
   schema: Record<string, unknown>;
+  /** 同一步可与其它 concurrencySafe 工具并行。缺省 exclusive（未知工具 fail-closed）。 */
+  concurrencySafe?: boolean;
+  /** explore 子代理可用。缺省否。 */
+  explore?: boolean;
+  /** 仅根会话可见。缺省否。 */
+  rootOnly?: boolean;
   /**
    * callId 是这次调用在主流程里的工具调用 id（并行执行时各不相同）。
    * 绝大多数工具用不到它；subagent 靠它把子任务块锚回调用行。

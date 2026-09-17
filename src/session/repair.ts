@@ -5,8 +5,7 @@
  * 原样发给上游会被判 400。这里只追加合成 error result，不改写已提交的前缀。
  */
 import { sessionEventData } from './fold.js';
-import type { JsonlSession } from './store.js';
-import type { SessionMessage, SessionRecord } from './types.js';
+import type { SessionMessage, SessionPort, SessionRecord } from './types.js';
 
 /**
  * 工具已记录、结果未落盘：可能已有副作用，禁止盲着重试。
@@ -40,7 +39,7 @@ export function findDanglingToolCalls(messages: readonly SessionMessage[]): Dang
  * 把悬挂的 tool_call 写成 tool 消息 + 失败事件，并同步推进 `messages` 镜像。
  * 返回补了几条；完整配对时为零。
  */
-export function repairDanglingTools(session: JsonlSession, messages: SessionMessage[]): number {
+export function repairDanglingTools(session: SessionPort, messages: SessionMessage[]): number {
   const dangling = findDanglingToolCalls(messages);
   for (const call of dangling) {
     session.appendMessage({
@@ -77,7 +76,7 @@ export function hasOpenTurn(records: readonly SessionRecord[]): boolean {
  * 崩溃尾：补悬挂工具结果，再关未结束的 turn。
  * 对齐 dsh interruptedTurnClosers——先 tool result，再 turn/end interrupted。
  */
-export function closeInterruptedTurn(session: JsonlSession, messages: SessionMessage[]): number {
+export function closeInterruptedTurn(session: SessionPort, messages: SessionMessage[]): number {
   const repaired = repairDanglingTools(session, messages);
   if (!hasOpenTurn(session.readAll())) return repaired;
   session.appendEvent('turn_end', { interrupted: true, depth: 0 });

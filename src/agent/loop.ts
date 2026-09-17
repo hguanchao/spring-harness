@@ -21,16 +21,16 @@ import { JobBoard, jobNotificationText, type JobRecord, type SubagentInbox } fro
 import type { SpillStore } from '../runtime/spill.js';
 import { TodoList } from '../runtime/todos.js';
 import { WorktreeStore } from '../runtime/worktrees.js';
-import type { SandboxHandle } from '../sandbox/open.js';
+import type { SandboxHandle } from '../sandbox/types.js';
 import { shellArgv } from '../sandbox/shell-bin.js';
 import { errorMessage } from '../util.js';
-import { createSession, JsonlSession } from '../session/store.js';
+import { jsonlSessionFactory } from '../session/store.js';
 import { foldSessionState, sessionEventData, type SessionFailure } from '../session/fold.js';
 import { lastAssistantMessage } from '../session/query.js';
 import { closeInterruptedTurn } from '../session/repair.js';
-import type { SessionMessage, SessionRecord } from '../session/types.js';
+import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../session/types.js';
 import { scanSkills } from '../skills/scan.js';
-import { EXPLORE_TOOLS, ROOT_ONLY_TOOLS, findTool, isConcurrencySafe, openaiTools, tools } from '../tools/index.js';
+import type { ToolRegistry } from '../tools/registry.js';
 import { FileObservation } from '../tools/observe.js';
 import { SUBAGENT_CONCURRENCY, type ToolContext, type ToolResult } from '../tools/types.js';
 import { subagentPrompt, type SubagentRole } from './subagent-prompt.js';
@@ -63,7 +63,10 @@ export interface RunTurnOptions {
   client: LlmClient;
   /** 当前模型名，写入系统提示词身份段。省略则身份段不写 Model。 */
   model?: string;
-  session: JsonlSession;
+  session: SessionPort;
+  tools: ToolRegistry;
+  /** 可注入会话工厂；省略用 JSONL。子代理 spawn / resume 走这里。 */
+  sessions?: SessionFactory;
   sandbox: SandboxHandle;
   approver: Approver;
   contextWindow: number;
@@ -97,6 +100,11 @@ export interface RunTurnOptions {
    * user 消息——投递到「下一个安全点」，不打断当前 LLM 调用。
    */
   inbox?: SubagentInbox;
+  /**
+   * 主轮次转向：TUI 在跑的时候 Enter 投进来，下一步工具批之前注入为 user。
+   * 和 inbox 分开，避免套「parent session」那套子代理措辞。
+   */
+  steering?: SubagentInbox;
   /** 子代理 worktree 隔离的工作树仓库；省略时按需新建（isolation: worktree 才用到）。 */
   worktrees?: WorktreeStore;
   /**
@@ -156,9 +164,13 @@ function parseArgs(raw: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+export type AgentDriver = (options: RunTurnOptions) => Promise<void>;
+
 export async function runTurn(options: RunTurnOptions): Promise<void> {
   const depth = options.depth ?? 0;
   const maxSubagentDepth = Math.max(0, Math.floor(options.maxSubagentDepth ?? 1));
+  const registry = options.tools;
+  const sessions = options.sessions ?? jsonlSessionFactory;
   const skills = scanSkills(options.workspaceRoot);
   for (const warning of skills.warnings) options.listener?.({ type: 'status', text: warning });
   const todos = options.todos ?? new TodoList();
@@ -300,7 +312,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (activeSubagentSessions.has(input.resumeFrom)) {
         throw new Error(`resume_from: subagent ${input.resumeFrom} is still running`);
       }
-      sourceRecords = new JsonlSession(options.session.dir, input.resumeFrom).readAll();
+      sourceRecords = sessions.open(options.session.dir, input.resumeFrom).readAll();
       if (sourceRecords.length === 0) {
         throw new Error(`resume_from: subagent session ${input.resumeFrom} not found`);
       }
@@ -332,7 +344,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       childWorkspaceRoot = resumedWorktree;
     }
 
-    const childSession = createSession(options.session.dir, childWorkspaceRoot, false);
+    const childSession = sessions.create(options.session.dir, childWorkspaceRoot, false);
     const subId = nextEventId('sub');
     const startedAt = Date.now();
     activeSubagentSessions.add(childSession.id);
@@ -408,9 +420,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       options.listener?.({ type: 'subagent_event', id: subId, event: event as SubagentEvent });
     };
 
-    const allowed = input.type === 'explore'
-      ? EXPLORE_TOOLS
-      : new Set(tools.map((tool) => tool.name).filter((name) => !ROOT_ONLY_TOOLS.has(name)));
+    const allowed = input.type === 'explore' ? registry.exploreNames() : registry.generalNames();
     let outcome: { ok: boolean; summary: string } = { ok: true, summary: '' };
     try {
       await runTurn({
@@ -419,6 +429,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         client: options.client,
         model: options.model,
         session: childSession,
+        tools: registry,
+        sessions,
         sandbox: options.sandbox,
         approver: options.approver,
         contextWindow: options.contextWindow,
@@ -578,6 +590,12 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     for (const text of options.inbox?.drain() ?? []) {
       appendMessage({ role: 'user', content: `[message from parent session — steering input, not a new task assignment]\n${text}` });
     }
+    for (const text of options.steering?.drain() ?? []) {
+      appendMessage({
+        role: 'user',
+        content: `[steering — additional direction for the current turn, not a new task]\n${text}`,
+      });
+    }
 
     // 触碰到的嵌套指令在进入下一次 LLM 请求前入列。措辞与逃逸同 system 里的项目指令一致，
     // 否则模型会按两套规则对待同一类内容。
@@ -604,7 +622,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         // stub 边界冻结：首次由投影回报，之后不再随轮次前移——前移一格就是一次
         // 历史中段改写，缓存从切点起全部作废。摘要落地时重置（摘要即新边界）。
         stubFromSession,
-        tools: openaiTools(allowed),
+        tools: registry.schemas(allowed),
         // 压缩摘要的花费也是真花钱，一样计入预算（未配 onAuxUsage 时也要计）。
         onUsage: (usage: TokenUsage) => {
           chargeTokens(usage.promptTokens, usage.completionTokens);
@@ -648,7 +666,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       try {
         reply = await options.client.complete(
           projected,
-          openaiTools(allowed),
+          registry.schemas(allowed),
           options.signal,
           (delta) => {
             if (delta.thinking) {
@@ -784,8 +802,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // 拒绝理由集中在一处判定：execute 只负责执行，提交由 runToolBatch 按模型序推进。
     const denyReason = (name: string, args: Record<string, unknown> = {}): string | undefined => {
       if (allowed && !allowed.has(name)) return `tool not allowed in this agent: ${name}`;
-      if (ROOT_ONLY_TOOLS.has(name) && depth > 0) return `tool only available to the root session: ${name}`;
-      if (!findTool(name)) return `unknown tool: ${name}`;
+      if (registry.isRootOnly(name) && depth > 0) return `tool only available to the root session: ${name}`;
+      if (!registry.find(name)) return `unknown tool: ${name}`;
       if (options.planMode?.active && PLAN_BLOCKED_TOOLS.has(name)) {
         if (name === 'subagent' && args.type === 'explore') return undefined;
         return planBlockedReason(name);
@@ -795,15 +813,16 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
     await runToolBatch({
       calls: parsedCalls,
-      isParallel: isConcurrencySafe,
+      isParallel: (name) => registry.isConcurrencySafe(name),
       signal: options.signal,
       onStart(call) {
+        options.session.appendEvent('tool_intent', { id: call.id, name: call.name, args: call.arguments });
         options.listener?.({ type: 'tool_start', name: call.name, id: call.id, args: call.arguments });
       },
       async execute(call) {
         const parseError = parseErrors.get(call.id);
         if (parseError) return { ok: false, content: `invalid tool arguments: ${parseError}` };
-        const tool = findTool(call.name);
+        const tool = registry.find(call.name);
         const denied = denyReason(call.name, call.arguments);
         let result: ToolResult;
         if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${call.name}` };

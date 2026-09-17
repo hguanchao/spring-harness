@@ -2,6 +2,31 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { assertInsideWorkspace, looksLikeText, TEXT_SNIFF_BYTES, toWorkspaceRelative } from '../workspace/boundary.js';
 import { asOptionalBool, asString, asStringOrEmpty, guardReadOnlyWrite, type ToolContext, type ToolResult, type ToolSpec } from './types.js';
 
+/** 磁盘原文的换行；read_file 会把 CRLF 收成 LF 再给模型。 */
+function fileNewline(text: string): '\r\n' | '\n' {
+  return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+function applyNewline(s: string, nl: '\r\n' | '\n'): string {
+  const lf = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return nl === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf;
+}
+
+/** 模型偶发把 read_file 的 `  12|` 前缀抄进 old_string。 */
+function stripReadPrefix(s: string): string {
+  return s.replace(/^[ \t]*\d+\|/gm, '');
+}
+
+function occurrences(text: string, needle: string): { first: number; count: number } {
+  const first = text.indexOf(needle);
+  if (first < 0) return { first: -1, count: 0 };
+  let count = 1;
+  for (let at = text.indexOf(needle, first + needle.length); at >= 0; at = text.indexOf(needle, at + needle.length)) {
+    count++;
+  }
+  return { first, count };
+}
+
 export const searchReplaceTool: ToolSpec = {
   name: 'search_replace',
   description: 'Replace an exact old_string in a workspace file — not sed or awk. Read the file first unless you created or edited it in this turn. old_string must match exactly once: when it is ambiguous, add surrounding lines to make it unique, or set replace_all to change every occurrence. The line-number prefix shown by read_file is not part of the file — match only the content after it.',
@@ -29,25 +54,34 @@ export const searchReplaceTool: ToolSpec = {
     const raw = readFileSync(abs);
     if (!looksLikeText(abs, raw.subarray(0, TEXT_SNIFF_BYTES))) return { ok: false, content: `refused binary file: ${rel}` };
     const text = raw.toString('utf8');
-    // 用 indexOf 计数：旧实现 split(oldString) 会为一次计数分配「所有出现位置」的数组，
-    // 在大文件里替换常见子串时内存开销与出现次数成正比。
-    const first = text.indexOf(oldString);
-    if (first < 0) return { ok: false, content: 'old_string not found' };
-    let count = 1;
-    for (let at = text.indexOf(oldString, first + oldString.length); at >= 0; at = text.indexOf(oldString, at + oldString.length)) {
-      count++;
+    const nl = fileNewline(text);
+    const needles = [applyNewline(oldString, nl)];
+    const stripped = stripReadPrefix(oldString);
+    if (stripped !== oldString) needles.push(applyNewline(stripped, nl));
+    let needle = needles[0]!;
+    let hit = occurrences(text, needle);
+    if (hit.first < 0 && needles[1]) {
+      needle = needles[1];
+      hit = occurrences(text, needle);
     }
-    if (count > 1 && !replaceAll) {
-      return { ok: false, content: `old_string matched ${count} times; pass replace_all or make it unique` };
+    if (hit.first < 0) {
+      return {
+        ok: false,
+        content: `old_string not found in ${rel}. Re-read the file and copy the exact text after the "  N|" prefix.`,
+      };
     }
+    if (hit.count > 1 && !replaceAll) {
+      return { ok: false, content: `old_string matched ${hit.count} times; pass replace_all or make it unique` };
+    }
+    const replacement = applyNewline(newString, nl);
     const next = replaceAll
-      ? text.replaceAll(oldString, newString)
-      : text.slice(0, first) + newString + text.slice(first + oldString.length);
+      ? text.replaceAll(needle, replacement)
+      : text.slice(0, hit.first) + replacement + text.slice(hit.first + needle.length);
     writeFileSync(abs, next, 'utf8');
     ctx.observation?.noteWritten(abs);
     return {
       ok: true,
-      content: `updated ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${replaceAll ? count : 1} replacement)`,
+      content: `updated ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${replaceAll ? hit.count : 1} replacement)`,
     };
   },
 };

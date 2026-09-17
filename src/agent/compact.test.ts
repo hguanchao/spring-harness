@@ -114,7 +114,8 @@ describe('stub 头尾预览', () => {
       client: explodingClient,
     });
     const stubbed = result.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c1');
-    assert.ok(stubbed?.content.includes('[compacted tool result]'));
+    assert.ok(stubbed);
+    assert.ok(stubbed.content.includes('[compacted tool result]'));
     assert.ok(stubbed.content.includes('...'));
     assert.ok(stubbed.content.length > 800);
   });

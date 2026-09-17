@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { spawnUnrestricted } from './host-spawn.js';
-import type { ConfinedSpawn, SandboxHandle, SpawnResult } from './open.js';
+import type { ConfinedSpawn, SandboxHandle, SpawnResult } from './types.js';
 import { SandboxError, type SandboxMode } from './types.js';
 
 export function linuxBwrapArgs(
@@ -11,9 +11,13 @@ export function linuxBwrapArgs(
   tempDir: string,
 ): string[] {
   const bindWs = mode === 'read-only' ? '--ro-bind' : '--bind';
+  const net = mode === 'read-only' || process.env.SPH_SANDBOX_NET === 'off' ? ['--unshare-net'] : [];
   return [
     '--die-with-parent',
     '--unshare-pid',
+    '--unshare-uts',
+    '--hostname', 'sph',
+    ...net,
     '--dev', '/dev',
     '--proc', '/proc',
     '--ro-bind', '/usr', '/usr',

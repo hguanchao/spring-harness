@@ -15,7 +15,8 @@ export type AppKeybinding =
   | 'app.clear'
   | 'app.tools.expand'
   | 'app.command'
-  | 'app.help';
+  | 'app.help'
+  | 'app.followUp';
 
 export interface AppKeybindingDefinition {
   /** 主键位（用于提示文案）。 */
@@ -30,6 +31,7 @@ export const APP_KEYBINDINGS: Record<AppKeybinding, AppKeybindingDefinition> = {
   'app.tools.expand': { keys: ['ctrl+o'], description: 'expand tool output' },
   'app.command': { keys: ['ctrl+p'], description: 'commands' },
   'app.help': { keys: ['f1'], description: 'help' },
+  'app.followUp': { keys: ['alt+enter'], description: 'queue a follow-up for after this turn' },
 };
 
 /** 判断一次原始按键输入是否命中某个应用动作。 */

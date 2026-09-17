@@ -2,28 +2,16 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sphHome } from '../home.js';
-import { SandboxError, type SandboxMode, type SandboxStatus } from './types.js';
+import {
+  SandboxError,
+  type ConfinedSpawn,
+  type SandboxHandle,
+  type SandboxMode,
+  type SandboxStatus,
+  type SpawnResult,
+} from './types.js';
 
-export interface ConfinedSpawn {
-  command: string;
-  args: string[];
-  cwd: string;
-  timeoutMs: number;
-  signal?: AbortSignal;
-}
-
-export interface SpawnResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-}
-
-export interface SandboxHandle {
-  status: SandboxStatus;
-  tempDir: string;
-  run(spawn: ConfinedSpawn): Promise<SpawnResult>;
-  dispose(): void;
-}
+export type { ConfinedSpawn, SandboxHandle, SpawnResult } from './types.js';
 
 class OffSandbox implements SandboxHandle {
   readonly status: SandboxStatus = { mode: 'off', enforcement: 'none', platform: process.platform };

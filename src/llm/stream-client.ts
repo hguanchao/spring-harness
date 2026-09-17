@@ -11,7 +11,7 @@ import { ContextOverflowError } from './errors.js';
 import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
 import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
 import { postSseStream } from './sse.js';
-import { backoffMs, RetryableError, sleepAbortable, StreamClosedError } from './retry.js';
+import { backoffMs, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../util.js';
 
 /** 一个上游协议的静态差异：端点、鉴权头、请求体编码、SSE 事件解码。 */
@@ -185,7 +185,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             continue;
           }
           // 字段已经剥完：空 SSE 按传输抖动退避，不再立刻失败。
-          if (error instanceof StreamClosedError || !(error instanceof RetryableError) || transportTries >= maxRetries) {
+          if (!(error instanceof RetryableError) || transportTries >= maxRetries) {
             throw error;
           }
           transportTries++;

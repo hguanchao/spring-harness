@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { postSseStream } from './sse.js';
-import { RetryableError, StreamClosedError } from './retry.js';
+import { RetryableError } from './retry.js';
 
 describe('postSseStream network error', () => {
   it('fetch failed 带上 cause.code，方便对照代理/TLS', async () => {
@@ -109,28 +109,52 @@ describe('postSseStream first-byte timeout', () => {
   });
 });
 
+async function collectSse(body: string): Promise<string[]> {
+  const original = globalThis.fetch;
+  const payloads: string[] = [];
+  globalThis.fetch = (async () =>
+    new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch;
+  try {
+    await postSseStream({
+      url: 'http://example.invalid/v1/responses',
+      headers: {},
+      body: '{}',
+      onData: (payload) => payloads.push(payload),
+    });
+    return payloads;
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
 describe('postSseStream without [DONE]', () => {
-  it('有 data 但流干净结束且没有 [DONE] 抛 StreamClosedError', async () => {
-    const original = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(
-        `data: ${JSON.stringify({ choices: [{ delta: { content: 'x' } }] })}\n\n`,
-        { headers: { 'content-type': 'text/event-stream' } },
-      )) as typeof fetch;
-    try {
-      await assert.rejects(
-        () =>
-          postSseStream({
-            url: 'http://example.invalid/v1/chat',
-            headers: {},
-            body: '{}',
-            onData: () => {},
-          }),
-        (error: unknown) => error instanceof StreamClosedError,
-      );
-    } finally {
-      globalThis.fetch = original;
-    }
+  it('有 data 但流干净结束且没有 [DONE] 视为完成', async () => {
+    const payloads = await collectSse(`data: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+    assert.deepEqual(payloads, [JSON.stringify({ type: 'response.completed' })]);
+  });
+
+  it('event: 补 type，末帧无空行也 dispatch', async () => {
+    const payloads = await collectSse(
+      'event: response.output_text.delta\ndata: {"delta":"hi"}\n\nevent: response.completed\ndata: {}',
+    );
+    assert.equal(JSON.parse(payloads[0] ?? '').type, 'response.output_text.delta');
+    assert.equal(JSON.parse(payloads[0] ?? '').delta, 'hi');
+    assert.equal(JSON.parse(payloads[1] ?? '').type, 'response.completed');
+  });
+
+  it('event: response.completed 无 data 也算完成', async () => {
+    const payloads = await collectSse(
+      'event: response.output_text.delta\ndata: {"delta":"x"}\n\nevent: response.completed\n\n',
+    );
+    assert.equal(JSON.parse(payloads[1] ?? '').type, 'response.completed');
+  });
+
+  it('NDJSON 无 data: 前缀也能收下', async () => {
+    const payloads = await collectSse(
+      `${JSON.stringify({ choices: [{ delta: { content: 'a' } }] })}\n${JSON.stringify({ choices: [{ delta: { content: 'b' }, finish_reason: 'stop' }] })}\n`,
+    );
+    assert.equal(payloads.length, 2);
+    assert.equal(JSON.parse(payloads[1] ?? '').choices[0].finish_reason, 'stop');
   });
 });
 

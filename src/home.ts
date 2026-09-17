@@ -32,3 +32,8 @@ export function sphModelsPath(): string {
 export function sphSpillRoot(): string {
   return underHome('spill');
 }
+
+/** 用户主题：`{ "primary": "#9d7cd8", ... }` 覆盖 PALETTE 里同名键。 */
+export function sphThemePath(): string {
+  return underHome('theme.json');
+}

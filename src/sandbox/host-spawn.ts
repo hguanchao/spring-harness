@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { capSpawnOutput, scrubbedParentEnv } from './env.js';
-import type { ConfinedSpawn, SpawnResult } from './open.js';
+import type { ConfinedSpawn, SpawnResult } from './types.js';
 
 export function spawnUnrestricted(options: ConfinedSpawn): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {

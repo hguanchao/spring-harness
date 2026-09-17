@@ -3,7 +3,7 @@
 import type { ReadableStreamDefaultReader, ReadableStreamReadResult } from 'node:stream/web';
 import { formatFetchError, flattenWhitespace } from '../util.js';
 import { classifyHttpError, llmError } from './errors.js';
-import { isRetryableStatus, RetryableError, retryAfterMs, StreamClosedError } from './retry.js';
+import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
 
 /** 两次 SSE chunk 之间的默认空闲上限。交互 CLI 比 grok 的 300s 更短，避免 TUI 挂死。 */
 export const SSE_IDLE_TIMEOUT_MS = 120_000;
@@ -59,17 +59,52 @@ function emptyStreamError(contentType: string, hint: string): RetryableError {
   );
 }
 
-function deliverSseLine(line: string, onData: (payload: string) => void): boolean {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('data:')) return false;
-  const payload = trimmed.slice(5).trim();
-  if (!payload) return false;
-  onData(payload);
-  return true;
+/** SSE 字段名大小写敏感；冒号后可选一个空格。 */
+function sseField(line: string, name: string): string | undefined {
+  if (!line.startsWith(name)) return undefined;
+  if (line.length === name.length) return '';
+  if (line[name.length] !== ':') return undefined;
+  const value = line.slice(name.length + 1);
+  return value.startsWith(' ') ? value.slice(1) : value;
 }
 
-function isDonePayload(payload: string): boolean {
-  return payload.trim() === '[DONE]';
+/**
+ * 把一帧 SSE 收成 adapter 能吃的 payload。
+ *
+ * grok-build / 官方 Responses 把事件名放在 `event:`，JSON 里未必再写 `type`。
+ * 只认 `data:` 且强求 `[DONE]` 时，中转站正常关流就会报 STREAM_CLOSED。
+ */
+function materializeSse(event: string | undefined, data: string): string | undefined {
+  const payload = data.trim();
+  const kind = event?.trim();
+  if (payload === '[DONE]' || kind === '[DONE]') return '[DONE]';
+  if (payload) {
+    if (!kind || !payload.startsWith('{')) return payload;
+    try {
+      const row = JSON.parse(payload) as Record<string, unknown>;
+      if (row && typeof row === 'object' && !Array.isArray(row) && typeof row.type !== 'string') {
+        row.type = kind;
+        return JSON.stringify(row);
+      }
+    } catch {
+      return payload;
+    }
+    return payload;
+  }
+  if (kind === 'response.completed' || kind === 'response.incomplete' || kind === 'response.failed' || kind === 'message_stop') {
+    return JSON.stringify({ type: kind });
+  }
+  return undefined;
+}
+
+function looksLikeJsonValue(line: string): boolean {
+  if (!(line.startsWith('{') || line.startsWith('['))) return false;
+  try {
+    JSON.parse(line);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function postSseStream(params: SseStreamParams): Promise<void> {
@@ -121,9 +156,44 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
   const firstByteMs = params.firstByteTimeoutMs ?? SSE_FIRST_BYTE_TIMEOUT_MS;
   let buffer = '';
   let sawData = false;
-  let sawDone = false;
   let sample = '';
   let gotByte = false;
+  let eventName: string | undefined;
+  let dataLines: string[] = [];
+  const emit = (payload: string): void => {
+    params.onData(payload);
+    sawData = true;
+  };
+  const dispatch = (): void => {
+    const payload = materializeSse(eventName, dataLines.join('\n'));
+    eventName = undefined;
+    dataLines = [];
+    if (payload !== undefined) emit(payload);
+  };
+  const handleLine = (line: string): void => {
+    if (line === '') {
+      dispatch();
+      return;
+    }
+    if (line.startsWith(':')) return;
+    const event = sseField(line, 'event');
+    if (event !== undefined) {
+      eventName = event;
+      return;
+    }
+    const data = sseField(line, 'data');
+    if (data !== undefined) {
+      dataLines.push(data);
+      return;
+    }
+    if (sseField(line, 'id') !== undefined || sseField(line, 'retry') !== undefined) return;
+    const trimmed = line.trim();
+    if (looksLikeJsonValue(trimmed)) {
+      emit(trimmed);
+      return;
+    }
+    if (!sawData && trimmed && sample.length < 256_000) sample += `${trimmed}\n`;
+  };
   try {
     for (;;) {
       const waitMs = gotByte || idleMs <= 0 ? idleMs : Math.min(idleMs, firstByteMs);
@@ -133,18 +203,11 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
       if (buffer.charCodeAt(0) === 0xfeff) buffer = buffer.slice(1);
       const lines = buffer.split(/\r?\n/);
       buffer = done ? '' : (lines.pop() ?? '');
-      for (const line of lines) {
-        if (deliverSseLine(line, (payload) => {
-          if (isDonePayload(payload)) sawDone = true;
-          params.onData(payload);
-        })) {
-          sawData = true;
-          continue;
-        }
-        const trimmed = line.trim();
-        if (!sawData && trimmed && sample.length < 256_000) sample += `${trimmed}\n`;
+      for (const line of lines) handleLine(line);
+      if (done) {
+        dispatch();
+        break;
       }
-      if (done) break;
     }
     if (!sawData) {
       const raw = sample.trim();
@@ -154,8 +217,8 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
       }
       throw emptyStreamError(contentType, flattenWhitespace(raw) || '(empty body)');
     }
-    // 对齐 dsh parseSse：流正常结束但没 [DONE] → STREAM_CLOSED，不是成功完成。
-    if (!sawDone) throw new StreamClosedError();
+    // 有 data 就收工。`[DONE]` 只是 chat.completions 习惯哨兵，Responses /
+    // Anthropic / 中转站经常直接关连接。真断流走 idle timeout 或 fetch 失败。
   } finally {
     // 提前退出（idle 超时 / onData 抛错 / 取消）时流还没读完：不 cancel 的话 undici 会把这条
     // 连接一直占着直到超时。重试与参数降级都可能连发多次请求，泄漏会按请求数累积。

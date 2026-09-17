@@ -1,10 +1,11 @@
 /**
  * 主题：命名色板编译成 ANSI，组件只按名字取色。
- * 色板是编译期常量（见 palettes.ts），不读盘、不切换、不热加载。
+ * 默认色板在 palettes.ts；`~/.sph/theme.json` 可覆盖同名 hex。
  */
 
+import { existsSync, readFileSync } from 'node:fs';
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from '../core/index.js';
-import { PALETTE, type ThemeColor } from './palettes.js';
+import { overlayPalette, PALETTE, type ThemeColor } from './palettes.js';
 
 export type { ThemeColor };
 /**
@@ -124,7 +125,7 @@ const ANSI_FG: Record<string, string> = {
   muted: '90', dim: '90', border: '90', borderMuted: '90',
   toolTitle: '90', toolOutput: '90', mdCodeBlock: '90', mdCodeBlockBorder: '90',
   mdQuote: '90', mdQuoteBorder: '90', mdHr: '90', mdLinkUrl: '90', scrollbarTrack: '90',
-  mdLink: '97', mdCode: '94',
+  mdLink: '97', mdCode: '94', plan: '94',
   success: '92', error: '91', warning: '93',
 };
 
@@ -155,6 +156,13 @@ export class Theme {
   private readonly bgColors = new Map<string, string>();
 
   constructor(palette: Record<string, string>, mode: ColorMode = detectColorMode()) {
+    this.recompile(palette, mode);
+  }
+
+  /** 读完 ~/.sph/theme.json 后重编译，不必重建单例。 */
+  recompile(palette: Record<string, string>, mode: ColorMode = detectColorMode()): void {
+    this.fgColors.clear();
+    this.bgColors.clear();
     if (mode === 'ansi') {
       // 与 truecolor 分支同语义：无条件预编译（NO_COLOR 的历史缺口两者共有，不在此处单边修）。
       for (const key of Object.keys(palette)) {
@@ -206,6 +214,19 @@ export class Theme {
 }
 
 export const theme = new Theme(PALETTE);
+
+/** 启动时读 ~/.sph/theme.json，覆盖色板后重编译。坏文件静默忽略。 */
+export function loadUserTheme(path: string): void {
+  if (!existsSync(path)) return;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    overlayPalette(parsed as Record<string, unknown>);
+    theme.recompile(PALETTE);
+  } catch {
+    // 主题是装饰；配错不该挡启动。
+  }
+}
 
 /** OSC 11 用真 hex，256 色终端也能拿到 #141414，不跟 SGR 量化走。 */
 export function oscSetCanvasBackground(): string {

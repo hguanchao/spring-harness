@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { TuiAltScreen } from './core/tui-alt-screen.js';
 import type { Terminal } from './core/terminal.js';
-import { showMessageDialog } from './dialogs.js';
+import { showMessageDialog, showSelectDialog } from './dialogs.js';
 import { PALETTE } from './theme/palettes.js';
 import { theme } from './theme/theme.js';
 import { renderMcpReport, renderSkillsReport } from './reports.js';
@@ -117,6 +117,41 @@ describe('上报弹窗的真实渲染', () => {
     assert.ok(seq.length > 0, 'mdText 应产出前景色序列');
     assert.ok(screen.includes(seq), '弹窗正文应使用主题白，而不是终端默认前景');
     assert.doesNotMatch(screen, /\x1b\[38;2;204;204;204m/);
+  });
+
+  it('选择框正文走主题白，长文可滚而不是截成省略号', async () => {
+    const terminal = new FakeTerminal();
+    terminal.rows = 18;
+    terminal.columns = 80;
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const rows = Array.from({ length: 40 }, (_, i) => `PLANROW-${String(i + 1).padStart(2, '0')}`);
+      const pending = showSelectDialog(ui, {
+        title: 'Plan',
+        bodyText: rows.join('\n\n'),
+        items: [
+          { value: 'approve', label: 'Approve' },
+          { value: 'revise', label: 'Keep planning' },
+        ],
+        maxVisible: 2,
+        maxHeight: '80%',
+      });
+      ui.renderNow(true);
+      const first = terminal.screen();
+      const painted = theme.fg('mdText', 'x');
+      const seq = painted.slice(0, painted.indexOf('x'));
+      assert.ok(first.includes(seq), '计划正文应使用主题白 mdText');
+      assert.match(first, /PLANROW-01/);
+      assert.doesNotMatch(first, /PLANROW-40/);
+      terminal.send('\x1b[F');
+      ui.renderNow(true);
+      assert.match(terminal.screen(), /PLANROW-40/);
+      terminal.send('\x1b');
+      await pending;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
   });
 
   it('Esc 能关掉弹窗（Promise 会 resolve，不会挂住界面）', async () => {

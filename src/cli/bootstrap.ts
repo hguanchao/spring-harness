@@ -12,9 +12,9 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { anthropicAdapter } from '../llm/anthropic.js';
-import { openaiAdapter, type ReasoningEffort } from '../llm/openai.js';
-import type { LlmClient } from '../llm/openai.js';
+import { openaiAdapter, type LlmClient, type ReasoningEffort } from '../llm/openai.js';
 import { responsesAdapter } from '../llm/responses.js';
+import type { ProtocolAdapter } from '../llm/stream-client.js';
 import { createSseClient } from '../llm/stream-client.js';
 import { readModelMeta } from '../llm/model-cache.js';
 import { McpHub, type McpReloadResult } from '../mcp/hub.js';
@@ -22,14 +22,19 @@ import { discoverMcpServers, type McpPreferences, type McpSourceReport } from '.
 import { JobBoard } from '../runtime/jobs.js';
 import { TodoList } from '../runtime/todos.js';
 import { WorktreeStore } from '../runtime/worktrees.js';
-import { openSandbox, type SandboxHandle } from '../sandbox/open.js';
-import { SandboxError, type SandboxMode } from '../sandbox/types.js';
+import { openSandbox } from '../sandbox/open.js';
+import { SandboxError, type SandboxHandle, type SandboxMode } from '../sandbox/types.js';
 import { acquireSessionLock, SessionLockedError } from '../session/lock.js';
 import { sessionDirFor } from '../session/path.js';
-import { resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
+import { jsonlSessionFactory, resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
+import type { SessionFactory } from '../session/types.js';
+import { runTurn, type AgentDriver } from '../agent/loop.js';
+import { defaultTools } from '../tools/index.js';
+import type { ToolRegistry } from '../tools/registry.js';
 import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
 import type { CompatProfile } from '../llm/compat.js';
 import { applyProxy } from '../net/proxy.js';
+import { mergePresetHeaders } from '../llm/presets.js';
 import { sphConfigPath } from '../home.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
 
@@ -64,13 +69,22 @@ export interface ClientOptions {
   compat?: CompatProfile;
 }
 
+const adapters = new Map<ApiProtocol, ProtocolAdapter>([
+  ['chat-completions', openaiAdapter],
+  ['responses', responsesAdapter],
+  ['anthropic-messages', anthropicAdapter],
+]);
+
+/** 注册或覆盖一种上游协议适配器。同名后写覆盖前写。 */
+export function registerAdapter(api: ApiProtocol, adapter: ProtocolAdapter): void {
+  adapters.set(api, adapter);
+}
+
 /** 按上游协议构造 client；三种协议共享同一 LlmClient 面，loop 无感知。 */
 export function createClient(options: ClientOptions): LlmClient {
   const { api, ...conn } = options;
-  // 三分支只在 adapter 上不同,连接参数(含 headers / promptCache)原样透传,故先选 adapter 再构造一次。
-  const adapter = api === 'anthropic-messages'
-    ? anthropicAdapter
-    : api === 'responses' ? responsesAdapter : openaiAdapter;
+  const adapter = adapters.get(api);
+  if (!adapter) throw new Error(`unknown api protocol: ${api}`);
   return createSseClient(adapter, conn);
 }
 
@@ -112,6 +126,9 @@ export interface Runtime {
   configPath: string;
   sandbox: SandboxHandle;
   session: JsonlSession;
+  tools: ToolRegistry;
+  sessions: SessionFactory;
+  driver: AgentDriver;
   mcp: McpHub;
   /** 可变容器：`/mcps` 刷新后就地替换内容，持有者无需重新取。 */
   mcpWarnings: string[];
@@ -295,6 +312,9 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     configPath: sphConfigPath(),
     sandbox,
     session,
+    tools: defaultTools,
+    sessions: jsonlSessionFactory,
+    driver: runTurn,
     mcp,
     mcpWarnings,
     todos,
@@ -306,14 +326,15 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       release = next;
     },
     makeClient(overrides) {
+      const baseUrl = overrides.baseUrl ?? config.baseUrl;
       return createClient({
-        baseUrl: overrides.baseUrl ?? config.baseUrl,
+        baseUrl,
         apiKey: overrides.apiKey ?? config.apiKey,
         model: overrides.model,
         api: overrides.api,
         reasoningEffort: overrides.effort,
         maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
-        headers: config.httpHeaders,
+        headers: mergePresetHeaders(baseUrl, config.httpHeaders),
         promptCache: config.promptCache,
         sessionId: session.id,
         compat: config.compat,
@@ -332,7 +353,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         // max_tokens 只在同源时继承：不同厂商的输出上限不同，把主模型的限额发给别人的模型
         // 会直接 400。跨端点时交给端点默认值（anthropic 适配层自带 8192 兜底）。
         maxTokens: sharesMainEndpoint ? config.maxTokens : undefined,
-        headers: config.httpHeaders,
+        headers: mergePresetHeaders(config.aux?.baseUrl ?? config.baseUrl, config.httpHeaders),
         promptCache: config.promptCache,
         sessionId: session.id,
         // 跨端点时用 [aux.compat]；同源则复用主 [compat]。

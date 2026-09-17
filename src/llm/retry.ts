@@ -24,17 +24,6 @@ export class RetryableError extends Error {
   }
 }
 
-/**
- * SSE 干净结束但没有 [DONE]。对齐 dsh `STREAM_CLOSED`：不是 socket 抖动，
- * 默认不按传输失败重打（半截内容不可信，但再发同一请求也常得到同一截断）。
- */
-export class StreamClosedError extends Error {
-  constructor(message = 'LLM stream ended without [DONE]') {
-    super(message);
-    this.name = 'StreamClosedError';
-  }
-}
-
 /** 429/408/5xx 与网络层异常可重试；鉴权、参数类 4xx 重试无意义。 */
 export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;

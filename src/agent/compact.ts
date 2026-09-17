@@ -1,6 +1,5 @@
 import type { LlmClient, ChatMessage, TokenUsage } from '../llm/openai.js';
-import type { SessionMessage } from '../session/types.js';
-import { parseSessionLine, type JsonlSession } from '../session/store.js';
+import type { SessionMessage, SessionPort } from '../session/types.js';
 
 /** 最近 K 轮原文不动。一轮 = 一对 user/assistant（含其间 tool）。 */
 const KEEP_RECENT_TURNS = 4;
@@ -279,15 +278,12 @@ function dropOldestTurn(list: ChatMessage[]): ChatMessage[] | undefined {
   return [...list.slice(0, from), ...list.slice(to)];
 }
 
-/** 倒序扫描；先用子串预筛，只有疑似 compaction 事件才付出 JSON.parse 的代价。 */
-function latestCompaction(session: JsonlSession): CompactionEvent | undefined {
-  const lines = session.readLines();
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    // 预筛：整表 JSON.parse 是这里唯一的开销，绝大多数行与本题无关。
-    if (!line.includes('"compaction"')) continue;
-    const record = parseSessionLine(line);
-    if (!record || record.type !== 'event' || record.kind !== 'compaction') continue;
+/** 倒序找最近一次压缩事件。走 SessionPort.readAll，内存会话也能恢复。 */
+function latestCompaction(session: SessionPort): CompactionEvent | undefined {
+  const records = session.readAll();
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (record.type !== 'event' || record.kind !== 'compaction') continue;
     const summary = record.data.summary;
     const covered = record.data.covered;
     if (typeof summary === 'string' && typeof covered === 'number') {
@@ -510,6 +506,6 @@ export async function projectContext(options: {
 }
 
 /** turn 启动时从会话文件恢复最近一次压缩状态。 */
-export function loadCompaction(session: JsonlSession): CompactionEvent | undefined {
+export function loadCompaction(session: SessionPort): CompactionEvent | undefined {
   return latestCompaction(session);
 }

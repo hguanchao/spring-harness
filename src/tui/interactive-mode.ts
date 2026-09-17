@@ -15,7 +15,12 @@
 import { join } from 'node:path';
 import type { AgentListener, SubagentEvent } from '../agent/events.js';
 import { loadCompaction } from '../agent/compact.js';
-import { runTurn } from '../agent/loop.js';
+import { loadUserTheme } from './theme/theme.js';
+import { sphThemePath } from '../home.js';
+
+import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
+import type { SubagentInbox } from '../runtime/jobs.js';
+import { runTurn, type AgentDriver } from '../agent/loop.js';
 import { TouchMemory } from '../agent/memory.js';
 import { buildSystemPrompt } from '../agent/prompt.js';
 import {
@@ -49,7 +54,7 @@ import { jobNotificationText } from '../runtime/jobs.js';
 import type { WorktreeStore } from '../runtime/worktrees.js';
 import { SpillStore } from '../runtime/spill.js';
 import type { TodoList } from '../runtime/todos.js';
-import type { SandboxHandle } from '../sandbox/open.js';
+import type { SandboxHandle } from '../sandbox/types.js';
 import {
   foldSessionState,
   sessionEventData,
@@ -58,10 +63,13 @@ import {
 import { messagesOf } from '../session/query.js';
 import {
   createSession,
+  jsonlSessionFactory,
   JsonlSession,
   listSessions,
   setCurrentSession,
 } from '../session/store.js';
+import type { SessionFactory } from '../session/types.js';
+import { defaultTools, type ToolRegistry } from '../tools/index.js';
 import { closeInterruptedTurn } from '../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../session/types.js';
 import {
@@ -169,6 +177,10 @@ export interface TuiDeps {
   worktrees?: WorktreeStore;
   /** 把会话锁换到另一个 id；失败时抛错，当前会话仍占用。 */
   claimSession?(id: string): void;
+  /** 可注入工具表 / 会话工厂 / 驱动；省略走产品默认。 */
+  tools?: ToolRegistry;
+  sessions?: SessionFactory;
+  driver?: AgentDriver;
   /** 注入终端实现；省略用 ProcessTerminal（测试用假终端驱动整条链路）。 */
   terminal?: Terminal;
   /**
@@ -197,6 +209,7 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
   { id: 'approval', label: '/approval', hint: 'Set approval mode: ask | auto | yolo' },
+  { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
 ];
 
 /** 选择列表里 server 条目的 value 前缀，避免和上方的固定动作条目撞名。 */
@@ -239,6 +252,7 @@ function subagentActivity(event: SubagentEvent): string | undefined {
 
 /** 交互模式入口。 */
 export async function runTui(deps: TuiDeps): Promise<void> {
+  loadUserTheme(sphThemePath());
   const mode = new InteractiveMode(deps);
   await mode.run();
 }
@@ -264,6 +278,20 @@ class InteractiveMode implements ApprovalUi {
 
   private session: JsonlSession;
   private client: LlmClient;
+  private readonly turnInbox: SubagentInbox = (() => {
+    let queue: string[] = [];
+    return {
+      push(text: string) {
+        queue.push(text);
+      },
+      drain() {
+        const out = queue;
+        queue = [];
+        return out;
+      },
+    };
+  })();
+  private followUps: string[] = [];
   private readonly approver: InteractiveApprover;
   /** 压缩摘要专用 client（config.compact_model）；未配置为 undefined，runTurn 回退主 client。 */
   private readonly compactClient?: LlmClient;
@@ -388,7 +416,7 @@ class InteractiveMode implements ApprovalUi {
       paddingX: 1,
       autocompleteMaxVisible: 8,
     });
-    this.applyApprovalBorder();
+    this.applyEditorBorder();
 
     this.documentContainer.addChild(this.headerContainer);
     this.documentContainer.addChild(this.chatContainer);
@@ -469,6 +497,12 @@ class InteractiveMode implements ApprovalUi {
     this.editor.onSubmit = (text) => {
       void this.handleSubmit(text);
     };
+    this.editor.onAction('app.followUp', () => {
+      const text = this.editor.getText().trim();
+      if (text === '' || text.startsWith('/')) return;
+      this.editor.setText('');
+      this.queueFollowUp(text);
+    });
     // 点转录区会把焦点从输入框拿走；任意按键再抢回来，Esc / 输入仍可用。
     this.ui.addInputListener((data) => {
       if (this.ui.getFocusedComponent()) return undefined;
@@ -523,7 +557,9 @@ class InteractiveMode implements ApprovalUi {
     const messages = messagesOf(records);
     if (closeInterruptedTurn(this.session, messages) > 0) records = this.session.readAll();
 
-    this.replayRecords(records);
+    const view = this.session.readPath();
+    this.replayRecords(view.length > 0 ? view : records);
+    this.applyEditorBorder();
     this.pinLatestUserMessage();
     const messageCount = messagesOf(records).length;
     if (messageCount > 0) {
@@ -662,10 +698,17 @@ class InteractiveMode implements ApprovalUi {
       return;
     }
     if (this.running) {
-      this.addNotice('A turn is already running — press Esc to interrupt.', 'warn');
+      this.turnInbox.push(text);
+      this.addNotice('Queued steering — delivered after the current model/tool step.', 'dim');
       return;
     }
     await this.executeTurn(text, true);
+  }
+
+  private queueFollowUp(text: string): void {
+    this.followUps.push(text);
+    this.addNotice(`Queued follow-up (${this.followUps.length}) — runs after this turn.`, 'dim');
+    this.ui.requestRender();
   }
 
   private async executeTurn(prompt: string, rewindable = false): Promise<void> {
@@ -690,12 +733,14 @@ class InteractiveMode implements ApprovalUi {
     this.setActivity(WorkingLabel.working);
 
     try {
-      await runTurn({
+      await (this.deps.driver ?? runTurn)({
         prompt,
         workspaceRoot: this.deps.workspaceRoot,
         client: this.client,
         model: this.model,
         session: this.session,
+        tools: this.deps.tools ?? defaultTools,
+        sessions: this.deps.sessions ?? jsonlSessionFactory,
         sandbox: this.deps.sandbox,
         approver: this.approver,
         contextWindow: this.contextWindow,
@@ -709,6 +754,7 @@ class InteractiveMode implements ApprovalUi {
         jobs: this.deps.jobs,
         memory: new TouchMemory(this.deps.workspaceRoot),
         worktrees: this.deps.worktrees,
+        steering: this.turnInbox,
         goal: this.goal,
         lastFailure: this.lastFailure,
         planMode: this.plan,
@@ -734,6 +780,7 @@ class InteractiveMode implements ApprovalUi {
         this.editor.setText(rewind);
         this.pinLatestUserMessage();
       }
+      const follow = !controller.signal.aborted && rewind === undefined ? this.followUps.shift() : undefined;
       // 空闲计时从轮次收尾算起：一轮跑两分钟不该把那两分钟算成「用户离开」。
       this.lastActivityAt = Date.now();
       this.setStatusIndicator(undefined);
@@ -751,6 +798,7 @@ class InteractiveMode implements ApprovalUi {
       // 竞态收口：通知在轮次收尾瞬间到达时，onTaskDone 回调已被 running 挡掉，
       // 这里补一次 drain——否则结果要滞留到用户下一次发言才被注入。
       this.wakeForCompletedJobs();
+      if (follow) void this.executeTurn(follow, true);
     }
   }
 
@@ -920,6 +968,8 @@ class InteractiveMode implements ApprovalUi {
           this.paint('dock');
           return;
         }
+        // 模型经 enter_plan_mode 改的是 this.plan.active，边框要立刻跟上。
+        if (event.text.startsWith('Plan mode ')) this.applyEditorBorder();
         this.addNotice(event.text, event.level ?? 'dim');
         this.paint('transcript');
         return;
@@ -1287,7 +1337,6 @@ class InteractiveMode implements ApprovalUi {
       approvalMode: this.approval,
       sandboxMode: this.deps.sandbox.status.mode,
       mcpServerCount: this.deps.mcp.listServers().length,
-      planMode: this.plan.active,
     };
   }
 
@@ -1300,7 +1349,6 @@ class InteractiveMode implements ApprovalUi {
       contextWindow: this.contextWindow,
       contextTokens: this.contextTokens,
       usage: this.usage,
-      planMode: this.plan.active,
     };
   }
 
@@ -1393,6 +1441,9 @@ class InteractiveMode implements ApprovalUi {
       case 'approval':
         await this.commandApproval(argument);
         break;
+      case 'export':
+        await this.commandExport(argument);
+        break;
       case 'exit':
         this.quit();
         break;
@@ -1413,6 +1464,8 @@ class InteractiveMode implements ApprovalUi {
     lines.push('- `Ctrl+O` — expand or collapse tool output');
     lines.push('- `Ctrl+P` — open the command palette');
     lines.push('- `/` — slash-command autocomplete in the editor');
+    lines.push('- `Enter` while a turn is running — queue steering (injected after the current step)');
+    lines.push('- `Alt+Enter` — queue a follow-up that starts after this turn');
     await showMessageDialog(this.ui, { title: 'Help', text: lines.join('\n') });
   }
 
@@ -1629,9 +1682,23 @@ class InteractiveMode implements ApprovalUi {
     this.goal = undefined;
     this.lastFailure = undefined;
     this.plan.active = false;
+    this.applyEditorBorder();
     this.resetRecapState();
     this.refreshCounters();
     this.addNotice(`Started session ${this.session.id}`, 'success');
+  }
+
+  private async commandExport(argument: string): Promise<void> {
+    const format = argument === 'json' || argument === 'html' ? argument : 'md';
+    const body = format === 'json'
+      ? exportJson(this.session)
+      : format === 'html'
+        ? exportHtml(this.session)
+        : exportMarkdown(this.session);
+    await showMessageDialog(this.ui, {
+      title: `Export (${format})`,
+      text: `\`\`\`\n${body.slice(0, 12_000)}${body.length > 12_000 ? '\n…' : ''}\n\`\`\``,
+    });
   }
 
   /**
@@ -1864,6 +1931,7 @@ class InteractiveMode implements ApprovalUi {
       return;
     }
     this.plan.active = active;
+    this.applyEditorBorder();
     this.session.appendEvent('plan_mode', sessionEventData.planMode(active));
     this.addNotice(
       active
@@ -1890,11 +1958,9 @@ class InteractiveMode implements ApprovalUi {
   }
 
   private async reviewPlan(plan: string, title: string): Promise<{ approved: boolean; feedback?: string }> {
-    const lines = plan.split('\n');
-    const preview = lines.length > 28 ? `${lines.slice(0, 28).join('\n')}\n…` : plan;
     const choice = await showSelectDialog(this.ui, {
       title,
-      bodyText: preview,
+      bodyText: plan,
       items: [
         { value: 'approve', label: 'Approve', description: 'Leave plan mode and carry out the plan' },
         { value: 'revise', label: 'Keep planning', description: 'Stay in plan mode; optional feedback next' },
@@ -2049,7 +2115,7 @@ class InteractiveMode implements ApprovalUi {
 
   private applyApproval(mode: ApprovalMode): void {
     this.approval = mode;
-    this.applyApprovalBorder();
+    this.applyEditorBorder();
     const error = this.writeConfig({ approval: mode });
     this.addNotice(
       error ? `Approval mode set to ${mode} (config write failed: ${error})` : `Approval mode set to ${mode}`,
@@ -2058,10 +2124,16 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * 审批模式映射到输入框边框颜色，一眼可辨当前风险等级。
-   * 失焦一律弱化；聚焦时 ask 用品牌紫，auto 黄，yolo 红。
+   * 输入框边框：计划模式整框蓝色（失焦也蓝，跑轮次时仍能辨认）。
+   * 否则失焦弱化；聚焦时 ask 品牌紫，auto 黄，yolo 红。
    */
-  private applyApprovalBorder(): void {
+  private applyEditorBorder(): void {
+    if (this.plan.active) {
+      const plan = (text: string) => theme.fg('plan', text);
+      this.editor.borderColor = plan;
+      this.editor.focusBorderColor = plan;
+      return;
+    }
     const idle = 'borderMuted';
     const focus = this.approval === 'yolo' ? 'error' : this.approval === 'auto' ? 'warning' : 'primary';
     this.editor.borderColor = (text: string) => theme.fg(idle, text);

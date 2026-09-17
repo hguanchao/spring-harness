@@ -82,6 +82,14 @@ export class SelectList implements Component {
 		this.selectedIndex = Math.max(0, Math.min(index, this.filteredItems.length - 1));
 	}
 
+	/** 环形移动高亮；正文占用方向键滚动时，Tab 用它切选项。 */
+	cycle(delta: 1 | -1): void {
+		const n = this.filteredItems.length;
+		if (n === 0) return;
+		this.selectedIndex = (this.selectedIndex + delta + n) % n;
+		this.notifySelectionChange();
+	}
+
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}

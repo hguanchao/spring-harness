@@ -67,6 +67,16 @@ describe('代码块统一中性灰', () => {
   });
 });
 
+describe('计划模式色', () => {
+  it('plan 与行内码同蓝，和品牌紫不是一档', () => {
+    const plan = theme.fg('plan', 'x');
+    const code = theme.fg('mdCode', 'x');
+    const primary = theme.fg('primary', 'x');
+    assert.equal(colorsOf(plan)[0], colorsOf(code)[0]);
+    assert.notEqual(colorsOf(plan)[0], colorsOf(primary)[0]);
+  });
+});
+
 describe('代码档配色分工', () => {
   it('围栏与代码块正文同色，块内不再灰白相间', () => {
     const theme = getMarkdownTheme();

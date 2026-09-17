@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { runTurn } from '../agent/loop.js';
+
 import { createJsonOutput, createTextOutput } from './output.js';
 import { HeadlessApprover, type ApprovalMode } from '../approval/policy.js';
 import { createLlmClassifier } from '../approval/auto.js';
@@ -15,7 +15,7 @@ import type { TokenUsage } from '../llm/openai.js';
 // 下面两处按需动态 import。
 import { sessionDirFor } from '../session/path.js';
 import { foldSessionState } from '../session/fold.js';
-import { exportJson, exportMarkdown } from '../session/export.js';
+import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
 import { JsonlSession, listSessions, type SessionInfo } from '../session/store.js';
 import { resolveWorkspaceRoot } from '../workspace/root.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
@@ -39,7 +39,7 @@ async function runSessionsCommand(workspaceRoot: string, search?: string): Promi
   if (infos.length === 0) process.stdout.write(search ? `no session contains "${search}"\n` : 'no sessions yet\n');
 }
 
-async function runExportCommand(workspaceRoot: string, sessionId?: string, format: 'md' | 'json' = 'md'): Promise<void> {
+async function runExportCommand(workspaceRoot: string, sessionId?: string, format: 'md' | 'json' | 'html' = 'md'): Promise<void> {
   const dir = sessionDirFor(workspaceRoot);
   // export 是只读命令：不创建会话，没有可导出内容时报错退出。
   let id = sessionId;
@@ -59,7 +59,8 @@ async function runExportCommand(workspaceRoot: string, sessionId?: string, forma
     return;
   }
   const session = new JsonlSession(dir, id);
-  process.stdout.write(format === 'json' ? exportJson(session) : exportMarkdown(session));
+  const body = format === 'json' ? exportJson(session) : format === 'html' ? exportHtml(session) : exportMarkdown(session);
+  process.stdout.write(body);
 }
 
 /** 统一的装配入口：把 CliError 翻译成 stderr + 退出码，其余异常继续上抛。 */
@@ -164,6 +165,9 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       maxSubagentDepth: rt.config.subagentMaxDepth,
       maxSessionTokens: rt.config.maxSessionTokens,
       worktrees: rt.worktrees,
+      tools: rt.tools,
+      sessions: rt.sessions,
+      driver: rt.driver,
       claimSession: (id) => rt.claimSession(id),
       mcpWarnings: rt.mcpWarnings,
       ...(ui === undefined ? {} : { ui }),
@@ -201,12 +205,14 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
     const output = args.outputFormat === 'json'
       ? createJsonOutput({ sessionId: session.id })
       : createTextOutput();
-    await runTurn({
+    await runtime.driver({
       prompt,
       workspaceRoot,
       client,
       model: args.model ?? config.model,
       session,
+      tools: runtime.tools,
+      sessions: runtime.sessions,
       sandbox,
       approver: new HeadlessApprover(
         approvalMode,
@@ -261,6 +267,22 @@ async function main(): Promise<void> {
   }
   if (args.command === 'export') {
     await runExportCommand(workspaceRoot, args.sessionId, args.format);
+    return;
+  }
+  if (args.rpc) {
+    const runtime = await bootstrap(args, workspaceRoot, 'error');
+    if (!runtime) return;
+    try {
+      const { runRpcLoop } = await import('./rpc.js');
+      await runRpcLoop(runtime, {
+        model: args.model ?? runtime.config.model,
+        api: args.api ?? runtime.config.api,
+        effort: args.effort ?? runtime.config.reasoningEffort,
+        approval: args.approval ?? runtime.config.approval ?? 'ask',
+      });
+    } finally {
+      runtime.cleanup();
+    }
     return;
   }
 

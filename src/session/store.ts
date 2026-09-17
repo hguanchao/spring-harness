@@ -2,8 +2,8 @@ import { appendFileSync, createReadStream, existsSync, mkdirSync, readdirSync, r
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
-import { messagesOf } from './query.js';
-import type { SessionMessage, SessionRecord } from './types.js';
+import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from './types.js';
+import { lineage, loadTip, messagesOnPath, newEntryId } from './tree.js';
 
 export interface SessionMeta {
   id: string;
@@ -40,19 +40,29 @@ function parseRecords(text: string): SessionRecord[] {
   return out;
 }
 
-export class JsonlSession {
+export class JsonlSession implements SessionPort {
   readonly dir: string;
   readonly id: string;
   readonly file: string;
+  tip: string | undefined;
 
   constructor(dir: string, id: string) {
     this.dir = dir;
     this.id = id;
     this.file = join(dir, `${id}.jsonl`);
+    this.tip = existsSync(this.file) ? loadTip(parseRecords(readFileSync(this.file, 'utf8'))) : undefined;
   }
 
   append(record: SessionRecord): void {
-    appendFileSync(this.file, `${JSON.stringify(record)}\n`, 'utf8');
+    const id = record.id ?? newEntryId();
+    const parentId = record.parentId !== undefined ? record.parentId : (this.tip ?? null);
+    const row: SessionRecord = { ...record, id, parentId };
+    appendFileSync(this.file, `${JSON.stringify(row)}\n`, 'utf8');
+    if (row.type === 'event' && row.kind === 'branch_tip' && typeof row.data.id === 'string') {
+      this.tip = row.data.id;
+      return;
+    }
+    this.tip = id;
   }
 
   appendMessage(message: Omit<SessionMessage, 'type' | 'ts'>): void {
@@ -64,9 +74,18 @@ export class JsonlSession {
     this.append({ type: 'event', ts: new Date().toISOString(), kind, data });
   }
 
+  setTip(id: string): void {
+    this.appendEvent('branch_tip', { id });
+  }
+
   readAll(): SessionRecord[] {
     if (!existsSync(this.file)) return [];
     return parseRecords(readFileSync(this.file, 'utf8'));
+  }
+
+  /** 当前分支上的记录（含旧线性前缀）。 */
+  readPath(): SessionRecord[] {
+    return lineage(this.readAll(), this.tip);
   }
 
   /** 原始行（不解析）。给只做子串预筛的调用方用，省掉全量 JSON.parse。 */
@@ -76,7 +95,7 @@ export class JsonlSession {
   }
 
   readMessages(): SessionMessage[] {
-    return messagesOf(this.readAll());
+    return messagesOnPath(this.readAll(), this.tip);
   }
 }
 
@@ -121,6 +140,15 @@ export async function resumeOrCreate(dir: string, workspaceRoot: string, forceNe
   }
   return createSession(dir, workspaceRoot);
 }
+
+/** JSONL 默认工厂。loop 只依赖 SessionFactory，测试可换成内存表。 */
+export const jsonlSessionFactory: SessionFactory = {
+  create: createSession,
+  open(dir, id) {
+    return new JsonlSession(dir, id);
+  },
+  resumeOrCreate,
+};
 
 export interface SessionInfo {
   id: string;

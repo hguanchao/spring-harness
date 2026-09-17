@@ -23,7 +23,6 @@ export interface FooterData {
   /** 最近一次请求的上下文 token 数（水位），未知为 undefined。 */
   contextTokens?: number;
   usage: FooterUsage;
-  planMode?: boolean;
 }
 
 export interface ReadonlyFooterDataProvider {
@@ -62,7 +61,6 @@ export class FooterComponent implements Component {
     if (data.gitBranch) push('🌿', data.gitBranch);
     push('🤖', data.model);
     if (data.effort) push('🧠', data.effort);
-    if (data.planMode) push('📋', 'plan', 'warning');
 
     // 上下文水位：用量/窗口。用量越高颜色越醒目，压力临近时第一眼可见。
     const percent =

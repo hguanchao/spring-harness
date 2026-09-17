@@ -43,6 +43,32 @@ describe('Editor 聚焦 / 失焦', () => {
     assert.equal(stripTerminalSequences(focused[0] ?? ''), stripTerminalSequences(blurred[0] ?? ''));
   });
 
+  it('计划模式聚焦与失焦用同一边框色', () => {
+    const PLAN = '\x1b[94m';
+    const tui = {
+      terminal: { rows: 24, columns: 80 },
+      requestRender: () => {},
+    } as unknown as TUI;
+    const editor = new Editor(tui, {
+      borderColor: (text) => `${PLAN}${text}${RESET}`,
+      focusBorderColor: (text) => `${PLAN}${text}${RESET}`,
+      selectList: {
+        description: (text) => text,
+        scrollInfo: (text) => text,
+        noMatch: (text) => text,
+        selectedMark: (mark) => mark,
+        selectedRow: (text) => text,
+      },
+    });
+    editor.setText('hello');
+    const blurred = editor.render(20)[0] ?? '';
+    editor.focused = true;
+    const focused = editor.render(20)[0] ?? '';
+    assert.ok(blurred.includes(PLAN));
+    assert.ok(focused.includes(PLAN));
+    assert.equal(stripTerminalSequences(focused), stripTerminalSequences(blurred));
+  });
+
   it('失焦不画假光标，聚焦才反色', () => {
     const editor = makeEditor();
     const blurred = editor.render(20).join('\n');

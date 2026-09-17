@@ -24,8 +24,10 @@ export interface CliArgs {
   /** 位置子命令：sph sessions / sph export。 */
   command?: 'sessions' | 'export';
   search?: string;
-  format: 'md' | 'json';
+  format: 'md' | 'json' | 'html';
   sessionId?: string;
+  /** stdin JSONL 命令 / stdout JSONL 事件，给脚本嵌 sph。 */
+  rpc: boolean;
   /** headless 输出格式：text 给人看，json 是逐行事件（NDJSON）给脚本用。 */
   outputFormat: 'text' | 'json';
 }
@@ -40,7 +42,8 @@ Usage:
   sph --new                 Start a new session (default; explicit for scripts)
   sph sessions [--search kw]        List (or keyword-filter) main sessions of this workspace
                                     (subagent transcripts are listed only under their main session)
-  sph export [--format md|json] [--session id]   Export a session to stdout
+  sph export [--format md|json|html] [--session id]   Export a session to stdout
+  sph --rpc                 JSONL RPC on stdin/stdout (prompt / abort / quit)
   sph --model <model>       Override the configured model for this process
   sph --effort <level>      Reasoning effort: off | low | medium | high | xhigh | max
   sph --max-tokens <n>      Max output tokens per completion (overrides config max_tokens)
@@ -90,6 +93,7 @@ export function parseArgs(argv: string[]): CliArgs {
     trust: false,
     format: 'md',
     outputFormat: 'text',
+    rpc: false,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -144,7 +148,7 @@ export function parseArgs(argv: string[]): CliArgs {
       out.search = argv[++i] ?? '';
     } else if (arg === '--format') {
       const value = argv[++i];
-      if (value !== 'md' && value !== 'json') throw new Error(`--format must be md | json, got: ${value}`);
+      if (value !== 'md' && value !== 'json' && value !== 'html') throw new Error(`--format must be md | json | html, got: ${value}`);
       out.format = value;
     } else if (arg === '--output-format') {
       out.outputFormat = parseOutputFormat(argv[++i]);
@@ -153,6 +157,8 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (arg === '--session') {
       out.sessionId = argv[++i];
       if (!out.sessionId) throw new Error('--session requires a session id');
+    } else if (arg === '--rpc') {
+      out.rpc = true;
     } else {
       positional.push(arg);
     }

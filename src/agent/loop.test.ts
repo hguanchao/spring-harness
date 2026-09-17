@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { runTurn } from './loop.js';
 import { JsonlSession } from '../session/store.js';
+import { defaultTools } from '../tools/index.js';
 import type { AgentEvent } from './events.js';
 import type { ChatMessage, LlmClient, StreamDelta, TokenUsage } from '../llm/openai.js';
-import type { SandboxHandle } from '../sandbox/open.js';
+import type { SandboxHandle } from '../sandbox/types.js';
 import type { Approver } from '../approval/policy.js';
 
 const sandbox: SandboxHandle = {
@@ -60,6 +61,7 @@ describe('会话 token 预算', () => {
             workspaceRoot: root,
             client: toolOnceClient(count),
             session,
+            tools: defaultTools,
             sandbox,
             approver,
             contextWindow: 100_000,
@@ -89,6 +91,7 @@ describe('会话 token 预算', () => {
         workspaceRoot: root,
         client: toolOnceClient(count),
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -113,6 +116,7 @@ describe('会话 token 预算', () => {
         workspaceRoot: root,
         client: toolOnceClient(count),
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -139,6 +143,7 @@ describe('会话 token 预算', () => {
             workspaceRoot: root,
             client: toolOnceClient(count),
             session,
+            tools: defaultTools,
             sandbox,
             approver,
             contextWindow: 100_000,
@@ -205,6 +210,7 @@ describe('参数降级进工作状态', () => {
         workspaceRoot: root,
         client,
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -245,6 +251,7 @@ describe('提示缓存未命中记录', () => {
         workspaceRoot: root,
         client: cacheClient(usage(20_000, 19_000), usage(21_000, 0)),
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -274,6 +281,7 @@ describe('提示缓存未命中记录', () => {
         workspaceRoot: root,
         client: cacheClient(usage(20_000, 19_000), usage(21_000, 20_000)),
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -296,6 +304,7 @@ describe('提示缓存未命中记录', () => {
         workspaceRoot: root,
         client: cacheClient(usage(20_000, 19_500), usage(21_000, 19_600)),
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -337,6 +346,7 @@ describe('系统提示词一轮内冻结', () => {
         workspaceRoot: root,
         client: planToggleClient(seen),
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -369,6 +379,7 @@ describe('截断流继续', () => {
         workspaceRoot: root,
         client,
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -401,6 +412,7 @@ describe('截断流继续', () => {
         workspaceRoot: root,
         client,
         session,
+        tools: defaultTools,
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -431,6 +443,7 @@ describe('取消 rewind：首次响应前中止不落盘用户消息', () => {
             workspaceRoot: root,
             client,
             session,
+            tools: defaultTools,
             sandbox,
             approver,
             contextWindow: 100_000,

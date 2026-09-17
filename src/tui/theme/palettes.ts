@@ -13,7 +13,7 @@ const MUTED = '#6c6c6c';
 /** GrokNight 画布底。纯黑会把 #c6c6c6 衬得过亮。 */
 const BG = '#141414';
 const CHROME = '#242424';
-/** OpenCode darkSecondary。行内码整段用，不做词法分色。 */
+/** OpenCode darkSecondary。行内码、计划模式输入框。 */
 const SYNTAX = '#5c9cf5';
 
 export const PALETTE = {
@@ -25,6 +25,8 @@ export const PALETTE = {
   success: '#7fd88f',
   error: '#e06c75',
   warning: '#f5a742',
+  /** 计划模式输入框边框。与行内码同蓝，和审批紫/黄/红分开。 */
+  plan: SYNTAX,
   muted: MUTED,
   dim: '#808080',
   text: TEXT,
@@ -67,3 +69,12 @@ export const PALETTE = {
 } as const;
 
 export type ThemeColor = keyof typeof PALETTE;
+
+/** 只覆盖已有键且值为 #RRGGBB 的项。 */
+export function overlayPalette(partial: Record<string, unknown>): void {
+  const live = PALETTE as Record<string, string>;
+  for (const [key, value] of Object.entries(partial)) {
+    if (typeof value !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(value)) continue;
+    if (key in live) live[key] = value;
+  }
+}

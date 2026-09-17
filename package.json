@@ -7,6 +7,9 @@
   "bin": {
     "sph": "./dist/cli/index.js"
   },
+  "exports": {
+    ".": "./dist/sdk.js"
+  },
   "files": [
     "dist"
   ],

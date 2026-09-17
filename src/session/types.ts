@@ -11,6 +11,9 @@ export interface SessionEvent {
   ts: string;
   kind: string;
   data: Record<string, unknown>;
+  /** 会话树节点 id；旧记录可缺。 */
+  id?: string;
+  parentId?: string | null;
 }
 
 export interface SessionMessage {
@@ -25,6 +28,31 @@ export interface SessionMessage {
   images?: string[];
   /** Responses 推理项，下一轮原样回传；没有 encryptedContent 的项不要存。 */
   reasoning?: Array<{ id: string; encryptedContent?: string; summary?: string }>;
+  id?: string;
+  parentId?: string | null;
 }
 
 export type SessionRecord = SessionEvent | SessionMessage;
+
+/**
+ * 会话存储端口。loop / repair / compact / export 只依赖这一面；
+ * 默认实现是 JSONL，测试可换成内存表。
+ */
+export interface SessionPort {
+  readonly id: string;
+  readonly dir: string;
+  append(record: SessionRecord): void;
+  appendMessage(message: Omit<SessionMessage, 'type' | 'ts'>): void;
+  appendEvent(kind: string, data: Record<string, unknown>): void;
+  readAll(): SessionRecord[];
+  readMessages(): SessionMessage[];
+  /** 当前分支头。旧线性会话可缺。 */
+  readonly tip?: string;
+  setTip?(id: string): void;
+}
+
+export interface SessionFactory {
+  create(dir: string, workspaceRoot: string, makeCurrent?: boolean): SessionPort;
+  open(dir: string, id: string): SessionPort;
+  resumeOrCreate(dir: string, workspaceRoot: string, forceNew: boolean): Promise<SessionPort>;
+}
