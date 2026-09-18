@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import type { TUI } from '../core/index.js';
 import { stripTerminalSequences, visibleWidth } from '../core/index.js';
 import { formatStatusElapsed, formatStatusTokens } from '../../util.js';
-import { formatWorkingWarning, WorkingLabel, WorkingStatusIndicator, workingWarningKey } from './interaction.js';
+import { formatWorkingWarning, IdleStatus, WorkingLabel, WorkingStatusIndicator, workingWarningKey } from './interaction.js';
 
 const ui = {
   requestRender: () => {
@@ -149,5 +149,47 @@ describe('WorkingStatusIndicator elapsed', () => {
   it('工具文案带摘要，不写 Running', () => {
     assert.equal(WorkingLabel.running('Bash', 'cargo test'), 'Bash cargo test…');
     assert.equal(WorkingLabel.running('Read'), 'Read…');
+  });
+});
+
+describe('复制反馈提示（输入框右上角）', () => {
+  it('空闲态：提示 chip 落第二行右缘，clearHint 恢复空白占位', () => {
+    const idle = new IdleStatus(() => {});
+    try {
+      assert.deepEqual(idle.render(40), ['', '']);
+      idle.showHint('Copied!');
+      const lines = idle.render(40);
+      assert.equal(lines.length, 2);
+      const raw = lines[1] ?? '';
+      assert.equal(stripTerminalSequences(raw), ' Copied! ');
+      // chip 反色，右缘与工作态右缘对齐（留 4 列），用 CHA 定位不铺空格。
+      assert.match(raw, /\x1b\[7m/);
+      assert.match(raw, /\x1b\[28G/);
+      idle.clearHint();
+      assert.deepEqual(idle.render(40), ['', '']);
+    } finally {
+      idle.clearHint();
+    }
+  });
+
+  it('工作态：提示优先，本轮耗时与 token 让位；清除后恢复', () => {
+    const indicator = new WorkingStatusIndicator(ui, WorkingLabel.working);
+    try {
+      indicator.setTokens(1470);
+      indicator.showHint('Copied!');
+      const { raw, plain } = statusLines(indicator, 60);
+      assert.match(plain.trimEnd(), /Copied!$/);
+      assert.equal(plain.includes('↓'), false, '提示期间 token 让位');
+      const elapsedCount = (plain.match(/\d+\.\d?s/g) ?? []).length;
+      assert.equal(elapsedCount, 1, '提示期间只剩阶段耗时，本轮耗时让位');
+      assert.match(raw, /\x1b\[7m/, 'chip 用反色与 flash 同风格');
+      indicator.clearHint();
+      const restored = statusLines(indicator, 60);
+      const restoredElapsed = (restored.plain.match(/\d+\.\d?s/g) ?? []).length;
+      assert.equal(restoredElapsed, 2, '清除后本轮耗时恢复');
+      assert.match(restored.plain, /↓1\.47k/);
+    } finally {
+      indicator.dispose();
+    }
   });
 });

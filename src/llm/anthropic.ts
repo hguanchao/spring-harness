@@ -1,6 +1,6 @@
 import { firstString, TEXT_KEYS, THINKING_KEYS } from './aliases.js';
 import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
-import { llmError } from './errors.js';
+import { streamFrameError } from './errors.js';
 import type { ChatMessage, ContentPart, ReasoningEffort, RequestBodyOptions } from './openai.js';
 import { appendStreamDelta, flattenToolSpec, parseSseJson, writeUsage, type SseAcc } from './openai.js';
 import type { ProtocolAdapter } from './stream-client.js';
@@ -114,6 +114,12 @@ export function toAnthropicRequest(
 ): Record<string, unknown> {
   const system: string[] = [];
   const messages: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = [];
+  // thinking 归一在消息循环之前：回放块要按「本次请求是否启用 thinking」门控——
+  // 关掉 effort 后历史里的 thinking 块不再发送，避免官方 API 对禁用态报错。
+  const effort = options.reasoningEffort;
+  const thinking = effort && effort !== 'off'
+    ? { type: 'enabled', budget_tokens: THINKING_BUDGET[effort] }
+    : undefined;
   // Anthropic 协议里 tool_result 是 user 消息的 content 块；连续多条 tool 消息并入同一条 user。
   let pendingToolResults: AnthropicBlock[] = [];
   const flushToolResults = (): void => {
@@ -142,6 +148,21 @@ export function toAnthropicRequest(
       continue;
     }
     const blocks: AnthropicBlock[] = [];
+    // thinking 启用时，含 tool_use 的 assistant 消息必须以 thinking 块开头，否则官方 API
+    // 直接 400（「Expected `thinking` or `redacted_thinking`, but found `tool_use`」）。
+    // 签名完整 → 真块回放；只有明文（签名缺失，如被网关剥离）→ 降级纯文本块，
+    // 思考内容仍可见，请求至少能通过。
+    if (thinking && message.thinking) {
+      if (message.thinkingSignature) {
+        blocks.push({
+          type: 'thinking',
+          thinking: message.thinking,
+          signature: message.thinkingSignature,
+        });
+      } else {
+        blocks.push({ type: 'text', text: message.thinking });
+      }
+    }
     if (message.content) blocks.push({ type: 'text', text: message.content });
     for (const call of message.tool_calls ?? []) {
       let input: unknown = {};
@@ -158,10 +179,6 @@ export function toAnthropicRequest(
   }
   flushToolResults();
 
-  const effort = options.reasoningEffort;
-  const thinking = effort && effort !== 'off'
-    ? { type: 'enabled', budget_tokens: THINKING_BUDGET[effort] }
-    : undefined;
   // 输出上限：显式配置优先，未配置时用 8192；thinking 预算必须小于 max_tokens，因此仍在基数上叠加预算。
   const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
 
@@ -195,7 +212,12 @@ export function toAnthropicRequest(
 }
 
 function mapAnthropicStop(reason: string): string {
-  return reason === 'tool_use' ? 'tool_calls' : reason === 'max_tokens' ? 'length' : 'stop';
+  if (reason === 'tool_use') return 'tool_calls';
+  if (reason === 'max_tokens') return 'length';
+  if (reason === 'model_context_window_exceeded') return 'context_full';
+  if (reason === 'refusal') return 'refusal';
+  if (reason === 'sensitive') return 'sensitive';
+  return 'stop';
 }
 
 /**
@@ -248,15 +270,15 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
     };
     index?: number;
     content_block?: { type?: string; id?: string; name?: string };
-    delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; stop_reason?: string; usage?: AnthropicUsage };
+    delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; signature?: string; stop_reason?: string; usage?: AnthropicUsage };
     /** `message_delta` 的 usage 在这里，与 `delta` 平级。 */
     usage?: AnthropicUsage;
     error?: { message?: string };
-    content?: Array<{ type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }>;
+    content?: Array<{ type?: string; text?: string; thinking?: string; signature?: string; data?: string; id?: string; name?: string; input?: unknown }>;
     stop_reason?: string;
   };
   if (data.error || data.type === 'error') {
-    throw llmError('Anthropic stream error', data.error?.message?.trim() || 'unknown');
+    throw streamFrameError('Anthropic stream error', data.error?.message?.trim() || 'unknown');
   }
   switch (data.type) {
     case 'message': {
@@ -268,6 +290,10 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
           textDelta = (textDelta ?? '') + (appendStreamDelta(acc, block.text).textDelta ?? '');
         } else if (block.type === 'thinking' && (block.thinking || block.text)) {
           thinkingDelta = (thinkingDelta ?? '') + (appendStreamDelta(acc, undefined, block.thinking || block.text).thinkingDelta ?? '');
+          if (typeof block.signature === 'string' && block.signature) acc.signature = block.signature;
+        } else if (block.type === 'redacted_thinking' && typeof block.data === 'string' && block.data) {
+          // 加密思考没有明文可展示，但签名必须保留：回放时以 redacted_thinking 块原样带回。
+          acc.signature = block.data;
         } else if (block.type === 'tool_use') {
           acc.tools.set(index, {
             id: block.id ?? '',
@@ -304,6 +330,11 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
       if (data.delta?.type === 'input_json_delta' && data.delta.partial_json) {
         const tool = acc.tools.get(data.index ?? 0);
         if (tool) tool.arguments += data.delta.partial_json;
+      }
+      // thinking 块的签名：跨步回放时必须原样带回（官方 API 校验签名与思考的配对），
+      // 只出现一次签名块、后续增量都往里追加。展示与签名互不干扰。
+      if (data.delta?.type === 'signature_delta' && typeof data.delta.signature === 'string') {
+        acc.signature = (acc.signature ?? '') + data.delta.signature;
       }
       return {};
     case 'message_delta': {

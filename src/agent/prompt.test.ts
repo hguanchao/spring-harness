@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildSystemPrompt } from './prompt.js';
+import { buildSystemPrompt, sessionStateMessage } from './prompt.js';
 import { subagentPrompt } from './subagent-prompt.js';
 import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from './compact.js';
 import { CLASSIFIER_SYSTEM } from '../permission/auto.js';
@@ -144,16 +144,36 @@ describe('工具段的条件拼装', () => {
   });
 });
 
-describe('计划模式引导', () => {
-  it('未激活时不出现 plan_mode 段', () => {
-    assert.ok(!base().includes('<plan_mode>'));
+describe('跨轮次状态注入', () => {
+  // goal / lastFailure / planMode 是随时可变的：放在 system prompt（前缀最头部）会让
+  // 一次 /goal、一次失败重试、一次模式翻转毁掉全部消息历史的缓存。它们必须只出现在
+  // 尾部注入的状态消息里，system 本体保持静态。
+  it('system prompt 不含 goal / 失败 / 计划模式动态段', () => {
+    const p = base();
+    assert.ok(!p.includes('session state'), 'system 不该有状态消息内容');
+    assert.ok(!p.includes('<plan_mode>'));
+    assert.ok(!p.includes('Current goal'), 'goal 段已移出 system');
+    assert.ok(!p.includes('Most recent tool failure in this session'), '失败段已移出 system');
   });
 
-  it('激活时要求先规划再呈交，并点名 exit_plan_mode', () => {
-    const p = base({ planMode: true });
-    assert.ok(p.includes('<plan_mode>'));
-    assert.ok(p.includes('Do not implement'));
-    assert.ok(p.includes('exit_plan_mode'));
+  it('sessionStateMessage：无状态时写占位行，形态稳定', () => {
+    const text = sessionStateMessage(undefined, undefined, false);
+    assert.ok(text.includes('Goal: (none)'));
+    assert.ok(text.includes('Most recent tool failure: (none)'));
+    assert.ok(text.includes('Plan mode: off.'));
+  });
+
+  it('sessionStateMessage：goal / 失败 / 计划模式各自呈现', () => {
+    const text = sessionStateMessage(
+      'fix the flaky test',
+      { tool: 'shell', excerpt: 'exit 1' },
+      true,
+    );
+    assert.ok(text.includes('Goal: fix the flaky test'));
+    assert.ok(text.includes('shell: exit 1'));
+    assert.ok(text.includes('Plan mode is ON.'));
+    assert.ok(text.includes('Do not implement'), '计划模式引导正文随状态注入');
+    assert.ok(text.includes('exit_plan_mode'));
   });
 });
 

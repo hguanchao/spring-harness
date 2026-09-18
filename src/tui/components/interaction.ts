@@ -1,4 +1,4 @@
-import { type Component, Loader, type TUI } from "../core/index.js";
+import { type Component, Loader, type TUI, visibleWidth } from "../core/index.js";
 import { appKeyText, type AppKeybinding } from "../app-keybindings.js";
 import { theme } from "../theme/theme.js";
 import { flattenWhitespace } from "../../util.js";
@@ -237,14 +237,58 @@ export class WorkingStatusIndicator extends StatusIndicator {
   }
 }
 
-/** 空闲占位：固定两行空白，避免状态区高度抖动。 */
+/**
+ * 空闲占位：固定两行空白，避免状态区高度抖动。
+ * 第二行右上角可临时挂一条提示（复制反馈）——空闲时没有 Loader，反馈落在占位行上。
+ */
 export class IdleStatus implements Component {
+  private hint?: string;
+  private hintTimer?: NodeJS.Timeout;
+
+  constructor(private readonly requestRender: () => void) {}
+
+  showHint(text: string, durationMs = 1200): void {
+    this.clearHintTimer();
+    this.hint = text;
+    this.requestRender();
+    this.hintTimer = setTimeout(() => {
+      this.hintTimer = undefined;
+      this.hint = undefined;
+      this.requestRender();
+    }, Math.max(0, durationMs));
+    this.hintTimer.unref();
+  }
+
+  private clearHintTimer(): void {
+    if (this.hintTimer) {
+      clearTimeout(this.hintTimer);
+      this.hintTimer = undefined;
+    }
+  }
+
+  /** 立即撤掉提示并恢复空白占位。 */
+  clearHint(): void {
+    this.clearHintTimer();
+    if (this.hint === undefined) return;
+    this.hint = undefined;
+    this.requestRender();
+  }
+
   invalidate(): void {
     // 无缓存状态。
   }
 
-  render(_width: number): string[] {
-    // 空行不要铺空格：铺满的空格在 Windows Terminal 上会显出浅底。
-    return ['', ''];
+  render(width: number): string[] {
+    if (this.hint === undefined) {
+      // 空行不要铺空格：铺满的空格在 Windows Terminal 上会显出浅底。
+      return ['', ''];
+    }
+    const text = ` ${this.hint} `;
+    const textW = visibleWidth(text);
+    // 空闲行右侧留 4 列与工作态右缘对齐；窄到放不下就整体省略，不裁一半。
+    if (textW + 4 > width) return ['', ''];
+    const blank = '';
+    const line = `\x1b[${width - 4 - textW + 1}G\x1b[7m${text}\x1b[27m`;
+    return [blank, line];
   }
 }

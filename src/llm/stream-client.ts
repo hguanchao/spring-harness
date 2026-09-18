@@ -189,7 +189,12 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             throw error;
           }
           transportTries++;
-          onRetry?.({ attempt: transportTries + 1, message: text, kind: 'transport' });
+          onRetry?.({
+            attempt: transportTries + 1,
+            message: text,
+            kind: 'transport',
+            maxRetries,
+          });
           await sleepAbortable(backoffMs(transportTries - 1), signal);
         }
       }

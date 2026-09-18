@@ -28,6 +28,13 @@ export interface SessionMessage {
   images?: string[];
   /** Responses 推理项，下一轮原样回传；没有 encryptedContent 的项不要存。 */
   reasoning?: Array<{ id: string; encryptedContent?: string; summary?: string }>;
+  /**
+   * Anthropic thinking 块回放载荷：思考明文 + 签名（signature_delta 累积）。
+   * 官方 API 在 thinking 启用时要求含 tool_use 的 assistant 消息以 thinking 块开头；
+   * 只有签名（明文被网关剥掉）时按 redacted_thinking 回传。
+   */
+  thinking?: string;
+  thinkingSignature?: string;
   id?: string;
   parentId?: string | null;
 }

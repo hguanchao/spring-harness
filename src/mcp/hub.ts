@@ -415,7 +415,7 @@ export class McpHub {
       server: serverName,
       name: tool.name,
       description: tool.description ?? '',
-      schema: tool.inputSchema ?? { type: 'object' },
+      schema: deepSortKeys(tool.inputSchema ?? { type: 'object' }) as Record<string, unknown>,
     }));
   }
 
@@ -555,4 +555,22 @@ function spawnableSignature(spec: McpServerSpec): string {
     .map(([key, value]) => `${key}=${value}`)
     .join('\u0000');
   return [spec.command ?? '', ...(spec.args ?? []), '\u0001', env].join('\u0000');
+}
+
+/**
+ * 递归按键名排序（数组保持元素序）。
+ *
+ * MCP server 自报的 `inputSchema` 的 key 序不保证稳定：同一次会话里 server 重连后
+ * 重发的 schema 可能只是 key 排列不同，序列化进请求却成了逐字节不同的前缀——tools
+ * 段变更（见 agent/prefix-tracker.ts）会作废其后全部缓存。存储前规范化一次，序列化
+ * 从此与 server 的任意抖动解耦。语义等价：JSON 对象本就是无序集合，排序只改呈现。
+ */
+export function deepSortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(deepSortKeys);
+  if (value === null || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    out[key] = deepSortKeys((value as Record<string, unknown>)[key]);
+  }
+  return out;
 }

@@ -21,7 +21,7 @@ describe('plan heading', () => {
 describe('planModeSection', () => {
   it('names the exit tool and the blocked writes', () => {
     const text = planModeSection();
-    assert.ok(text.includes('<plan_mode>'));
+    assert.ok(!text.includes('<plan_mode>'), '引导正文进的是状态消息，不该带 system 段标签');
     assert.ok(text.includes('exit_plan_mode'));
     assert.ok(text.includes('Do not implement'));
     assert.ok(planBlockedReason('write').includes('plan mode'));

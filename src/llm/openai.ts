@@ -8,7 +8,7 @@ import {
   TOTAL_TOKEN_KEYS,
 } from './aliases.js';
 import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
-import { llmError } from './errors.js';
+import { streamFrameError } from './errors.js';
 import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_RETENTION } from './prompt-cache.js';
 import type { ProtocolAdapter } from './stream-client.js';
 
@@ -67,12 +67,21 @@ export interface ChatMessage {
     function: { name: string; arguments: string };
   }>;
   reasoning?: ReasoningItem[];
+  /**
+   * Anthropic thinking 块回放：思考全文 + signature_delta 累积的签名。
+   * 只有 anthropic 序列化消费（官方 API 在 thinking 启用时要求含 tool_use 的
+   * assistant 消息以 thinking 块开头）；chat.completions / responses 忽略。
+   */
+  thinking?: string;
+  thinkingSignature?: string;
 }
 
 export interface StreamDelta {
   text?: string;
   /** 推理模型（DeepSeek reasoner 等）暴露的思考链；delta.reasoning_content 累积。 */
   thinking?: string;
+  /** Anthropic thinking 块签名：跨步回放时必须原样带回。 */
+  thinkingSignature?: string;
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
   reasoning?: ReasoningItem[];
   finishReason?: string;
@@ -88,6 +97,8 @@ export interface LlmRetryInfo {
    * 省略按传输失败处理（旧调用方）。
    */
   kind?: 'compat' | 'transport';
+  /** 本跳的重试预算上限（不含首次）；省略表示未知。落盘事件用它标注预算余量。 */
+  maxRetries?: number;
 }
 
 export interface LlmClient {
@@ -121,6 +132,8 @@ export interface SseAcc {
   usage?: TokenUsage;
   /** Responses 协议的 arguments delta 事件不带 index，用它定位最近一个工具调用。 */
   currentToolIndex?: number;
+  /** Anthropic thinking 块签名（signature_delta 累积）。 */
+  signature?: string;
 }
 
 /** 三协议共用的空累积器；字段语义见 SseAcc。 */
@@ -219,6 +232,13 @@ type ChatDelta = {
   }>;
 };
 
+/** 下一个空闲工具槽位：index 缺席的网关新增调用时取最大键 +1，避免踩掉已有条目。 */
+function nextToolSlot(acc: SseAcc): number {
+  let max = -1;
+  for (const slot of acc.tools.keys()) if (slot > max) max = slot;
+  return max + 1;
+}
+
 function applyChatDelta(acc: SseAcc, delta: ChatDelta): { textDelta?: string; thinkingDelta?: string } {
   let textDelta: string | undefined;
   let thinkingDelta: string | undefined;
@@ -228,7 +248,23 @@ function applyChatDelta(acc: SseAcc, delta: ChatDelta): { textDelta?: string; th
   const text = firstString(row, TEXT_KEYS);
   if (text) textDelta = appendStreamDelta(acc, text).textDelta;
   for (const call of delta.tool_calls ?? []) {
-    const index = call.index ?? 0;
+    // 寻址顺序对齐 pi：规范形态按 index；不发 index 的网关按 id 匹配已开的调用；
+    // 都没有就挂到「当前正在填充」的那条上——两个调用完全无差别时任何实现都无法拆分。
+    if (typeof call.index === 'number' && Number.isFinite(call.index)) {
+      acc.currentToolIndex = call.index;
+    } else if (call.id) {
+      let found: number | undefined;
+      for (const [slot, tool] of acc.tools) {
+        if (tool.id === call.id) {
+          found = slot;
+          break;
+        }
+      }
+      acc.currentToolIndex = found ?? nextToolSlot(acc);
+    } else if (acc.currentToolIndex === undefined) {
+      acc.currentToolIndex = nextToolSlot(acc);
+    }
+    const index = acc.currentToolIndex;
     const current = acc.tools.get(index) ?? { id: '', name: '', arguments: '' };
     if (call.id) current.id = call.id;
     if (call.function?.name) current.name += call.function.name;
@@ -244,11 +280,16 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
   const json = parseSseJson(payload);
   if (!json) return {};
   // 兼容端点把业务错误塞进 SSE data（HTTP 仍 200）：必须抛出，否则空 choices 会被当成成功空回复。
+  // 是否可重试由 streamFrameError 统一判定：网关断流措辞按传输抖动重打，审核/鉴权等终态上抛。
   const errorField = json.error;
   if (errorField !== undefined && errorField !== null) {
-    throw llmError('LLM error', llmErrorMessage(errorField));
+    throw streamFrameError('LLM error', llmErrorMessage(errorField));
   }
-  const usageRaw = json.usage;
+  const usageRaw =
+    json.usage && typeof json.usage === 'object'
+      ? json.usage
+      : // Moonshot 把 usage 放在 choice.usage 而不是 chunk.usage（对齐 pi 的 fallback）。
+        (json as { choices?: Array<{ usage?: unknown }> }).choices?.[0]?.usage;
   if (usageRaw && typeof usageRaw === 'object') {
     const usage = usageRaw as Record<string, unknown>;
     const prompt = firstFiniteNumber(usage, PROMPT_TOKEN_KEYS);
@@ -286,6 +327,7 @@ export function finishStream(acc: SseAcc): StreamDelta {
   return {
     text: acc.text,
     thinking: acc.thinking || undefined,
+    ...(acc.signature ? { thinkingSignature: acc.signature } : {}),
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     reasoning: reasoning.length > 0 ? reasoning : undefined,
     finishReason: acc.finish,

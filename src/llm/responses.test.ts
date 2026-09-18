@@ -252,3 +252,37 @@ describe('applyResponsesEvent 非流式报文', () => {
     assert.equal(reply.finishReason, 'stop');
   });
 });
+
+describe('applyResponsesEvent 审核拒绝与 incomplete', () => {
+  it('response.refusal.delta 按正文收下', () => {
+    const acc = newSseAcc();
+    applyResponsesEvent(JSON.stringify({ type: 'response.refusal.delta', delta: 'cannot help with that' }), acc);
+    assert.equal(finishStream(acc).text, 'cannot help with that');
+  });
+
+  it('incomplete_details.reason=content_filter 不再误报成 length', () => {
+    const acc = newSseAcc();
+    applyResponsesEvent(
+      JSON.stringify({
+        type: 'response.incomplete',
+        response: { incomplete_details: { reason: 'content_filter' } },
+      }),
+      acc,
+    );
+    assert.equal(finishStream(acc).finishReason, 'incomplete:content_filter');
+  });
+
+  it('max_output_tokens / 缺省 reason 仍归一为 length', () => {
+    for (const reason of ['max_output_tokens', undefined]) {
+      const acc = newSseAcc();
+      applyResponsesEvent(
+        JSON.stringify({
+          type: 'response.incomplete',
+          response: reason === undefined ? {} : { incomplete_details: { reason } },
+        }),
+        acc,
+      );
+      assert.equal(finishStream(acc).finishReason, 'length');
+    }
+  });
+});

@@ -48,6 +48,14 @@ function errorResponse(status: number, message: string): Response {
   });
 }
 
+/** 先吐一段正文，再按网关习惯发一条流内 error 帧（HTTP 仍 200）。 */
+function streamThenErrorFrame(text: string, message: string): Response {
+  return sseResponse([
+    `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`,
+    `data: ${JSON.stringify({ error: { message } })}\n\n`,
+  ]);
+}
+
 function okResponse(text: string): Response {
   const payload = JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: 'stop' }] });
   return sseResponse([`data: ${payload}\n\n`, 'data: [DONE]\n\n']);
@@ -321,6 +329,48 @@ describe('空流与截断', () => {
     assert.deepEqual(seen, ['partial', 'recovered']);
     assert.equal(reply.text, 'recovered');
     assert.equal(calls, 2);
+  });
+
+  it('流内 error 帧报网关断流：判为传输抖动，丢半截重打', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return streamThenErrorFrame('partial', 'Upstream stream disconnected');
+      return okResponse('recovered');
+    }) as typeof fetch;
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      maxRetries: 2,
+      promptCache: false,
+    });
+    const seen: string[] = [];
+    const reply = await c.complete(messages, [], undefined, (delta) => {
+      if (delta.text) seen.push(delta.text);
+    });
+    assert.deepEqual(seen, ['partial', 'recovered']);
+    assert.equal(reply.text, 'recovered');
+    assert.equal(calls, 2);
+  });
+
+  it('流内 error 帧命中审核措辞：终态直接失败，不重打', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return streamThenErrorFrame('partial', 'content_filter: your prompt was flagged');
+    }) as typeof fetch;
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      maxRetries: 2,
+      promptCache: false,
+    });
+    await assert.rejects(c.complete(messages, []), /content_filter/);
+    assert.equal(calls, 1);
   });
 
   it('干净 EOF 无 [DONE] 仍提交已收到的内容', async () => {

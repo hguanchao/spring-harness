@@ -281,3 +281,33 @@ describe('stub 边界冻结', () => {
     );
   });
 });
+
+describe('assistant thinking 回放载荷透传', () => {
+  it('工具调用行携带 thinking + thinkingSignature 进 wire', () => {
+    const state = emptyWire();
+    pushSessionMessage(state, session({
+      role: 'assistant',
+      content: '',
+      thinking: 'let me look',
+      thinkingSignature: 'sig-1',
+      toolCalls: [{ id: 'tu_1', name: 'read_file', arguments: { path: 'a' } }],
+    }));
+    const message = state.messages[0]!;
+    assert.equal(message.thinking, 'let me look');
+    assert.equal(message.thinkingSignature, 'sig-1');
+    assert.equal(message.tool_calls?.[0]?.id, 'tu_1');
+  });
+
+  it('纯文本行同样携带 thinking 载荷', () => {
+    const state = emptyWire();
+    pushSessionMessage(state, session({
+      role: 'assistant',
+      content: 'answer',
+      thinking: 'thought',
+      thinkingSignature: 'sig-2',
+    }));
+    const message = state.messages[0]!;
+    assert.equal(message.thinking, 'thought');
+    assert.equal(message.thinkingSignature, 'sig-2');
+  });
+});

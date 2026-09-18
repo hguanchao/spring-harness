@@ -123,8 +123,11 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 400);
     const code = classifyHttpError(response.status, detail);
+    // 超窗先于否决判定：压缩重试走的是另一条恢复路径，与传输重试的预算无关。
     if (code === 'CONTEXT_WINDOW_EXCEEDED') throw llmError(`LLM HTTP ${response.status}`, detail);
-    if (isRetryableStatus(response.status) && code !== 'QUOTA') {
+    // 网关显式说别重试（x-should-retry: false，OpenAI/Anthropic SDK 同语义）就尊重：
+    // 硬按状态码白名单重试只会白烧 max_retries 轮。
+    if (response.headers.get('x-should-retry') !== 'false' && isRetryableStatus(response.status) && code !== 'QUOTA') {
       throw new RetryableError(
         `LLM HTTP ${response.status} [${code}]: ${detail}`,
         response.status,

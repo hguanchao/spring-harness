@@ -1,5 +1,5 @@
 import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
-import { llmError } from './errors.js';
+import { streamFrameError } from './errors.js';
 import { clampPromptCacheKey, PROMPT_CACHE_RETENTION } from './prompt-cache.js';
 import type { ChatMessage, RequestBodyOptions } from './openai.js';
 import {
@@ -207,6 +207,8 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       };
       error?: { message?: string } | null;
       status?: string;
+      status_details?: { reason?: string };
+      incomplete_details?: { reason?: string };
       output?: Array<{
         type?: string;
         id?: string;
@@ -221,6 +223,8 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
   };
   switch (data.type) {
     case 'response.output_text.delta':
+    case 'response.refusal.delta':
+      // refusal 增量按正文处理：审核拒绝的说明文字对用户可见，丢了界面只剩空轮。
       return data.delta ? appendStreamDelta(acc, data.delta) : {};
     // 推理模型的思考链。三类事件的增量文本都在 `delta` 字段里——`summary` 是
     // `reasoning_summary_text.done` 才有的整段文本，不能拿来当增量读。
@@ -283,13 +287,21 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
           typeof cached === 'number' && Number.isFinite(cached) ? cached : undefined,
         );
       }
-      acc.finish = data.type === 'response.incomplete' ? 'length' : 'stop';
+      // incomplete 的 reason 要区分：max_output_tokens 是正常截断（提示用户即可），
+      // content_filter 是审核拒绝（loop 应当作明确 stop 而不是续写）；未知 reason 按
+      // 截断处理——对齐 pi 把 provider 原因保留在 finishReason 之外的做法。
+      if (data.type === 'response.incomplete') {
+        const reason = data.response?.status_details?.reason ?? data.response?.incomplete_details?.reason;
+        acc.finish = reason && reason !== 'max_output_tokens' ? `incomplete:${reason}` : 'length';
+      } else {
+        acc.finish = 'stop';
+      }
       return { textDelta };
     }
     case 'response.failed':
-      throw llmError('Responses stream failed', llmErrorMessage(data.response?.error));
+      throw streamFrameError('Responses stream failed', llmErrorMessage(data.response?.error));
     case 'error':
-      throw llmError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
+      throw streamFrameError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
     default: {
       // 非流式完整报文：`{ object: "response", status, output }`，没有 `type: response.completed`。
       const status = (data as { status?: string }).status;
@@ -305,7 +317,7 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       }
       // 部分端点把 error 塞在非 failed 事件里。
       if ((data as { error?: unknown }).error) {
-        throw llmError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
+        throw streamFrameError('Responses stream error', llmErrorMessage((data as { error?: unknown }).error));
       }
       return {};
     }

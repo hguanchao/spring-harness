@@ -11,7 +11,8 @@ import {
 import type { AgentListener, SubagentEvent } from './events.js';
 import { TouchMemory, touchInstructionBlock } from './memory.js';
 import { PLAN_BLOCKED_TOOLS, planBlockedReason } from './plan.js';
-import { buildSystemPrompt } from './prompt.js';
+import { buildSystemPrompt, sessionStateMessage } from './prompt.js';
+import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from './prefix-tracker.js';
 import { runToolBatch } from './tool-run.js';
 import { CacheMissTracker, describeCacheMiss } from '../llm/cache-stats.js';
 import { ContextOverflowError } from '../llm/errors.js';
@@ -203,9 +204,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
       // 整段消失，而不是留下一句指向不存在工具的指令。
       allowedTools: options.allowedTools,
-      goal: options.goal,
-      lastFailure: options.lastFailure,
-      planMode: options.planMode?.active === true,
+      // goal / lastFailure / planMode 不进 system：它们随时可变，放在前缀最头部意味着
+      // 一次变化就作废全部消息历史的缓存。经 sessionStateMessage 以尾部 user 消息注入。
     });
     // 子代理角色段追加在末尾：主提示词在前、角色约束在后，父级主 turn 的前缀保持一致
     // （缓存命中），且角色约束作为最后读到的一段不会被前面的通用规则盖过。
@@ -259,6 +259,16 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     images: options.userImages,
   };
   mirror.push(pendingUser);
+  // 跨轮次状态（goal / 最近失败 / 计划模式）以尾部 user 消息注入，紧跟本轮 prompt——
+  // 下一轮它固化在历史里，前缀从它之前完整命中（sessionStateMessage 的注释讲为什么
+  // 不能放 system）。与 pendingUser 同一套延迟落盘：首次模型活动时一起写，取消都不留。
+  const stateRow: SessionMessage = {
+    type: 'message',
+    ts: new Date().toISOString(),
+    role: 'user',
+    content: sessionStateMessage(options.goal, options.lastFailure, options.planMode?.active === true),
+  };
+  mirror.push(stateRow);
   let turnPersisted = false;
   const persistTurnStart = (): void => {
     if (turnPersisted) return;
@@ -268,6 +278,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       content: options.prompt,
       images: options.userImages,
     });
+    options.session.appendMessage({ role: 'user', content: stateRow.content });
     options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
   };
   let compaction: CompactionEvent | undefined = loadCompaction(options.session);
@@ -282,6 +293,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
    * 跨 turn 的累计由 `foldSessionState` 按同样口径重放会话事件得出。
    */
   const cacheTracker = new CacheMissTracker();
+  /** 上一轮请求的前缀快照：分段变更观测的基线（见 prefix-tracker.ts）。compact 后与 cacheTracker 一起重置。 */
+  let prefixPrev: PrefixSnapshot | undefined;
   /** todo 上次落盘的样子：只有真的变了才写事件，避免每步都往 JSONL 塞一份重复快照。 */
   let todoSnapshot = JSON.stringify(todos.list());
   const appendMessage = (message: Omit<SessionMessage, 'type' | 'ts'>): void => {
@@ -643,6 +656,18 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (projection.stubbedFromSession !== undefined && stubFromSession === undefined) {
         stubFromSession = projection.stubbedFromSession;
       }
+      // 前缀分段观测：tools / system 本该是会话常量，消息序列本该只追加。任何一段
+      // 中途变更都直接解释「为什么这轮缓存没命中」，落成事件与 cache_miss 呼应。
+      const snapshot: PrefixSnapshot = {
+        toolsHash: hashText(JSON.stringify(registry.schemas(allowed)) ?? ''),
+        systemHash: hashText(systemPrompt),
+        messageHashes: projection.messages.map((message) => hashMessage(message)),
+      };
+      const prefixChanges = observePrefix(prefixPrev, snapshot);
+      prefixPrev = snapshot;
+      if (prefixChanges.length > 0) {
+        options.session.appendEvent('prefix_change', { changes: prefixChanges });
+      }
       if (projection.compaction) {
         const next = projection.compaction;
         if (next.covered !== (compaction?.covered ?? 0)) {
@@ -654,6 +679,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           cacheTracker.reset();
           // 摘要覆盖了冻结边界所在的区间：旧边界失去意义，以 covered 为新系列起点。
           stubFromSession = undefined;
+          // 历史被计划内改写：前缀基线一并重置，下一轮作为新系列起点，不报 prefix_change。
+          prefixPrev = undefined;
           options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
         }
       }
@@ -672,6 +699,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // provider 判定超窗时压缩后重试一次。上限 1 次：再失败说明单轮内容本身就超窗，
     // 重试只会再烧一次调用。已经给用户看过正文**或思考链**时绝不重试，否则会看到重复内容。
     let overflowRetried = false;
+    // transport 重试的累计墙钟（pi auto_retry_start/end 同款事件语义，dsh 还会持久化——
+    // 没有这个落盘，长思考被网关反复掐断时 JSONL 里只是一段几十分钟的时间空洞）。
+    const transportRetryStartedAt = Date.now();
     for (;;) {
       anchorAt = mirror.length;
       try {
@@ -704,6 +734,15 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
               streamed.text = false;
               streamed.thinking = false;
               options.listener?.({ type: 'stream_retry' });
+              // 与 compat_retry 同等地位落盘：断流次数、错误原文、距本跳开始的耗时
+              // （maxRetries 缺省时省略 max 字段，旧记录保持形状稳定）。
+              options.session.appendEvent('stream_retry', {
+                attempt: info.attempt,
+                ...(info.maxRetries === undefined ? {} : { max: info.maxRetries }),
+                message: info.message,
+                text,
+                elapsedMs: Date.now() - transportRetryStartedAt,
+              });
             }
             // 传输抖动与参数降级都进工作状态行（TUI 按同一条文案累计次数，不进转录）。
             options.listener?.({ type: 'status', level: 'warn', text });
@@ -768,6 +807,14 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     }
 
     const reasoning = reply.reasoning?.length ? { reasoning: reply.reasoning } : {};
+    // Anthropic thinking 回放载荷：思考明文 + 签名随 assistant 行落盘，下一轮
+    // toAnthropicRequest 才能以 thinking 块开头（官方 API 对含 tool_use 的消息强制）。
+    const thinkingReplay = (reply.thinking || reply.thinkingSignature)
+      ? {
+          ...(reply.thinking ? { thinking: reply.thinking } : {}),
+          ...(reply.thinkingSignature ? { thinkingSignature: reply.thinkingSignature } : {}),
+        }
+      : {};
     if (!reply.toolCalls?.length) {
       // OpenCode / deepseek-harness 会话环：只有明确的 stop/length/content-filter 且没有工具才退出。
       //
@@ -779,7 +826,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (!stopped) {
         // 对齐 dsh：没有明确 finish 且没有工具，不当成成功空消息。有半截才落盘再续。
         if (reply.text || reply.thinking || reply.reasoning?.length) {
-          appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
+          appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
         }
         options.listener?.({
           type: 'status',
@@ -788,7 +835,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         });
         continue;
       }
-      appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning });
+      appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
       options.session.appendEvent('turn_end', { depth, finishReason: finish });
       options.listener?.({ type: 'done' });
       return;
@@ -808,6 +855,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       content: reply.text ?? '',
       toolCalls: parsedCalls,
       ...reasoning,
+      ...thinkingReplay,
     });
 
     // 拒绝理由集中在一处判定：execute 只负责执行，提交由 runToolBatch 按模型序推进。

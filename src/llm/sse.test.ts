@@ -187,3 +187,51 @@ describe('postSseStream idle timeout', () => {
     }
   });
 });
+
+describe('postSseStream x-should-retry', () => {
+  it('网关说 x-should-retry: false 时 5xx 也不重试', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: { message: 'backend exploded' } }), {
+        status: 502,
+        headers: { 'content-type': 'application/json', 'x-should-retry': 'false' },
+      })) as typeof fetch;
+    try {
+      await assert.rejects(
+        () =>
+          postSseStream({
+            url: 'http://example.invalid/v1/chat',
+            headers: {},
+            body: '{}',
+            onData: () => {},
+          }),
+        (error: unknown) => !(error instanceof RetryableError) && /502/.test(String(error)),
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('没有该头时 5xx 照常可重试', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: { message: 'backend exploded' } }), {
+        status: 502,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      await assert.rejects(
+        () =>
+          postSseStream({
+            url: 'http://example.invalid/v1/chat',
+            headers: {},
+            body: '{}',
+            onData: () => {},
+          }),
+        (error: unknown) => error instanceof RetryableError,
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});

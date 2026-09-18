@@ -200,7 +200,7 @@ describe('参数降级进工作状态', () => {
           message: 'LLM HTTP 400: unsupported prompt_cache_key; dropping extra request fields',
           kind: 'compat',
         });
-        onRetry?.({ attempt: 2, message: 'socket hang up', kind: 'transport' });
+        onRetry?.({ attempt: 2, message: 'socket hang up', kind: 'transport', maxRetries: 3 });
         return { text: 'ok', finishReason: 'stop', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
       },
     };
@@ -221,8 +221,16 @@ describe('参数降级进工作状态', () => {
       );
       assert.equal(retries.length, 1);
       assert.match(String(retries[0]?.message ?? ''), /prompt_cache_key/);
-      assert.ok(
-        events.some((event) => event.type === 'status' && event.level === 'warn' && /dropping extra request fields/.test(event.text)),
+      // 传输抖动与 pi 的 auto_retry 同款落盘：次数、预算、错误原文、距本跳开始的耗时。
+      const transport = session.readAll().flatMap((record) =>
+        record.type === 'event' && record.kind === 'stream_retry' ? [record.data] : [],
+      );
+      assert.equal(transport.length, 1);
+      assert.equal(transport[0]?.attempt, 2);
+      assert.equal(transport[0]?.max, 3);
+      assert.match(String(transport[0]?.message ?? ''), /socket hang up/);
+      assert.equal(typeof transport[0]?.elapsedMs, 'number');
+      assert.ok(events.some((event) => event.type === 'status' && event.level === 'warn' && /dropping extra request fields/.test(event.text)),
         '参数降级应进工作状态行',
       );
       assert.ok(

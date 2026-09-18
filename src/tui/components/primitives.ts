@@ -479,6 +479,9 @@ export class Loader extends Text {
 	private readonly startedAt = Date.now();
 	private phaseStartedAt = Date.now();
 	private tokens?: number;
+	/** 右上角临时提示（复制反馈）：显示期间盖掉耗时/token，到点自动消失。 */
+	private hint?: string;
+	private hintTimer?: NodeJS.Timeout;
 
 	constructor(
 		ui: TUI,
@@ -512,10 +515,15 @@ export class Loader extends Text {
 		const tokenW = visibleWidth(tokenStr);
 		const phaseW = visibleWidth(phaseStr);
 		const gap = 2;
+		// 复制反馈等临时提示占据右上角：提示文案优先，本轮耗时/token 期间让位。
+		const hintChip = this.hint === undefined ? undefined : ` ${truncateToWidth(this.hint, Math.max(1, inner - 2), "…")} `;
 		// 极窄时先丢掉 token，本轮耗时尽量留着；次数 `(N)` 仍不能被省略号吃掉。
 		let right = turnStr + tokenStr;
 		let rightW = turnW + tokenW;
-		if (rightW + (suffixW > 0 ? gap : 0) > inner && tokenW > 0) {
+		if (hintChip !== undefined) {
+			right = hintChip;
+			rightW = visibleWidth(hintChip);
+		} else if (rightW + (suffixW > 0 ? gap : 0) > inner && tokenW > 0) {
 			right = turnStr;
 			rightW = turnW;
 		}
@@ -539,7 +547,12 @@ export class Loader extends Text {
 			+ this.messageColorFn(clippedBody)
 			+ (suffix === "" ? "" : this.messageColorFn(suffix))
 			+ (showPhase ? this.timerColorFn(phaseStr) : "");
-		const rightStyled = shownRight === "" ? "" : this.timerColorFn(shownRight);
+		const rightStyled =
+			shownRight === ""
+				? ""
+				: hintChip !== undefined
+					? `\x1b[7m${shownRight}\x1b[27m`
+					: this.timerColorFn(shownRight);
 		const leftPart = `${" ".repeat(leftPad)}${left}`;
 		// 不把空格铺满整行：Windows Terminal 会把这些空格画成一条浅底（滚到底时和转录区 2K 空行对比最明显）。
 		let line = leftPart;
@@ -561,6 +574,35 @@ export class Loader extends Text {
 			clearInterval(this.intervalId);
 			this.intervalId = null;
 		}
+		this.clearHintTimer();
+	}
+
+	/** 右上角临时提示（复制反馈）：与全屏 flash 同语义，但落在输入框正上方的状态行右侧。 */
+	showHint(text: string, durationMs = 1200): void {
+		this.clearHintTimer();
+		this.hint = text;
+		this.updateDisplay();
+		this.hintTimer = setTimeout(() => {
+			this.hintTimer = undefined;
+			this.hint = undefined;
+			this.updateDisplay();
+		}, Math.max(0, durationMs));
+		this.hintTimer.unref();
+	}
+
+	private clearHintTimer(): void {
+		if (this.hintTimer) {
+			clearTimeout(this.hintTimer);
+			this.hintTimer = undefined;
+		}
+	}
+
+	/** 立即撤掉提示，耗时/token 恢复显示。 */
+	clearHint(): void {
+		this.clearHintTimer();
+		if (this.hint === undefined) return;
+		this.hint = undefined;
+		this.updateDisplay();
 	}
 
 	setMessage(message: string): void {

@@ -229,3 +229,97 @@ describe('applyAnthropicEvent 流式 usage', () => {
     });
   });
 });
+
+describe('thinking 回放（官方 API 强制 tool_use 前置 thinking 块）', () => {
+  it('thinking 启用时含 tool_calls 的 assistant 以 thinking 块开头（签名完整）', () => {
+    const body = toAnthropicRequest({
+      model: 'claude-sonnet-4',
+      reasoningEffort: 'high',
+      messages: [
+        user('hi'),
+        {
+          role: 'assistant',
+          content: '',
+          thinking: 'let me check',
+          thinkingSignature: 'sig-abc',
+          tool_calls: [{ id: 'tu_1', type: 'function', function: { name: 'a', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'done', tool_call_id: 'tu_1' },
+      ],
+      tools: [tool('a')],
+    });
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const assistant = messages.find((m) => m.role === 'assistant')!;
+    assert.equal(assistant.content[0]?.type, 'thinking');
+    assert.equal(assistant.content[0]?.thinking, 'let me check');
+    assert.equal(assistant.content[0]?.signature, 'sig-abc');
+  });
+
+  it('签名缺失时降级为纯文本块，请求至少能通过', () => {
+    const body = toAnthropicRequest({
+      model: 'claude-sonnet-4',
+      reasoningEffort: 'high',
+      messages: [
+        user('hi'),
+        {
+          role: 'assistant',
+          content: '',
+          thinking: 'let me check',
+          tool_calls: [{ id: 'tu_1', type: 'function', function: { name: 'a', arguments: '{}' } }],
+        },
+      ],
+      tools: [tool('a')],
+    });
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const assistant = messages.find((m) => m.role === 'assistant')!;
+    assert.equal(assistant.content[0]?.type, 'text');
+    assert.equal(assistant.content[0]?.text, 'let me check');
+  });
+
+  it('thinking 关闭时历史里的 thinking 载荷不回放', () => {
+    const body = toAnthropicRequest({
+      model: 'claude-sonnet-4',
+      messages: [
+        user('hi'),
+        {
+          role: 'assistant',
+          content: '',
+          thinking: 'let me check',
+          thinkingSignature: 'sig-abc',
+          tool_calls: [{ id: 'tu_1', type: 'function', function: { name: 'a', arguments: '{}' } }],
+        },
+      ],
+      tools: [tool('a')],
+    });
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const assistant = messages.find((m) => m.role === 'assistant')!;
+    assert.equal(assistant.content.some((b) => b.type === 'thinking'), false);
+  });
+});
+
+describe('signature_delta 捕获', () => {
+  it('流式 signature_delta 累积到 finishStream', () => {
+    const acc = newSseAcc();
+    applyAnthropicEvent(JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }), acc);
+    applyAnthropicEvent(JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'hmm' } }), acc);
+    applyAnthropicEvent(JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-' } }), acc);
+    applyAnthropicEvent(JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'xyz' } }), acc);
+    const reply = finishStream(acc);
+    assert.equal(reply.thinking, 'hmm');
+    assert.equal(reply.thinkingSignature, 'sig-xyz');
+  });
+
+  it('stop_reason 新增变体归一：refusal / sensitive / model_context_window_exceeded', () => {
+    for (const [wire, want] of [
+      ['refusal', 'refusal'],
+      ['sensitive', 'sensitive'],
+      ['model_context_window_exceeded', 'context_full'],
+      ['pause_turn', 'stop'],
+      ['stop_sequence', 'stop'],
+    ] as const) {
+      const acc = newSseAcc();
+      applyAnthropicEvent(JSON.stringify({ type: 'message_delta', delta: { stop_reason: wire } }), acc);
+      assert.equal(finishStream(acc).finishReason, want, wire);
+    }
+  });
+});

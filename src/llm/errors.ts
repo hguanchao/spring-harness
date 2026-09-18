@@ -9,6 +9,8 @@
  * 「结构化错误码」与「自然语言措辞」两类信号，宁可漏判也不能误判成普通错误。
  */
 
+import { RetryableError } from './retry.js';
+
 /** provider 已确认上下文超限；调用方可压缩后重试。 */
 export class ContextOverflowError extends Error {
   constructor(message: string) {
@@ -86,4 +88,36 @@ export function classifyHttpError(status: number, detail: string): string {
 /** 供各协议的 error 抛出点共用：命中超限措辞就产出专用错误类型。 */
 export function llmError(prefix: string, message: string): Error {
   return looksLikeContextOverflow(message) ? new ContextOverflowError(`${prefix}: ${message}`) : new Error(`${prefix}: ${message}`);
+}
+
+/**
+ * 流中途 error 帧里的终态措辞：命中说明重发同一请求也不会好，必须直接上抛。
+ * 传输类失败（upstream disconnected / timeout / overloaded……）各家网关措辞五花八门，
+ * 穷举白名单必然漏，所以只列终态黑名单，其余一律按传输抖动处理。
+ */
+const FATAL_STREAM_FRAME: RegExp[] = [
+  /\bcontent[\s_-]?filter\b/i,
+  /\bmoderation\b/i,
+  /\bpolicy[\s_-]?(?:violation|error|blocked)\b/i,
+  /\binvalid[_\s](?:api[_\s]?)?key\b/i,
+  /\b(?:unauthorized|authentication|forbidden|permission)[_\s]?(?:error|denied)?\b/i,
+  /\binvalid[_\s]request(?:[_\s]error)?\b/i,
+  /\binvalid[_\s](?:parameter|param)\b/i,
+  /\bunsupported[_\s]?(?:parameter|param|model|value|region|country)\b/i,
+  /\bmodel[_\s]?(?:not[_\s]?(?:found|exist)|does[_\s]?not[_\s]?exist)\b/i,
+  /审核/,
+  /敏感(?:内容|词|信息)/,
+  /违规/,
+];
+
+/**
+ * 流中途收到 error 帧（HTTP 已 200）的统一分类。网关常把上游断流包成业务错误上报
+ * （fengwind 的 "Upstream stream disconnected" 即此类），默认判为传输抖动交给
+ * stream-client 丢半截退避重打；只有命中终态措辞（审核、鉴权、参数、额度、超窗）
+ * 才按原语义上抛，否则会把审核拒绝当成网络抖动白打几轮。
+ */
+export function streamFrameError(prefix: string, message: string): Error {
+  if (looksLikeContextOverflow(message) || looksLikeQuotaExceeded(message)) return llmError(prefix, message);
+  if (FATAL_STREAM_FRAME.some((pattern) => pattern.test(message))) return llmError(prefix, message);
+  return new RetryableError(`${prefix}: ${message}`);
 }

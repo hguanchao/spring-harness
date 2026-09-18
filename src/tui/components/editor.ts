@@ -379,6 +379,11 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	/**
+	 * 挂起队列的编辑接管：光标在第一行且宿主返回 true 时 ↑ 被消费。
+	 * 宿主把运行中输入队列搬回编辑器（pi 的 dequeue 语义），用户删改后重新提交。
+	 */
+	public onQueueEditUp?: () => boolean;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -909,6 +914,15 @@ export class Editor implements Component, Focusable {
 
 		// Arrow key navigation (with history support)
 		if (kb.matches(data, "tui.editor.cursorUp")) {
+			// 挂起队列非空时 ↑ 优先接管（历史导航让位）：宿主把队列搬回编辑器编辑。
+			// 正在浏览历史时不抢（保持历史语义）。见 interactive-mode 的 onQueueEditUp。
+			if (
+				this.historyIndex === -1 &&
+				this.isOnFirstVisualLine() &&
+				this.onQueueEditUp?.() === true
+			) {
+				return;
+			}
 			if (
 				this.isOnFirstVisualLine() &&
 				(this.isEditorEmpty() || this.historyIndex > -1 || this.state.cursorCol === 0)

@@ -27,6 +27,49 @@ export interface SubagentInbox {
 }
 
 /**
+ * 主会话的运行中输入队列，在 SubagentInbox 之上加「查看与搬回」。
+ *
+ * 为什么要扩展：steering 原来只有 push/drain——消息进了黑盒，用户挂完就看不见了，
+ * 只能等投递。TUI 的挂起条需要实时读队列内容（每帧渲染），编辑流程需要把队列搬回
+ * 输入框（清空队列、用户删改后重新挂起）。drain 语义不变，loop 无感知。
+ */
+export interface SteeringInbox extends SubagentInbox {
+  /** 当前挂起的消息（从新到旧）；投递与搬回都会改变它。 */
+  peek(): readonly string[];
+  /** 搬回最后一条（编辑用）；队列空时返回 undefined。 */
+  removeLast(): string | undefined;
+  /** 队列是否已达上限（拒绝继续挂起，而不是挤掉最旧）。 */
+  full(): boolean;
+}
+
+/** 主会话运行中输入队列的上限。超过即拒绝：挂起是补充方向，不是批量投喂。 */
+export const STEERING_QUEUE_LIMIT = 8;
+
+/** 造一个带查看与搬回能力的运行中输入队列。TUI 用它；测试注入即可。 */
+export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox & { full(): boolean } {
+  let queue: string[] = [];
+  return {
+    push(text: string) {
+      queue.push(text);
+    },
+    drain() {
+      const all = queue;
+      queue = [];
+      return all;
+    },
+    peek() {
+      return [...queue];
+    },
+    removeLast() {
+      return queue.pop();
+    },
+    full() {
+      return queue.length >= limit;
+    },
+  };
+}
+
+/**
  * 完成通知的正文格式。loop 每步注入与 TUI 唤醒共用同一份文案，避免两边漂移。
  * 带 session id footer：模型据此能 resume 或继续发消息，不必再查 jobs。
  */

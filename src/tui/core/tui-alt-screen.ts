@@ -149,6 +149,11 @@ export interface TuiAltScreenOptions {
 	 * an error otherwise. When omitted, the selection is copied via an OSC 52 write.
 	 */
 	copySelection?: (text: string) => Promise<boolean>;
+	/**
+	 * 复制反馈文案的路由。设置后复制提示交给应用（如落到输入框右上角的状态行），
+	 * 不再走全屏 flash；未设置保持原行为。
+	 */
+	onCopyFeedback?: (message: string) => void;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -195,6 +200,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly scrollToEndIndicator?: () => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly onCopyFeedback?: (message: string) => void;
 	/** 转录内容世代：滚动不递增，避免每帧重排整份对话。 */
 	private contentGeneration = 0;
 
@@ -219,6 +225,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
 		this.openUrl = options.openUrl;
 		this.copySelection = options.copySelection;
+		this.onCopyFeedback = options.onCopyFeedback;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -1160,12 +1167,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// without OSC 52 clipboard passthrough), so only report success when it actually copies.
 		if (this.copySelection) {
 			const ok = await this.copySelection(text);
-			this.flash(ok ? "Copied!" : "Copy failed");
+			this.copyFeedback(ok ? "Copied!" : "Copy failed");
 			return ok;
 		}
 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
-		this.flash("Copied!");
+		this.copyFeedback("Copied!");
 		return true;
+	}
+
+	/** 复制反馈：应用接了 onCopyFeedback 就交给应用落位，否则退回全屏 flash。 */
+	private copyFeedback(message: string): void {
+		if (this.onCopyFeedback) {
+			this.onCopyFeedback(message);
+			return;
+		}
+		this.flash(message);
 	}
 
 	private applySelectionHighlight(text: string): string {

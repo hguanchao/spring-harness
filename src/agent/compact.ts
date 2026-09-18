@@ -345,6 +345,8 @@ export function pushSessionMessage(state: WireState, row: SessionMessage): void 
         function: { name: call.name, arguments: JSON.stringify(call.arguments) },
       })),
       ...(row.reasoning?.length ? { reasoning: row.reasoning } : {}),
+      ...(row.thinking ? { thinking: row.thinking } : {}),
+      ...(row.thinkingSignature ? { thinkingSignature: row.thinkingSignature } : {}),
     });
     return;
   }
@@ -354,6 +356,8 @@ export function pushSessionMessage(state: WireState, row: SessionMessage): void 
     message.parts = row.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }));
   }
   if (row.role === 'assistant' && row.reasoning?.length) message.reasoning = row.reasoning;
+  if (row.thinking) message.thinking = row.thinking;
+  if (row.thinkingSignature) message.thinkingSignature = row.thinkingSignature;
   state.messages.push(message);
 }
 

@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { classifyHttpError, looksLikeContextOverflow, looksLikeQuotaExceeded } from './errors.js';
+import {
+  classifyHttpError,
+  ContextOverflowError,
+  looksLikeContextOverflow,
+  looksLikeQuotaExceeded,
+  streamFrameError,
+} from './errors.js';
+import { RetryableError } from './retry.js';
 
 describe('looksLikeContextOverflow', () => {
   it('认 dsh 结构化 context_window_limit_exceeded', () => {
@@ -21,5 +28,32 @@ describe('classifyHttpError', () => {
     assert.equal(classifyHttpError(500, 'boom'), 'SERVER');
     assert.equal(classifyHttpError(400, 'context length exceeded'), 'CONTEXT_WINDOW_EXCEEDED');
     assert.equal(classifyHttpError(400, 'bad field'), 'INVALID_REQUEST');
+  });
+});
+
+describe('streamFrameError', () => {
+  it('网关断流/过载措辞按传输抖动可重试', () => {
+    assert.ok(streamFrameError('LLM error', 'Upstream stream disconnected') instanceof RetryableError);
+    assert.ok(streamFrameError('Anthropic stream error', 'Overloaded_error') instanceof RetryableError);
+    assert.ok(streamFrameError('Responses stream error', 'upstream connect error') instanceof RetryableError);
+  });
+
+  it('终态措辞（审核/鉴权/参数/额度）原样上抛不可重试', () => {
+    for (const message of [
+      'content_filter: your prompt was flagged',
+      '内容审核未通过',
+      'invalid api key',
+      'invalid_request_error: unsupported parameter',
+      'insufficient quota',
+    ]) {
+      const error = streamFrameError('LLM error', message);
+      assert.ok(!(error instanceof RetryableError), message);
+    }
+  });
+
+  it('超窗仍产出 ContextOverflowError 走压缩重试', () => {
+    assert.ok(
+      streamFrameError('LLM error', "This model's maximum context length is exceeded") instanceof ContextOverflowError,
+    );
   });
 });

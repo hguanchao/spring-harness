@@ -151,12 +151,9 @@ export interface SystemPromptInput {
    * 传入时，不可用工具的段落整段消失——不留指向不存在工具的指令。
    */
   allowedTools?: ReadonlySet<string>;
-  /** 跨轮次任务目标（会话事件折叠而来）。 */
-  goal?: string;
-  /** 最近一次工具失败；恢复会话后尤其有用。 */
-  lastFailure?: { tool: string; excerpt: string };
-  /** 计划模式激活时追加引导段；写工具由 loop 运行时拒绝。 */
-  planMode?: boolean;
+  // goal / lastFailure / planMode 刻意不在这里：它们是随时可变的跨轮次状态，放 system
+  // prompt（前缀缓存的最头部）意味着一次 /goal、一次失败重试、一次模式翻转就毁掉全部
+  // 消息历史的缓存。它们经 sessionStateMessage 注入为尾部 user 消息（append-only）。
 }
 
 export function buildSystemPrompt(input: SystemPromptInput): string {
@@ -167,14 +164,6 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
   const mcp = !input.mcpTools || input.mcpTools.length === 0
     ? '(none)'
     : input.mcpTools.map((tool) => `- ${tool.server}/${tool.name}: ${tool.description}`).join('\n');
-
-  // 目标与失败历史来自会话事件，是「跨轮次」状态——压缩之后仍要看得见，所以放在提示词里。
-  const goalLine = input.goal
-    ? `Current goal (persisted across turns until the user clears it):\n${input.goal}`
-    : '';
-  const failureLine = input.lastFailure
-    ? `Most recent tool failure in this session:\n${input.lastFailure.tool}: ${input.lastFailure.excerpt}\nDo not repeat it blindly; re-read the error before retrying the same call.`
-    : '';
 
   const toolText = TOOL_SECTIONS.filter(
     (section) => input.allowedTools === undefined || input.allowedTools.has(section.tool),
@@ -236,11 +225,40 @@ Do not end a turn by only announcing the next lookup. Call the tool in the same 
 Your text is rendered as GitHub-flavored markdown. Use it when it helps: bullets for parallel items, **bold** for emphasis, \`inline code\` for paths, identifiers, and commands, tables for short enumerable facts. When nesting code fences, make the outer fence longer than every inner fence.
 </formatting>`,
 
-    goalLine,
-    failureLine,
-    input.planMode ? planModeSection() : '',
     `Skill catalog:\n${catalog}`,
     `MCP tools:\n${mcp}`,
     memory ? `<project_instructions>\n${memory}\n</project_instructions>` : 'No AGENTS.md at workspace root.',
   ].filter(Boolean).join('\n\n');
+}
+
+/** 状态消息的固定开头；TUI 回放据此跳过（快照不该出现在聊天流里）。 */
+export const SESSION_STATE_PREFIX = '[session state — ';
+
+/** 判断一条 user 消息是否为跨轮次状态快照（sessionStateMessage 的产物）。 */
+export function isSessionStateMessage(content: string): boolean {
+  return content.startsWith(SESSION_STATE_PREFIX);
+}
+
+/**
+ * 跨轮次状态（goal / 最近一次工具失败 / 计划模式）注入为尾部 user 消息。
+ *
+ * 为什么不放 system prompt：前缀缓存按逐字节一致的开头命中，system prompt 位于
+ * 前缀头部——goal 一改、失败一变、计划模式一翻转，之后整个消息历史都按全价重算。
+ * 作为消息追加则是合法的 append-only：本轮固化的快照在下一轮请求里原样重放，缓存
+ * 无缝延续；新状态永远以「最后一条」出现，模型按规则只认最后一条。
+ *
+ * 无 goal / 无失败时仍写占位行：每轮的形态一致，模型不需要解析"这一行可能消失"。
+ * 计划模式激活时附引导正文（plan.ts）；写拦截由 loop 运行时负责，不靠这段话。
+ */
+export function sessionStateMessage(
+  goal: string | undefined,
+  lastFailure: { tool: string; excerpt: string } | undefined,
+  planModeActive: boolean,
+): string {
+  return [
+    `${SESSION_STATE_PREFIX}the latest of these messages is authoritative; earlier ones are snapshots]`,
+    `Goal: ${goal ?? '(none)'}  (persisted across turns until the user clears it)`,
+    `Most recent tool failure: ${lastFailure ? `${lastFailure.tool}: ${lastFailure.excerpt}` : '(none)'}`,
+    ...(planModeActive ? ['Plan mode is ON.', planModeSection()] : ['Plan mode: off.']),
+  ].join('\n');
 }

@@ -20,10 +20,10 @@ import { sphModelsPath, sphThemePath } from '../home.js';
 import { visibleWidth } from './core/utils.js';
 
 import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
-import type { SubagentInbox } from '../runtime/jobs.js';
+import { createSteeringInbox, STEERING_QUEUE_LIMIT, type SteeringInbox } from '../runtime/jobs.js';
 import { runTurn, type AgentDriver } from '../agent/loop.js';
 import { TouchMemory } from '../agent/memory.js';
-import { buildSystemPrompt } from '../agent/prompt.js';
+import { buildSystemPrompt, isSessionStateMessage } from '../agent/prompt.js';
 import {
   AUTO_RECAP_RETRY_MS,
   RECAP_IDLE_MS,
@@ -78,6 +78,7 @@ import {
   BLOCK_GAP,
   CombinedAutocompleteProvider,
   Container,
+  type Component,
   isKeyRelease,
   isViewportTUI,
   type SelectItem,
@@ -305,25 +306,22 @@ class InteractiveMode implements ApprovalUi {
   private readonly editorContainer = new Container();
   private readonly footerContainer = new Container();
   private transcriptView: ScrollView | undefined;
-  private readonly idleStatus = new IdleStatus();
+  private readonly idleStatus = new IdleStatus(() => this.ui?.requestRender());
   private readonly footer: FooterComponent;
   private readonly header: HeaderComponent;
 
   private session: JsonlSession;
   private client: LlmClient;
-  private readonly turnInbox: SubagentInbox = (() => {
-    let queue: string[] = [];
-    return {
-      push(text: string) {
-        queue.push(text);
-      },
-      drain() {
-        const out = queue;
-        queue = [];
-        return out;
-      },
-    };
-  })();
+  private readonly turnInbox: SteeringInbox = createSteeringInbox();
+  /**
+   * 运行中输入的挂起条：每帧从 turnInbox 动态渲染，队列空即零占用。
+   * 渲染进 pendingContainer（与工具调用行同区）——不新增布局段，工作状态条的位置
+   * 与可见性不受影响；容器本身 shrink 弹性，行数多时先压它。
+   */
+  private readonly steersBar: Component = {
+    invalidate: () => {},
+    render: () => this.renderPendingSteers(),
+  };
   private followUps: string[] = [];
   private readonly approver: InteractiveApprover;
   /** `subagent_approval = "strict"` 时的子代理审批器；inherit 时 undefined（复用 approver）。 */
@@ -375,6 +373,11 @@ class InteractiveMode implements ApprovalUi {
   private inFlightPrompt?: string;
   /** 取消时把原文放回输入框（等 abort 收尾后再做，避免和 thinking_start 抢）。 */
   private pendingRewind?: string;
+  /**
+   * 立即发送的待投内容：挂起队列在 turn 运行中触发「现在就发」时，先中断当前轮，
+   * 轮次收尾（finally）里以这段合并文本立即开新一轮。仅在 sendQueuedNow 设置。
+   */
+  private sendAfterInterrupt?: string;
   private readonly pendingTools = new Map<string, ToolExecutionComponent>();
   private readonly toolGroups: ToolGroupComponent[] = [];
   /** 当前正在累积的工具分组；助手正文/通知/轮次结束都会把它断开。 */
@@ -435,6 +438,8 @@ class InteractiveMode implements ApprovalUi {
     this.maxTokens = deps.maxTokens;
     this.approval = deps.approvalMode;
     this.contextWindow = deps.contextWindow;
+    // 挂起条先于任何工具行入容器：排在工具行之后渲染（贴近状态条），且构造即占位。
+    this.pendingContainer.addChild(this.steersBar);
 
     this.client = this.buildClient();
     // 辅助 client 必须在这里建好：下面构造审批器时要用 reviewClient，runTurn 时要用 compactClient。
@@ -457,7 +462,12 @@ class InteractiveMode implements ApprovalUi {
       ? new HeadlessApprover('ask', undefined, deps.permissionRules)
       : undefined;
 
-    this.ui = deps.ui ?? new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot);
+    // 复制反馈落输入框右上角（状态行右侧），不走全屏 flash；未注入 deps.ui 的测试路径保持默认。
+    this.ui =
+      deps.ui ??
+      new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot, {
+        onCopyFeedback: (message) => this.showCopyHint(message),
+      });
     this.editor = new CustomEditor(this.ui, getEditorTheme(), {
       paddingX: 1,
       autocompleteMaxVisible: 8,
@@ -542,6 +552,17 @@ class InteractiveMode implements ApprovalUi {
     this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(slashCommands, this.deps.workspaceRoot));
     this.editor.onSubmit = (text) => {
       void this.handleSubmit(text);
+    };
+    // 挂起队列非空时 ↑ 把队列全部搬回编辑器（pi 的 dequeue 语义）：删掉不要的行即取消，
+    // Enter 重新挂起。全量搬回而不是逐条——一条规则讲清楚，没有歧义中间态。
+    this.editor.onQueueEditUp = () => {
+      const queued = this.turnInbox.drain();
+      if (queued.length === 0) return false;
+      const current = this.editor.getText().trim();
+      const merged = queued.join('\n\n');
+      this.editor.setText(current === '' ? merged : `${current}\n\n${merged}`);
+      this.ui.requestRender();
+      return true;
     };
     this.editor.onAction('app.followUp', () => {
       const text = this.editor.getText().trim();
@@ -647,6 +668,9 @@ class InteractiveMode implements ApprovalUi {
 
   private replayMessage(record: SessionMessage): void {
     if (record.role === 'user') {
+      // 跨轮次状态快照（goal/失败/计划模式）是给模型读的缓存友好注入，不进聊天流——
+      // 每轮一条的重复快照在回放里只会是噪声；最新一条的语义已由当前 turn 的注入保证。
+      if (isSessionStateMessage(record.content)) return;
       this.chatContainer.addChild(new UserMessageComponent(record.content, getMarkdownTheme()));
       return;
     }
@@ -744,14 +768,34 @@ class InteractiveMode implements ApprovalUi {
       return;
     }
     if (this.running) {
+      // 空草稿 + 队列非空：Enter 的意思是「现在就发」——中断当前步，把挂起队列合并
+      // 成一次投递立即开新一轮（对齐 claude code 的 Enter to send them immediately）。
+      if (text === '' && this.turnInbox.peek().length > 0) {
+        this.sendQueuedNow();
+        return;
+      }
+      // 队列满时拒绝而不是挤掉最旧：静默丢用户的输入是最差的失败模式。
+      if (this.turnInbox.full()) {
+        this.addNotice(
+          `Steering queue is full (${STEERING_QUEUE_LIMIT}) — press Enter to send now, or ↑ to edit the queue.`,
+          'warn',
+        );
+        return;
+      }
       this.turnInbox.push(text);
-      this.addNotice('Queued steering — delivered after the current model/tool step.', 'dim');
+      // 挂起条随下一帧自动更新（steersBar 每帧动态渲染），不再弹 dim 通知。
+      this.ui.requestRender();
       return;
     }
     await this.executeTurn(text, true);
   }
 
   private queueFollowUp(text: string): void {
+    // 与 steering 挂起队列同一上限：两处都是「补充方向」，堆积同样稀释模型注意力。
+    if (this.followUps.length >= STEERING_QUEUE_LIMIT) {
+      this.addNotice(`Follow-up queue is full (${STEERING_QUEUE_LIMIT}) — cancel one first.`, 'warn');
+      return;
+    }
     this.followUps.push(text);
     this.addNotice(`Queued follow-up (${this.followUps.length}) — runs after this turn.`, 'dim');
     this.ui.requestRender();
@@ -825,7 +869,14 @@ class InteractiveMode implements ApprovalUi {
       this.inFlightPrompt = undefined;
       if (rewind !== undefined) {
         this.dropLastUserBubble();
-        this.editor.setText(rewind);
+        // Esc 中断自带队列回填（对齐 pi：abort restores queued messages）——模型还没
+        // 响应时整个轮次作废重来，未投递的挂起消息连同原 prompt 一起回到编辑器。
+        // 模型已响应的普通中断不在此列：队列继续挂起，下一轮照常自动投递。
+        const stranded = this.turnInbox.drain();
+        const restored = stranded.length > 0
+          ? `${rewind}\n\n${stranded.join('\n\n')}`
+          : rewind;
+        this.editor.setText(restored);
         this.pinLatestUserMessage();
       }
       const follow = !controller.signal.aborted && rewind === undefined ? this.followUps.shift() : undefined;
@@ -846,6 +897,14 @@ class InteractiveMode implements ApprovalUi {
       // 竞态收口：通知在轮次收尾瞬间到达时，onTaskDone 回调已被 running 挡掉，
       // 这里补一次 drain——否则结果要滞留到用户下一次发言才被注入。
       this.wakeForCompletedJobs();
+      // 立即发送：挂起队列触发的「现在就发」——中断后以合并文本接续，优先于
+      // followUps（followUps 属于被中断的那一轮，留给新轮结束后再消费）。
+      if (this.sendAfterInterrupt !== undefined) {
+        const prompt = this.sendAfterInterrupt;
+        this.sendAfterInterrupt = undefined;
+        void this.executeTurn(prompt, true);
+        return;
+      }
       if (follow) void this.executeTurn(follow, true);
     }
   }
@@ -860,6 +919,23 @@ class InteractiveMode implements ApprovalUi {
     const prompt = notifications.map(jobNotificationText).join('\n\n');
     this.addNotice('Background task completed — continuing.', 'dim');
     void this.executeTurn(prompt);
+  }
+
+  /**
+   * 「现在就发」：把挂起队列合并成一次投递，中断当前轮并立即开新一轮。
+   *
+   * 为什么是中断而不是插话：模型正在生成的半截响应与挂起消息并存时，先后语义会乱——
+   * 用户按 Enter 的意图就是「别管当前的了，先看我的」。中断走正常 abort 路径（工具
+   * 清理与 interrupted 事件都是既有语义）；不设置 pendingRewind——原轮的 prompt 与
+   * 部分输出保留在对话里（它们是发生过的事实），新轮从合并文本接续。
+   */
+  private sendQueuedNow(): void {
+    if (!this.abort) return;
+    const queued = this.turnInbox.drain();
+    if (queued.length === 0) return;
+    this.sendAfterInterrupt = queued.join('\n\n');
+    this.setActivity(WorkingLabel.cancelling);
+    this.abort.abort();
   }
 
   /**
@@ -1217,6 +1293,23 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /** 待办区显示一行「正在跑的工具」；按 toolCallId 记账，tool_end 时精确移除。 */
+  /**
+   * 挂起条：运行中输入队列的可视化，替代原先那条一闪而过的 dim 通知。
+   *
+   * 每帧从 turnInbox 动态取数——loop 在安全点 drain 后下一帧自动清空，不需要显式同步。
+   * 行样式与工具行一致（muted、截断）；最多展开 3 条，其余折叠为一行计数。
+   */
+  private renderPendingSteers(): string[] {
+    const items = this.turnInbox.peek();
+    if (items.length === 0) return [];
+    const lines = [`  ⏎ ${items.length} queued — Enter to send now · ↑ to edit`];
+    if (items.length > 3) lines.push(`  ⏎ +${items.length - 3} more`);
+    for (const text of items.slice(-3)) {
+      lines.push(`  ⏎ ${flattenWhitespace(text).slice(0, 96)}`);
+    }
+    return lines.map((line) => theme.fg('muted', line));
+  }
+
   private addPendingToolLine(id: string, name: string, args: Record<string, unknown>): void {
     const detail = typeof args.command === 'string' ? args.command : (typeof args.path === 'string' ? args.path : '');
     const oneLine = flattenWhitespace(`${name}${detail ? ` ${detail}` : ''}`).slice(0, 100);
@@ -1310,6 +1403,15 @@ class InteractiveMode implements ApprovalUi {
     this.activityLabel = message;
     this.currentIndicator?.setMessageColor((text) => theme.fg('muted', text));
     this.currentIndicator?.setMessage(message);
+  }
+
+  /**
+   * 复制反馈显示在输入框右上角（状态行右侧）：提示文案优先，期间的耗时/token 让位。
+   * 工作态落在 Loader、空闲态落在 IdleStatus 占位行——同一时刻 statusContainer 只挂一个，二选一生效。
+   */
+  private showCopyHint(message: string): void {
+    this.idleStatus.showHint(message);
+    this.currentIndicator?.showHint(message);
   }
 
   /**
@@ -2052,9 +2154,8 @@ class InteractiveMode implements ApprovalUi {
         sandbox: this.deps.sandbox.status.mode,
         skills: scanSkills(this.deps.workspaceRoot).catalog,
         mcpTools: this.deps.mcp.listTools(),
-        goal: this.goal,
-        lastFailure: this.lastFailure,
-        planMode: this.plan.active,
+        // goal / lastFailure / planMode 与 runTurn 同参：不进 system（前缀最头部），
+        // 跨轮次状态由 runTurn 以尾部 user 消息注入。
       }),
       contextWindow: this.contextWindow,
     };
