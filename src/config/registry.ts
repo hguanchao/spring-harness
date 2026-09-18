@@ -16,6 +16,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { isRecord } from '../util.js';
+import { writeAtomically } from './save.js';
 import { parseApiProtocol, parseCompat, type ApiProtocol } from './primitives.js';
 import type { CompatProfile } from '../llm/compat.js';
 import { ConfigError } from './errors.js';
@@ -217,6 +218,51 @@ export function loadRegistry(path: string, env: NodeJS.ProcessEnv = process.env)
     throw new ConfigError(`models.json is not valid JSON (${path}): ${reason}`);
   }
   return parseRegistry(parsed, env);
+}
+
+/**
+ * 向某个 provider 追加一条模型声明并原子写回 models.json。
+ *
+ * 这是 `/provider` 向导「选了未声明的模型就追加」的写入口。刻意不走 parseRegistry：
+ * 那条路径会把 `$VAR` 插值成真实值再写回，等于把凭据烙进文件——这里只动目标 provider
+ * 的 models 数组，其余字节原样保留（整体重新序列化为 2 空格 JSON，models.json 本来就
+ * 是无注释的纯 JSON，不存在 TOML 那种注释保真问题）。
+ *
+ * id 已存在时不动文件：重复声明没有意义，静默返回让调用方继续切模型。
+ */
+export function appendModelDeclaration(
+  path: string,
+  providerName: string,
+  modelId: string,
+  options: { name?: string; contextWindow?: number; maxTokens?: number } = {},
+): void {
+  if (!existsSync(path)) {
+    throw new ConfigError(`models.json not found: ${path}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new ConfigError(`models.json is not valid JSON (${path}): ${reason}`);
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.providers)) {
+    throw new ConfigError(`models.json has no providers table: ${path}`);
+  }
+  const provider = (parsed.providers as Record<string, unknown>)[providerName];
+  if (!isRecord(provider)) {
+    throw new ConfigError(`unknown provider "${providerName}" in models.json`);
+  }
+  if (!Array.isArray(provider.models)) {
+    throw new ConfigError(`providers.${providerName}.models must be an array in models.json`);
+  }
+  const declared = provider.models.some(
+    (row) => isRecord(row) && (row as Record<string, unknown>).id === modelId,
+  );
+  if (declared) return;
+  provider.models.push({ id: modelId, ...options });
+  // 结尾换行保持与手写文件的惯例一致；解析不依赖它。
+  writeAtomically(path, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
 export function findProvider(registry: ModelRegistry, name: string): ProviderDeclaration {

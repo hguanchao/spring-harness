@@ -66,10 +66,13 @@ TUI keys: /            command menu (Up/Down pick, Enter run)
           Ctrl+C       abort the running turn; press twice to exit
           Ctrl+D       exit (when the input is empty)
 TUI commands: /help /new /resume /skills /mcps /plan /goal
-              /compact /model /effort /permission
+              /compact /model /provider /effort /permission
               (/sessions is an alias of /resume; /resume <id> switches
               directly, /resume alone opens the picker. /compact folds
               older history into a checkpoint on demand.)
+              (/provider switches provider: pick one, its upstream
+              catalog is fetched, then pick a model — an undeclared
+              model is appended to models.json before switching.)
               (a recap is generated automatically when you come back
               after being away)
               /mcps manages servers (enable/disable, add, remove, reload)

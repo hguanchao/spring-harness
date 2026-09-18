@@ -551,6 +551,20 @@ export async function showConfirmDialog(
 	return selected === 'confirm';
 }
 
+/**
+ * 加载中弹窗：无交互正文，调用方完成后自行 handle.hide() 收掉。
+ *
+ * 给等待网络这类没有进度的场景用；用户按 Esc / Enter 仍可提前关掉弹窗（只是不再
+ * 看着它等，请求本身继续跑，结果照常处理）。
+ */
+export function showLoadingDialog(
+	tui: TUI,
+	options: { title: string; text: string; width?: SizeValue },
+): OverlayHandle {
+	const dialog = new MessageDialog(options.title, options.text, '', () => rowBudget(tui, '30%'));
+	return tui.showOverlay(dialog, overlayOptions(options.width ?? '50%', '30%', MESSAGE_MAX_WIDTH));
+}
+
 /** 只读长文本对话框（帮助、状态、待办、任务等）。 */
 export function showMessageDialog(
 	tui: TUI,

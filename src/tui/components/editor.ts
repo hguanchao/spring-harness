@@ -1,6 +1,7 @@
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "../core/autocomplete.js";
 import { getKeybindings } from "../core/keybindings.js";
 import { decodePrintableKey, matchesKey } from "../core/keys.js";
+import { theme } from "../theme/theme.js";
 import { consumeBracketedPaste, findWordBackward, findWordForward, KillRing, UndoStack } from "../core/editor-support.js";
 import {
 	type Component,
@@ -578,6 +579,8 @@ export class Editor implements Component, Focusable {
 					bottomInfo: scrollInfo,
 					infoWidth: scrollInfo.length,
 					frame: (text: string) => this.theme.borderColor(text),
+					// 标题与浮层对话框（RoundedDialogBox）同一套：主色紫加粗，弹窗观感统一。
+					titlePaint: (text: string) => theme.bold(theme.fg('primary', text)),
 				});
 				for (const line of boxed) {
 					result.push(`${leftPadding}${line}${rightPadding}`);
@@ -2317,9 +2320,17 @@ export class Editor implements Component, Focusable {
 		items: SelectItem[];
 		title: string;
 		maxVisible?: number;
+		/** 主列（label 列）宽度；省略用组件默认 32。传「最宽 label + 间隙」可让列随内容收紧。 */
+		primaryColumnWidth?: number;
 	}): Promise<SelectItem | undefined> {
 		this.closeInlineMenu(undefined); // 已有菜单先收:旧的以 undefined 结束
-		const list = new SelectList(options.items, options.maxVisible ?? 10, this.theme.selectList);
+		const layout = options.primaryColumnWidth === undefined
+			? undefined
+			: {
+				minPrimaryColumnWidth: options.primaryColumnWidth,
+				maxPrimaryColumnWidth: options.primaryColumnWidth,
+			};
+		const list = new SelectList(options.items, options.maxVisible ?? 10, this.theme.selectList, layout);
 		list.renderScrollInfoLine = false;
 		return new Promise((resolve) => {
 			this.inlineMenu = { list, title: options.title, resolve };

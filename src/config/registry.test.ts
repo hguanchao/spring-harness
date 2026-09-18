@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  appendModelDeclaration,
   findProvider,
   interpolateEnv,
   loadRegistry,
@@ -9,6 +13,20 @@ import {
   splitProviderModel,
 } from './registry.js';
 import { ConfigError } from './errors.js';
+
+const dirs: string[] = [];
+
+after(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+});
+
+function registryFile(text: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'sph-reg-'));
+  dirs.push(dir);
+  const path = join(dir, 'models.json');
+  writeFileSync(path, text, 'utf8');
+  return path;
+}
 
 const REGISTRY = {
   providers: {
@@ -123,5 +141,42 @@ describe('splitProviderModel 歧义', () => {
 
   it('无斜杠时就是模型 id', () => {
     assert.deepEqual(splitProviderModel(providers, 'glm'), { model: 'glm' });
+  });
+});
+
+describe('appendModelDeclaration', () => {
+  const BASE = JSON.stringify({
+    providers: {
+      main: { baseUrl: 'https://api.example.com/v1', api: 'responses', apiKey: '$MAIN_KEY', models: [{ id: 'glm' }] },
+    },
+  });
+
+  it('追加未声明的模型，能被 loadRegistry 读回', () => {
+    const path = registryFile(BASE);
+    appendModelDeclaration(path, 'main', 'new-model', { contextWindow: 128_000 });
+    const registry = loadRegistry(path, env);
+    const main = findProvider(registry, 'main');
+    assert.ok(main.models.some((row) => row.id === 'new-model' && row.contextWindow === 128_000));
+    assert.ok(main.models.some((row) => row.id === 'glm'), '已有声明保留');
+  });
+
+  it('id 已存在时不写文件', () => {
+    const path = registryFile(BASE);
+    const before = readFileSync(path, 'utf8');
+    appendModelDeclaration(path, 'main', 'glm');
+    assert.equal(readFileSync(path, 'utf8'), before, '重复声明不动文件');
+  });
+
+  it('$VAR 原样保留：追加不把插值烙成真实值', () => {
+    const path = registryFile(BASE);
+    appendModelDeclaration(path, 'main', 'new-model');
+    const text = readFileSync(path, 'utf8');
+    assert.match(text, /\$MAIN_KEY/, 'apiKey 的插值引用必须原样写回');
+  });
+
+  it('未知 provider 或坏 JSON 直接报错', () => {
+    const path = registryFile(BASE);
+    assert.throws(() => appendModelDeclaration(path, 'nope', 'x'), /unknown provider/);
+    assert.throws(() => appendModelDeclaration(registryFile('{ bad'), 'main', 'x'), /not valid JSON/);
   });
 });

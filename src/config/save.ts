@@ -104,7 +104,8 @@ export function updateConfigFile(path: string, patch: Readonly<Record<string, Co
   return { path, keys, added };
 }
 
-function writeAtomically(path: string, text: string): void {
+/** 原子写文本：临时文件 + rename，写一半失败不截断原文件。供 registry 的 JSON 写回共用。 */
+export function writeAtomically(path: string, text: string): void {
   const temp = `${path}.tmp-${process.pid}`;
   writeFileSync(temp, text, 'utf8');
   try {

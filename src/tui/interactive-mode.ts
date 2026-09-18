@@ -16,7 +16,8 @@ import { join } from 'node:path';
 import type { AgentListener, SubagentEvent } from '../agent/events.js';
 import { loadCompaction, projectContext } from '../agent/compact.js';
 import { loadUserTheme } from './theme/theme.js';
-import { sphThemePath } from '../home.js';
+import { sphModelsPath, sphThemePath } from '../home.js';
+import { visibleWidth } from './core/utils.js';
 
 import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
 import type { SubagentInbox } from '../runtime/jobs.js';
@@ -40,14 +41,14 @@ import { createGrantStore } from '../permission/store.js';
 import { updateConfigFile } from '../config/save.js';
 import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
 import type { ApiProtocol } from '../config/load.js';
-import { splitProviderModel, type ProviderDeclaration, type ResolvedModel } from '../config/registry.js';
+import { appendModelDeclaration, splitProviderModel, type ProviderDeclaration, type ResolvedModel } from '../config/registry.js';
 import {
   REASONING_EFFORTS,
   type LlmClient,
   type ReasoningEffort,
   type TokenUsage,
 } from '../llm/openai.js';
-import { displayNameForModel } from '../llm/models.js';
+import { displayNameForModel, listAvailableModels } from '../llm/models.js';
 import type { McpHub, McpReloadResult } from '../mcp/hub.js';
 import type { McpPreferences, McpSourceReport } from '../mcp/sources.js';
 import type { JobBoard } from '../runtime/jobs.js';
@@ -92,7 +93,7 @@ import {
 } from './core/index.js';
 import { matchesAppKey } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
-import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
+import { showConfirmDialog, showInputDialog, showLoadingDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import { mcpStateLabel, renderMcpReport, renderMcpTools, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
 import { AssistantMessageComponent } from './components/assistant-message.js';
@@ -214,6 +215,7 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
+  { id: 'provider', label: '/provider', hint: 'Switch provider; pick a model from its upstream catalog' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
   { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo' },
   { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
@@ -243,6 +245,20 @@ function message(error: unknown): string {
 
 /** 输入框上方子代理栏最多显示几行，多出来的折成 `… N more`。 */
 const MAX_DOCK_SUBAGENT_ROWS = 5;
+/** `/provider` 拉上游目录的超时。刻意短：不少中转站根本没有 /models 目录端点（返回 502 或干脆挂住），走代理时 CONNECT 隧道也会拖很久。目录只是发现手段，降级路径（已声明 + 手动输入）才是兜底。 */
+const PROVIDER_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * 斜杠命令弹窗的主列（label 列）宽度：最宽 label + 2 列间隙，下限 8。
+ *
+ * SelectList 默认 32 列是给「命令表 + 长提示」这类排版用的；对 label 很短的菜单
+ * （ask / yolo / effort 档位）会让 description 拖出一大段空白。统一自适应后各弹窗
+ * 的列都贴内容，视觉一致。
+ */
+function primaryColumnWidthFor(items: readonly SelectItem[]): number {
+  const widest = items.reduce((max, item) => Math.max(max, visibleWidth(item.label)), 0);
+  return Math.max(widest, 8) + 2;
+}
 
 /**
  * 子代理内部事件 → 行内活动段文案，与底部状态行共用同一套词（WorkingLabel）。
@@ -1468,7 +1484,7 @@ class InteractiveMode implements ApprovalUi {
       label: command.label,
       description: command.hint,
     }));
-    const selected = await this.editor.showInlineMenu({ title: 'Commands', items, maxVisible: 14 });
+    const selected = await this.editor.showInlineMenu({ title: 'Commands', items, maxVisible: 14, primaryColumnWidth: primaryColumnWidthFor(items) });
     if (selected) await this.handleCommand(`/${selected.value}`);
   }
 
@@ -1509,6 +1525,9 @@ class InteractiveMode implements ApprovalUi {
         break;
       case 'model':
         await this.commandModel(argument);
+        break;
+      case 'provider':
+        await this.commandProvider(argument);
         break;
       case 'effort':
         await this.commandEffort(argument);
@@ -1825,7 +1844,7 @@ class InteractiveMode implements ApprovalUi {
       label: `${info.id}${info.id === this.session.id ? '  (current)' : ''}`,
       description: `${new Date(info.mtimeMs).toISOString().replace('T', ' ').slice(0, 16)} · ${info.messages} msgs${this.subagentCountLabel(info.subagents)} · ${info.preview}`,
     }));
-    const selected = await this.editor.showInlineMenu({ title: 'Sessions', items, maxVisible: 12 });
+    const selected = await this.editor.showInlineMenu({ title: 'Sessions', items, maxVisible: 12, primaryColumnWidth: primaryColumnWidthFor(items) });
     if (!selected || selected.value === this.session.id) return;
     this.switchSession(selected.value);
   }
@@ -2164,13 +2183,31 @@ class InteractiveMode implements ApprovalUi {
     // 候选只来自 models.json 的声明：模型目录是显式维护的清单，不再从上游拉取缓存——
     // 上游会新增模型，而拉一次就存住的缓存只会静默地给出旧列表。
     const providers = this.deps.models();
+    if (providers.length === 0) {
+      this.addNotice('No models declared in models.json.', 'warn');
+      return;
+    }
+    // description 列内排三段：模型 ID / 提供商 / 状态。各段按最宽值 pad（间隙 2），
+    // 加上 label 列就是四列；中文名混排时字符数不等于显示宽，按 visibleWidth 对齐才不会锯齿。
+    const widthOf = (text: string): number => visibleWidth(text);
+    const idColumnWidth = Math.max(...providers.flatMap((provider) => provider.models.map((row) => widthOf(row.id))));
+    const providerColumnWidth = Math.max(...providers.map((provider) => widthOf(provider.name)));
+    const labelColumnWidth = Math.max(
+      ...providers.flatMap((provider) =>
+        provider.models.map((row) => widthOf(row.name ?? displayNameForModel(row.id))),
+      ),
+    );
+    const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
     const items: SelectItem[] = providers.flatMap((provider) =>
       provider.models.map((declared) => {
         const value = provider.name === this.provider ? declared.id : `${provider.name}/${declared.id}`;
+        const isCurrent = provider.name === this.provider && declared.id === this.model;
         return {
           value,
           label: declared.name ?? displayNameForModel(declared.id),
-          description: value === `${this.provider}/${this.model}` ? `${value}    current` : value,
+          description: `${padTo(declared.id, idColumnWidth)}${padTo(provider.name, providerColumnWidth)}${
+            isCurrent ? 'current' : ''
+          }`.trimEnd(),
         };
       }),
     );
@@ -2178,10 +2215,133 @@ class InteractiveMode implements ApprovalUi {
       this.addNotice('No models declared in models.json.', 'warn');
       return;
     }
-    const selected = await this.editor.showInlineMenu({ title: 'Model', items, maxVisible: 14 });
+    const selected = await this.editor.showInlineMenu({
+      title: 'Model',
+      items,
+      maxVisible: 14,
+      // 主列贴内容收紧：默认 32 列会让短模型名后面拖一长条空白，四列观感才散。
+      primaryColumnWidth: labelColumnWidth + 2,
+    });
     if (!selected || selected.value === `${this.provider}/${this.model}`) return;
     const { provider, model } = splitProviderModel(providers, selected.value);
     this.applyModel(model, provider);
+  }
+
+  /**
+   * `/provider [name]`：切换 provider 的两步向导。
+   *
+   * 第一步选 provider（带参数则跳过）；第二步选模型——候选 = 已声明 ∪ 上游目录，
+   * 选到未声明的模型就追加进 models.json 再切换。上游拉取失败不算失败：离线时
+   * 仍能在已声明模型里切换，不该被一次网络故障挡住。
+   */
+  private async commandProvider(argument = ''): Promise<void> {
+    const providers = this.deps.models();
+    // 列对齐基元：两处菜单（provider 选择、模型选择）共用同一套宽与 pad。
+    const widthOf = (text: string): number => visibleWidth(text);
+    const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
+    let targetName = argument.trim();
+    if (targetName === '') {
+      // description 排两段：baseUrl / 状态，各按最宽值对齐，current 不会锯齿。
+      const baseUrlColumnWidth = Math.max(...providers.map((provider) => widthOf(provider.baseUrl)));
+      const items: SelectItem[] = providers.map((provider) => ({
+        value: provider.name,
+        label: provider.name,
+        description: `${padTo(
+          provider.baseUrl,
+          baseUrlColumnWidth,
+        )}${provider.name === this.provider ? 'current' : ''}`.trimEnd(),
+      }));
+      const selected = await this.editor.showInlineMenu({
+        title: 'Provider',
+        items,
+        maxVisible: 14,
+        primaryColumnWidth: primaryColumnWidthFor(items),
+      });
+      if (!selected) return;
+      targetName = selected.value;
+    }
+    const provider = providers.find((item) => item.name === targetName);
+    if (!provider) {
+      this.addNotice(
+        `Unknown provider: ${targetName} (declared in models.json: ${providers.map((item) => item.name).join(', ')})`,
+        'warn',
+      );
+      return;
+    }
+
+    // 拉取过程用弹窗呈现：通知行会一闪而过且被打断，模态加载框让「正在等网络」这件事显式化。
+    const loading = showLoadingDialog(this.ui, {
+      title: provider.name,
+      text: `Fetching models from ${provider.baseUrl}…`,
+    });
+    let fetched: readonly string[] = [];
+    let catalogUnavailable = false;
+    try {
+      fetched = await listAvailableModels(provider.baseUrl, provider.apiKey, {
+        headers: provider.headers,
+        signal: AbortSignal.timeout(PROVIDER_FETCH_TIMEOUT_MS),
+      });
+    } catch (error) {
+      // 不少中转站没有 /models 目录端点（502 或挂住），这不是异常路径而是常态，
+      // 所以把「Esc 后手动输入」一并说清，而不是只报错。
+      catalogUnavailable = true;
+      this.addNotice(
+        `Fetch failed (${errorMessage(error)}) — the gateway may not offer a /models endpoint. Pick a declared model, or press Esc to type a model id.`,
+        'warn',
+      );
+    } finally {
+      loading.hide();
+    }
+    const declaredIds = new Set(provider.models.map((row) => row.id));
+    // 候选 = 已声明 ∪ 上游目录去重。是否已声明对选择行为没有差别（未声明的选中即追加），
+    // 所以不做 declared 标记——列表只回答「模型 ID 是什么、当前用的是哪个」两件事。
+    const candidates = [
+      ...provider.models.map((row) => ({ id: row.id, name: row.name })),
+      ...fetched
+        .filter((id) => !declaredIds.has(id))
+        .map((id) => ({ id, name: undefined })),
+    ];
+    // description 列排两段：模型 ID / 状态，各按最宽值 pad（间隙 2），label 列随内容收紧。
+    const idColumnWidth = Math.max(...candidates.map((candidate) => widthOf(candidate.id)));
+    const labelColumnWidth = Math.max(
+      ...candidates.map((candidate) => widthOf(candidate.name ?? displayNameForModel(candidate.id))),
+    );
+    const items: SelectItem[] = candidates.map((candidate) => {
+      const isCurrent = provider.name === this.provider && candidate.id === this.model;
+      return {
+        value: candidate.id,
+        label: candidate.name ?? displayNameForModel(candidate.id),
+        description: `${padTo(candidate.id, idColumnWidth)}${isCurrent ? 'current' : ''}`.trimEnd(),
+      };
+    });
+    let selected = await this.editor.showInlineMenu({
+      title: `Model @ ${provider.name}`,
+      items,
+      maxVisible: 14,
+      primaryColumnWidth: labelColumnWidth + 2,
+    });
+    if (!selected && catalogUnavailable) {
+      // 目录拉不到时的兜底：直接键入网关侧的模型 id，随后照样追加进 models.json。
+      const typed = await showInputDialog(this.ui, {
+        title: `Model id @ ${provider.name}`,
+        hint: 'Type the model id exactly as the gateway expects it',
+      });
+      if (typed === undefined || typed.trim() === '') return;
+      selected = { value: typed.trim(), label: typed.trim() };
+    }
+    if (!selected) return;
+    const modelId = selected.value;
+    if (!declaredIds.has(modelId)) {
+      try {
+        // 追加先于切换：声明是持久层。切换（写 config.toml）失败可以重试，
+        // 但「用了却没声明」的状态一旦出现就要靠人工修 models.json 才能补上。
+        appendModelDeclaration(sphModelsPath(), provider.name, modelId);
+        this.addNotice(`Declared ${modelId} under ${provider.name} in models.json.`, 'success');
+      } catch (error) {
+        this.addNotice(`Failed to append ${modelId} to models.json: ${errorMessage(error)}`, 'warn');
+      }
+    }
+    this.applyModel(modelId, provider.name);
   }
 
   /**
@@ -2225,7 +2385,7 @@ class InteractiveMode implements ApprovalUi {
       label: effort,
       description: effort === this.effort ? 'current' : undefined,
     }));
-    const selected = await this.editor.showInlineMenu({ title: 'Reasoning effort', items, maxVisible: 6 });
+    const selected = await this.editor.showInlineMenu({ title: 'Reasoning effort', items, maxVisible: 6, primaryColumnWidth: primaryColumnWidthFor(items) });
     if (!selected) return;
     this.applyEffort(selected.value as ReasoningEffort);
   }
@@ -2266,7 +2426,7 @@ class InteractiveMode implements ApprovalUi {
             ? 'Let a model reviewer decide, escalate to you when unsure'
             : 'Approve everything automatically',
     }));
-    const selected = await this.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: 3 });
+    const selected = await this.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: 3, primaryColumnWidth: primaryColumnWidthFor(items) });
     if (!selected) return;
     this.applyApproval(selected.value as ApprovalMode);
   }
