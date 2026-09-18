@@ -40,6 +40,7 @@ import { createGrantStore } from '../permission/store.js';
 import { updateConfigFile } from '../config/save.js';
 import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
 import type { ApiProtocol } from '../config/load.js';
+import { splitProviderModel, type ProviderDeclaration, type ResolvedModel } from '../config/registry.js';
 import {
   REASONING_EFFORTS,
   type LlmClient,
@@ -47,7 +48,6 @@ import {
   type TokenUsage,
 } from '../llm/openai.js';
 import { displayNameForModel } from '../llm/models.js';
-import { readModelCache, writeModelCache } from '../llm/model-cache.js';
 import type { McpHub, McpReloadResult } from '../mcp/hub.js';
 import type { McpPreferences, McpSourceReport } from '../mcp/sources.js';
 import type { JobBoard } from '../runtime/jobs.js';
@@ -125,7 +125,12 @@ export interface TuiDeps {
   configPath: string;
   /** 欢迎态底部右对齐的登录状态文案（API key / 免鉴权头）。 */
   authLabel: string;
-  baseUrl: string;
+  /** config.toml 里生效的 provider 名（models.json 的声明之一）。 */
+  providerName: string;
+  /** models.json 的 provider 声明；/model 列表从这里来（不再拉上游）。 */
+  models(): readonly ProviderDeclaration[];
+  /** 按模型 id（可指定 provider）解析生效协议与容量声明。 */
+  resolveModel(model: string, provider?: string): ResolvedModel;
   contextWindow: number;
   maxTokens?: number;
   sandbox: SandboxHandle;
@@ -152,10 +157,9 @@ export interface TuiDeps {
   /** 子代理审批策略；省略按 inherit。 */
   subagentApproval?: SubagentApprovalPolicy;
   model: string;
-  api: ApiProtocol;
   effort?: ReasoningEffort;
-  /** /model 与 /effort 改动后按新参数重建 client。 */
-  makeClient(options: { model: string; api: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
+  /** /model 与 /effort 改动后按新参数重建 client；api 省略时由 provider 声明按模型解析。 */
+  makeClient(options: { model: string; provider?: string; api?: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
   /**
    * 辅助调用（压缩摘要 / auto 审查器）的 client；模型名省略时返回 undefined。
    *
@@ -163,9 +167,6 @@ export interface TuiDeps {
    * 是个静默失效的省钱开关。做成必需，调用方漏接就编译不过。
    */
   makeAuxClient(model: string | undefined): LlmClient | undefined;
-  fetchModels(): Promise<readonly string[]>;
-  /** 上游模型目录的磁盘缓存路径。 */
-  modelCachePath?: string;
   /** CLI 显式给了 --model：启动时不被会话里记录的模型覆盖。 */
   modelPinned?: boolean;
   /** 压缩摘要 / auto 审批审查器专用模型；省略都回退主模型。 */
@@ -317,6 +318,8 @@ class InteractiveMode implements ApprovalUi {
   private readonly reviewClient?: LlmClient;
 
   private model: string;
+  /** 当前 provider：/model 选到其它 provider 的模型时会一起切换。 */
+  private provider: string;
   private effort?: ReasoningEffort;
   private maxTokens?: number;
   private approval: ApprovalMode;
@@ -411,6 +414,7 @@ class InteractiveMode implements ApprovalUi {
     this.deps = deps;
     this.session = deps.session;
     this.model = deps.model;
+    this.provider = deps.providerName;
     this.effort = deps.effort;
     this.maxTokens = deps.maxTokens;
     this.approval = deps.approvalMode;
@@ -2157,43 +2161,49 @@ class InteractiveMode implements ApprovalUi {
       this.applyModel(argument);
       return;
     }
-    const cache = this.deps.modelCachePath ? readModelCache(this.deps.baseUrl, this.deps.modelCachePath) : undefined;
-    let models: readonly string[] = cache?.models ?? [];
-    if (models.length === 0) {
-      this.addNotice('Fetching model list…', 'dim');
-      try {
-        models = await this.deps.fetchModels();
-        if (this.deps.modelCachePath && models.length > 0) {
-          writeModelCache(this.deps.baseUrl, models, this.deps.modelCachePath);
-        }
-      } catch (error) {
-        this.addNotice(`Failed to fetch models: ${message(error)}`, 'error');
-        return;
-      }
-    }
-    if (models.length === 0) {
-      this.addNotice('No models available.', 'warn');
+    // 候选只来自 models.json 的声明：模型目录是显式维护的清单，不再从上游拉取缓存——
+    // 上游会新增模型，而拉一次就存住的缓存只会静默地给出旧列表。
+    const providers = this.deps.models();
+    const items: SelectItem[] = providers.flatMap((provider) =>
+      provider.models.map((declared) => {
+        const value = provider.name === this.provider ? declared.id : `${provider.name}/${declared.id}`;
+        return {
+          value,
+          label: declared.name ?? displayNameForModel(declared.id),
+          description: value === `${this.provider}/${this.model}` ? `${value}    current` : value,
+        };
+      }),
+    );
+    if (items.length === 0) {
+      this.addNotice('No models declared in models.json.', 'warn');
       return;
     }
-    const items: SelectItem[] = models.map((id) => ({
-      value: id,
-      label: displayNameForModel(id),
-      description: id === this.model ? `${id}    current` : id,
-    }));
     const selected = await this.editor.showInlineMenu({ title: 'Model', items, maxVisible: 14 });
-    if (!selected || selected.value === this.model) return;
-    this.applyModel(selected.value);
+    if (!selected || selected.value === `${this.provider}/${this.model}`) return;
+    const { provider, model } = splitProviderModel(providers, selected.value);
+    this.applyModel(model, provider);
   }
 
-  /** 应用模型选择：重建 client、记事件、写回配置。 */
-  private applyModel(model: string): void {
+  /**
+   * 应用模型选择：重建 client、记事件、写回配置（可能同时切换 provider）。
+   *
+   * 声明了容量的模型一并生效 contextWindow / maxTokens——换模型后窗口不再是旧的；
+   * 未声明的模型保持现值，兜底由 config.toml 的全局值管。
+   */
+  private applyModel(model: string, providerName?: string): void {
+    const provider = providerName ?? this.provider;
+    const resolved = this.deps.resolveModel(model, provider);
+    this.provider = provider;
     this.model = model;
+    if (resolved.contextWindow !== undefined) this.contextWindow = resolved.contextWindow;
+    if (resolved.maxTokens !== undefined) this.maxTokens = resolved.maxTokens;
     this.client = this.buildClient();
     this.session.appendEvent(
       'model_selection',
       sessionEventData.modelSelection({ model, contextWindow: this.contextWindow, maxTokens: this.maxTokens }),
     );
-    const error = this.writeConfig({ model });
+    // provider 与 model 一起写回：下一个进程从 config.toml 读到的就是这次的选择。
+    const error = this.writeConfig({ provider, model });
     this.addNotice(
       error ? `Model set to ${model} (config write failed: ${error})` : `Model set to ${model}`,
       error ? 'warn' : 'success',
@@ -2318,7 +2328,7 @@ class InteractiveMode implements ApprovalUi {
   private buildClient(): LlmClient {
     return this.deps.makeClient({
       model: this.model,
-      api: this.deps.api,
+      provider: this.provider,
       effort: this.effort,
       maxTokens: this.maxTokens,
     });

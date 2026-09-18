@@ -28,27 +28,47 @@ npm link             # optional: puts `sph` on PATH
 
 ## Configure
 
-`sph` reads `~/.sph/config.toml`. Running it without one prints a full template and exits with code 2. A minimal working file:
+`sph` reads two user files, both hand-written: `~/.sph/config.toml` (which endpoint to use, how to behave) and `~/.sph/models.json` (what the endpoints and models are). Running without a valid pair prints a full template and exits with code 2.
+
+A minimal `models.json`:
+
+```json
+{
+  "providers": {
+    "example": {
+      "baseUrl": "https://api.example.com/v1",
+      "api": "chat-completions",
+      "apiKey": "$EXAMPLE_API_KEY",
+      "models": [
+        { "id": "example-model", "name": "Example Model", "contextWindow": 256000 }
+      ]
+    }
+  }
+}
+```
+
+A minimal `config.toml`:
 
 ```toml
-base_url = "https://api.example.com/v1"
+provider = "example"           # points at a provider in models.json
 model = "example-model"
-context_window = 256000
+context_window = 256000        # fallback when the model declaration has no contextWindow
 sandbox = "workspace"
 ```
 
 Key facts:
 
-- The API key comes from `SPH_API_KEY` (wins) or `api_key`. An explicitly empty `api_key = ""` means *send no auth header* — for keyless gateways that identify the session through `[http_headers]`.
-- `api` selects the upstream protocol; default is `chat-completions`.
-- `compact_model` / `review_model` point the summariser and the `auto`-approval reviewer at cheaper models.
-- `[aux]` (optional) gives those auxiliary calls a *different* endpoint — `base_url` / `api_key` / `api`, each individually optional. This is what makes a cross-vendor cheap summariser possible.
-- `prompt_cache` (default `true`) places Anthropic prompt-cache breakpoints. OpenAI-side cache routing (`prompt_cache_key`) is sent only for `api.openai.com`, or when `[compat]` opts in. `prompt_cache_retention` is off unless declared. Unknown gateways get a conservative first request; rejected optional fields are dropped, logged as `compat_retry` in the session file, and shown on the working-status line with a count. The system prompt is frozen within a turn and the mechanical-stub boundary is pinned once it first engages, so the request prefix stays byte-stable; whole-prompt cache misses are logged as `cache_miss` events in the session file rather than shown in the UI.
+- Endpoints live in `models.json`, not in `config.toml`: `baseUrl`, `api` (`chat-completions` | `responses` | `anthropic-messages`, set per provider and overridable per model), `apiKey`, `headers`, and `compat`. `apiKey` and header values support `$VAR` / `${VAR}` interpolation; an explicitly empty `apiKey` means *send no auth header* (pair it with provider `headers` so keyless gateways can identify the session). There is no global `SPH_API_KEY` any more — each provider carries its own key reference.
+- Per-model declarations supply `name`, `contextWindow`, and `maxTokens`; `config.toml`'s `context_window` / `max_tokens` are fallbacks for undeclared models. `--model provider/id` switches provider and model in one go; `/model` lists every declared model across providers and writes the selection back to `config.toml`.
+- `provider` (config.toml) selects the endpoint; `[aux] provider` (optional) routes the summariser and `auto`-approval reviewer at another declared provider — that is what makes a cross-vendor cheap summariser possible. `compact_model` / `review_model` are model ids resolved against that provider.
+- `compat` is declared per provider (defaults for its models) and merged per model. Declared bits override URL inference; `prompt_cache = false` in config.toml vetoes cache-related bits.
+- `prompt_cache` (default `true`) places Anthropic prompt-cache breakpoints. OpenAI-side cache routing (`prompt_cache_key`) is sent only for `api.openai.com`, or when compat opts in. `prompt_cache_retention` is off unless declared. Unknown gateways get a conservative first request; rejected optional fields are dropped, logged as `compat_retry` in the session file, and shown on the working-status line with a count. The system prompt is frozen within a turn and the mechanical-stub boundary is pinned once it first engages, so the request prefix stays byte-stable; whole-prompt cache misses are logged as `cache_miss` events in the session file rather than shown in the UI.
 - `max_session_tokens` (default `0` = unlimited) caps cumulative prompt+completion tokens for the whole agent tree, including subagents and compaction. The count survives `--resume`; the turn stops before the next request when the budget is gone, and warns at 80%.
 - `max_retries` (default `10`) is how many times a failed upstream request is retried, not counting the first attempt. `0` fails immediately. Only 408/429/5xx, network errors, idle timeouts, and empty responses retry.
 - `subagent_max_depth` (default `1`) — `0` forbids delegation entirely.
 - `subagent_approval` (default `inherit`) — `strict` makes subagents fail closed: reviewed tools are denied without prompting, and the parent session's grants are not shared. `inherit` hands the child the same approver, grants included.
 - `[permissions]` — `allow` / `ask` / `deny` lists whose entries are `<tool>` or `<tool>:<pattern>` (`*` any run, `?` one character; no wildcard means an exact match). Rules are more specific than the mode, so they outrank it: **`deny` beats every mode including `yolo`**, `ask` also beats `yolo`, and `allow` skips the prompt. In headless mode an `ask` rule is a denial — there is nobody to ask.
+- `trusted = [...]` (top level) and `[grants]` record cross-session state in config.toml itself: trusted workspace roots, and per-project approval grants keyed by git repo root. Both are written by sph when you confirm a workspace or pick *always allow* in the approval dialog.
 
 ## Usage
 
@@ -107,7 +127,7 @@ Three independent layers, all failing closed:
 
 1. **Workspace trust.** A workspace must be trusted before the agent runs — `AGENTS.md` and the tools act inside it. `--trust` remembers it; the TUI asks once. Trust on a parent directory covers descendants, never the other way round.
 2. **Sandbox.** `off` / `workspace` (default) / `read-only`. Filesystem and process confinement come from the OS: a Windows restricted token with ACL write grants, or Linux `bwrap` mounts. **Reads, network, and hardlinks are not confined.** Denials are policy, not bugs — the prompt tells the model not to retry them by another route.
-3. **Approval.** `ask` (default) prompts per reviewed tool; `auto` sends the call to an LLM reviewer that denies when unsure; `yolo` allows everything. In headless mode `shell`, `web_search`, and `mcp` are denied unless approval is `yolo`. The dialog's two *always allow* options are scoped to **that exact action** — a specific shell command, MCP tool, or path — never the whole tool, so approving `npm test` does not silently approve `rm -rf`. *For this session* lives in memory; *for this project* is written to `permissions.json` keyed by the git repo root, so a grant made in a subdirectory covers the whole repository. `[permissions]` rules sit above all of this: a `deny` rule is a hard boundary no mode can cross.
+3. **Approval.** `ask` (default) prompts per reviewed tool; `auto` sends the call to an LLM reviewer that denies when unsure; `yolo` allows everything. In headless mode `shell`, `web_search`, and `mcp` are denied unless approval is `yolo`. The dialog's two *always allow* options are scoped to **that exact action** — a specific shell command, MCP tool, or path — never the whole tool, so approving `npm test` does not silently approve `rm -rf`. *For this session* lives in memory; *for this project* is written to `[grants]` in config.toml keyed by the git repo root, so a grant made in a subdirectory covers the whole repository. `[permissions]` rules sit above all of this: a `deny` rule is a hard boundary no mode can cross.
 
 Path handling canonicalises through `realpath` and rejects anything escaping the workspace root — including symlinked directories encountered while searching (a symlink is never traversed).
 
@@ -117,11 +137,9 @@ Everything user-level lives under `~/.sph/` and never in the repository:
 
 | Path | Purpose |
 |---|---|
-| `config.toml` | configuration; rewritten surgically by the TUI so comments and key order survive |
+| `config.toml` | configuration and cross-session state (trusted roots, `[grants]`); rewritten surgically by the TUI so comments and key order survive |
+| `models.json` | hand-written endpoint and model declarations (`providers` table) |
 | `sessions/<ws-key>/<id>.jsonl` | append-only session records (`message` / `event`), plus `current.json` pointer |
-| `trusted.json` | trusted workspace roots |
-| `permissions.json` | per-project approval grants, keyed by git repo root (falls back to the workspace root outside a repo) |
-| `models.json` | per-endpoint model catalog cache and user-entered capacity hints |
 | `spill/` | oversized tool results, kept out of context and referenced by path |
 
 Malformed session lines are skipped rather than failing the file. Multiple `sph` processes can run in the same directory (each gets its own conversation); `-c` / `--resume` of a session that is already open exits immediately.
@@ -140,8 +158,8 @@ src/
 ├── session/     JSONL store, event folding, repair, locking, export
 ├── mcp/         stdio MCP client
 ├── runtime/     in-process shared resources: jobs, todos, spill, worktrees
-├── approval/    approval policy + the LLM safety reviewer
-├── config/      TOML load/validate and surgical save
+├── permission/  approval policy + the LLM safety reviewer + grant store
+├── config/      TOML load/validate, models.json registry, surgical save
 ├── workspace/   path boundary, root resolution, trust
 └── skills/      SKILL.md catalog scanning
 ```

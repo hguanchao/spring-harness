@@ -7,7 +7,7 @@ import { HeadlessApprover, type ApprovalMode } from '../permission/policy.js';
 import { createLlmClassifier } from '../permission/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
-import { sphModelsPath, sphSpillRoot } from '../home.js';
+import { sphSpillRoot } from '../home.js';
 import { SpillStore } from '../runtime/spill.js';
 import type { TokenUsage } from '../llm/openai.js';
 // 注意：TUI 模块**不要**在顶层 import。它（连同 marked）约 300ms 的加载
@@ -19,7 +19,6 @@ import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
 import { JsonlSession, listSessions, type SessionInfo } from '../session/store.js';
 import { resolveWorkspaceRoot } from '../workspace/root.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
-import { listAvailableModels } from '../llm/models.js';
 
 function printSessionInfos(infos: SessionInfo[]): void {
   for (const info of infos) {
@@ -148,16 +147,15 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       subagentApproval: rt.config.subagentApproval,
       configPath: rt.configPath,
       authLabel: rt.config.apiKey === '' ? 'Logged in with HTTP headers' : 'Logged in with API key',
-      baseUrl: rt.config.baseUrl,
-      model: args.model ?? rt.config.model,
-      api: args.api ?? rt.config.api,
+      providerName: rt.config.provider,
+      models: () => rt.registry.providers,
+      resolveModel: (model, provider) => rt.resolveModel({ model, provider }),
+      // bootstrap 已把 --model（含 provider/id 限定）折叠进 config.model；这里拿到的就是生效模型。
+      model: rt.config.model,
       effort: args.effort ?? rt.config.reasoningEffort,
       maxTokens: args.maxTokens ?? rt.config.maxTokens,
       makeClient: (overrides) => rt.makeClient(overrides),
       makeAuxClient: (model) => rt.makeAuxClient(model),
-      fetchModels: () => listAvailableModels(rt.config.baseUrl, rt.config.apiKey, { headers: rt.config.httpHeaders }),
-      // 模型目录缓存放用户主目录：/model 靠它在启动时直接命中，不必现等上游一个 RTT。
-      modelCachePath: sphModelsPath(),
       // --model 是本次进程的显式选择，不该被会话里记录的模型覆盖；切换会话时仍然尊重会话记录。
       modelPinned: args.model !== undefined,
       compactModel: rt.config.compactModel,
@@ -189,9 +187,10 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
     for (const warning of runtime.mcpWarnings) process.stderr.write(`${warning}\n`);
 
     // 优先级：命令行 > 配置文件 > 内置默认。这样 /permission 写回 config 后下次启动仍生效。
+    // config.model 是 bootstrap 折叠后的生效模型（--model 的 provider/id 限定已在此解析）。
     const approvalMode: ApprovalMode = args.approval ?? config.approval ?? 'ask';
     const client = runtime.makeClient({
-      model: args.model ?? config.model,
+      model: config.model,
       api: args.api ?? config.api,
       effort: args.effort ?? config.reasoningEffort,
     });
@@ -211,7 +210,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       prompt,
       workspaceRoot,
       client,
-      model: args.model ?? config.model,
+      model: config.model,
       session,
       tools: runtime.tools,
       sessions: runtime.sessions,
@@ -282,7 +281,7 @@ async function main(): Promise<void> {
     try {
       const { runRpcLoop } = await import('./rpc.js');
       await runRpcLoop(runtime, {
-        model: args.model ?? runtime.config.model,
+        model: runtime.config.model,
         api: args.api ?? runtime.config.api,
         effort: args.effort ?? runtime.config.reasoningEffort,
         approval: args.approval ?? runtime.config.approval ?? 'ask',

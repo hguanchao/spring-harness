@@ -1,16 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, relative } from 'node:path';
-import { sphTrustedPath } from '../home.js';
-import { canonicalize, casefoldPath, isStrictChildRel } from './boundary.js';
+import { relative } from 'node:path';
+import { casefoldPath, canonicalize, isStrictChildRel } from './boundary.js';
+import { addTrustedWorkspace, readState } from '../config/state.js';
+import { sphConfigPath } from '../home.js';
 
 /**
  * 工作区信任：AGENTS.md / skills 会进模型上下文，工具会在该目录读写与执行。
  * 未确认前不跑 agent。祖先目录信任覆盖子孙；子目录信任不回升到父目录。
+ *
+ * 存储在 config.toml 的顶层 `trusted` 数组——信任是用户对安全边界的意图，与 sandbox /
+ * approval 同属一类，不再散落成单独的 JSON 文件。
  */
-
-interface TrustedFile {
-  workspaces: string[];
-}
 
 function norm(path: string): string {
   return casefoldPath(canonicalize(path));
@@ -24,35 +23,15 @@ function covers(trustedRoot: string, workspace: string): boolean {
   return isStrictChildRel(relative(root, ws));
 }
 
-function readTrustedFile(filePath: string): string[] {
-  if (!existsSync(filePath)) return [];
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-    const workspaces = (parsed as TrustedFile).workspaces;
-    if (!Array.isArray(workspaces)) return [];
-    return workspaces.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
-  } catch {
-    // 坏文件当未信任，fail-closed。
-    return [];
-  }
-}
-
-function writeTrustedFile(filePath: string, workspaces: string[]): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const body = `${JSON.stringify({ workspaces } satisfies TrustedFile, null, 2)}\n`;
-  writeFileSync(filePath, body, 'utf8');
-}
-
-export function isWorkspaceTrusted(workspaceRoot: string, filePath = sphTrustedPath()): boolean {
+export function isWorkspaceTrusted(workspaceRoot: string, filePath: string = sphConfigPath()): boolean {
   const canonical = canonicalize(workspaceRoot);
-  return readTrustedFile(filePath).some((root) => covers(root, canonical));
+  return readState(filePath).trusted.some((root) => covers(root, canonical));
 }
 
 /** 记下当前工作区根。已被祖先覆盖则不写重复项。 */
-export function rememberTrustedWorkspace(workspaceRoot: string, filePath = sphTrustedPath()): void {
+export function rememberTrustedWorkspace(workspaceRoot: string, filePath: string = sphConfigPath()): void {
   const canonical = canonicalize(workspaceRoot);
-  const current = readTrustedFile(filePath);
-  if (current.some((root) => covers(root, canonical))) return;
-  writeTrustedFile(filePath, [...current, canonical]);
+  const state = readState(filePath);
+  if (state.trusted.some((root) => covers(root, canonical))) return;
+  addTrustedWorkspace(canonical, filePath);
 }

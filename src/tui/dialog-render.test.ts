@@ -10,6 +10,7 @@ import { PALETTE } from './theme/palettes.js';
 import { theme } from './theme/theme.js';
 import { renderMcpReport, renderSkillsReport } from './reports.js';
 import { runTui, type TuiDeps } from './interactive-mode.js';
+import type { ProviderDeclaration } from '../config/registry.js';
 import { McpHub } from '../mcp/hub.js';
 import { JobBoard } from '../runtime/jobs.js';
 import { TodoList } from '../runtime/todos.js';
@@ -175,12 +176,26 @@ describe('上报弹窗的真实渲染', () => {
 const settle = (ms = 80): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
+  const provider: ProviderDeclaration = {
+    name: 'test',
+    baseUrl: 'https://example.invalid/v1',
+    api: 'chat-completions',
+    apiKey: '',
+    headers: {},
+    models: [{ id: 'test-model' }],
+  };
   return {
     workspaceRoot: root,
     sessionDir: root,
     configPath: join(root, 'config.toml'),
     authLabel: 'test',
-    baseUrl: 'http://example.invalid/v1',
+    providerName: provider.name,
+    models: () => [provider],
+    resolveModel: (model, providerName) => ({
+      provider: providerName === undefined ? provider : { ...provider, name: providerName },
+      id: model,
+      api: provider.api,
+    }),
     contextWindow: 100_000,
     sandbox: {
       status: { mode: 'off', enforcement: 'none', platform: process.platform },
@@ -198,10 +213,8 @@ function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
     jobs: new JobBoard(),
     approvalMode: 'ask',
     model: 'test-model',
-    api: 'chat-completions',
     makeClient: () => ({ complete: async () => ({ text: '', finishReason: 'stop' }) }),
     makeAuxClient: () => undefined,
-    fetchModels: async () => [],
     terminal,
   };
 }

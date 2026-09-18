@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { parse as parseToml } from 'smol-toml';
 import { createGrantStore, permissionScopeRoot } from './store.js';
 
 /** 造一棵临时目录树；`git` 时在根上放 `.git`，`sub` 时再建一层子目录。 */
@@ -11,6 +12,13 @@ function tempTree(options: { git?: boolean; sub?: string } = {}): string {
   if (options.git) mkdirSync(join(root, '.git'), { recursive: true });
   if (options.sub) mkdirSync(join(root, options.sub), { recursive: true });
   return root;
+}
+
+/** 造一份最小可解析的 config.toml；grants 存在这里而不是单独的 JSON。 */
+function configWith(root: string, text = ''): string {
+  const file = join(root, 'config.toml');
+  writeFileSync(file, `provider = "p"\nmodel = "m"\n${text}`, 'utf8');
+  return file;
 }
 
 describe('permissionScopeRoot', () => {
@@ -56,7 +64,7 @@ describe('permissionScopeRoot', () => {
 describe('createGrantStore', () => {
   it('写进去的授权能读回来，重复批准不写重复项', () => {
     const root = tempTree({ git: true });
-    const file = join(root, 'permissions.json');
+    const file = configWith(root);
     try {
       const store = createGrantStore(root, file);
       assert.deepEqual([...store.load()], []);
@@ -71,7 +79,7 @@ describe('createGrantStore', () => {
   it('写一个作用域不会抹掉别的作用域', () => {
     const a = tempTree({ git: true });
     const b = tempTree({ git: true });
-    const file = join(a, 'permissions.json');
+    const file = configWith(a);
     try {
       createGrantStore(a, file).add('shell npm test');
       createGrantStore(b, file).add('shell cargo test');
@@ -83,14 +91,31 @@ describe('createGrantStore', () => {
     }
   });
 
-  it('坏文件当「没有任何授权」，不抛错且下次写入能自愈', () => {
+  it('授权落在 [grants] 表里，且不破坏 config.toml 其余内容', () => {
     const root = tempTree({ git: true });
-    const file = join(root, 'permissions.json');
+    const file = configWith(root, '\n[permissions]\nallow = ["shell:npm test"]\n');
     try {
-      writeFileSync(file, '{ not json at all', 'utf8');
-      assert.deepEqual([...createGrantStore(root, file).load()], [], 'fail-closed：读不回来只会多问几次');
       createGrantStore(root, file).add('shell npm test');
-      assert.deepEqual([...createGrantStore(root, file).load()], ['shell npm test']);
+      const parsed = parseToml(readFileSync(file, 'utf8')) as {
+        provider: string;
+        permissions: { allow: string[] };
+        grants: Record<string, string[]>;
+      };
+      assert.equal(parsed.provider, 'p', 'provider 键原样保留');
+      assert.deepEqual(parsed.permissions.allow, ['shell:npm test'], '[permissions] 规则原样保留');
+      const scope = permissionScopeRoot(root);
+      assert.deepEqual(parsed.grants[scope], ['shell npm test'], 'grants 以作用域根为键写入');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('config.toml 语法坏掉时读取直接报错，不静默当作没有授权', () => {
+    const root = tempTree({ git: true });
+    const file = configWith(root);
+    writeFileSync(file, 'provider = "p"\n[grants]\nbroken', 'utf8');
+    try {
+      assert.throws(() => createGrantStore(root, file).load());
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

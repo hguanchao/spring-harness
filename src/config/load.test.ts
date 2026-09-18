@@ -11,208 +11,246 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-/** 写一份最小可启动的 config.toml，追加一段待测配置。 */
-function configWith(extra: string): string {
+const MINIMAL_REGISTRY = {
+  providers: {
+    main: {
+      baseUrl: 'https://api.example.com/v1',
+      api: 'chat-completions',
+      apiKey: 'k',
+      models: [{ id: 'm', contextWindow: 100_000 }],
+    },
+  },
+};
+
+function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sph-config-'));
   dirs.push(dir);
-  const path = join(dir, 'config.toml');
-  writeFileSync(
-    path,
-    ['base_url = "https://api.example.com/v1"', 'model = "m"', 'api_key = "k"', extra, ''].join('\n'),
-    'utf8',
-  );
-  return path;
+  return dir;
+}
+
+/** 写一份最小可启动的 models.json + config.toml，各自追加待测内容。 */
+function setup(registryExtra: object = {}, configExtra = ''): { registryPath: string; configPath: string } {
+  const dir = tempDir();
+  const registryPath = join(dir, 'models.json');
+  const registry = {
+    providers: {
+      main: {
+        baseUrl: 'https://api.example.com/v1',
+        api: 'chat-completions',
+        apiKey: 'k',
+        models: [{ id: 'm', contextWindow: 100_000 }],
+        ...registryExtra,
+      },
+    },
+  };
+  writeFileSync(registryPath, JSON.stringify(registry, null, 2), 'utf8');
+  const configPath = join(dir, 'config.toml');
+  // 追加段自带 provider/model 键时省略默认行，避免 TOML 重复键。
+  const defaults = [
+    /^provider\s*=/m.test(configExtra) ? null : 'provider = "main"',
+    /^model\s*=/m.test(configExtra) ? null : 'model = "m"',
+  ].filter((line): line is string => line !== null);
+  writeFileSync(configPath, [...defaults, configExtra, ''].join('\n'), 'utf8');
+  return { registryPath, configPath };
 }
 
 describe('启动校验', () => {
-  it('缺 api_key 且没有 http_headers 时拒绝启动', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sph-config-'));
-    dirs.push(dir);
-    const path = join(dir, 'config.toml');
-    writeFileSync(path, 'base_url = "https://api.example.com/v1"\nmodel = "m"\n', 'utf8');
-    assert.throws(() => loadConfig({ configPath: path, env: {} }), /API key/);
+  it('缺 provider 拒绝启动', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'models.json'), JSON.stringify(MINIMAL_REGISTRY), 'utf8');
+    assert.throws(
+      () => loadConfig({ configPath: join(dir, 'config.toml'), registryPath: join(dir, 'models.json'), env: {} }),
+      /provider must be a non-empty string/,
+    );
+  });
+
+  it('指向不存在的 provider 时列出可选名字', () => {
+    const { registryPath, configPath } = setup({}, 'provider = "nope"');
+    assert.throws(
+      () => loadConfig({ configPath, registryPath, env: {} }),
+      /unknown provider "nope"[\s\S]*models.json has: main/,
+    );
+  });
+
+  it('provider 既没有 apiKey 也没有 headers 时拒绝启动', () => {
+    const { registryPath, configPath } = setup({ apiKey: '' });
+    assert.throws(
+      () => loadConfig({ configPath, registryPath, env: {} }),
+      /no apiKey and no headers/,
+    );
+  });
+
+  it('显式空 apiKey 配上 headers 可以启动（免鉴权网关）', () => {
+    const { registryPath, configPath } = setup({ apiKey: '', headers: { 'X-Session': 'sph' } });
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.apiKey, '');
+    assert.equal(config.httpHeaders['X-Session'], 'sph');
+  });
+
+  it('models.json 缺失时报错并给出路径', () => {
+    const dir = tempDir();
+    assert.throws(
+      () => loadConfig({ configPath: join(dir, 'config.toml'), registryPath: join(dir, 'models.json'), env: {} }),
+      /models.json not found/,
+    );
   });
 
   it('仅有 url 的 MCP 条目不挡启动', () => {
-    const config = loadConfig({
-      configPath: configWith('[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"\n'),
-      env: {},
-    });
+    const { registryPath, configPath } = setup({}, '[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"');
+    const config = loadConfig({ configPath, registryPath, env: {} });
     assert.equal(config.mcpServers[0]?.name, 'remote');
     assert.equal(config.mcpServers[0]?.url, 'https://example.com/mcp');
+  });
+
+  it('端点字段来自 provider 声明，而不是 config.toml', () => {
+    const { registryPath, configPath } = setup(
+      { baseUrl: 'https://real.example.com/v1', api: 'responses' },
+      'base_url = "https://ignored.example.com/v1"\napi = "chat-completions"',
+    );
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.baseUrl, 'https://real.example.com/v1', 'config.toml 里的 base_url 是死键，不生效');
+    assert.equal(config.api, 'responses');
+  });
+});
+
+describe('context_window 与 max_tokens 兜底', () => {
+  it('模型声明的 contextWindow 优先于全局兜底', () => {
+    const { registryPath, configPath } = setup({}, 'context_window = 500000');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).contextWindow, 100_000);
+  });
+
+  it('模型未声明时用全局兜底', () => {
+    const { registryPath, configPath } = setup({ models: [{ id: 'm' }] }, 'context_window = 500000');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).contextWindow, 500_000);
+  });
+
+  it('两者都没有时用内置默认 256000', () => {
+    const { registryPath, configPath } = setup({ models: [{ id: 'm' }] });
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).contextWindow, 256_000);
+  });
+
+  it('模型声明的 maxTokens 优先于配置', () => {
+    const { registryPath, configPath } = setup({ models: [{ id: 'm', maxTokens: 32768 }] }, 'max_tokens = 8192');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxTokens, 32768);
   });
 });
 
 describe('[permissions] 规则与 subagent_approval', () => {
   it('缺省时没有规则，子代理策略是 inherit', () => {
-    const config = loadConfig({ configPath: configWith(''), env: {} });
+    const { registryPath, configPath } = setup();
+    const config = loadConfig({ configPath, registryPath, env: {} });
     assert.deepEqual(config.permissions, { allow: [], ask: [], deny: [] });
     assert.equal(config.subagentApproval, 'inherit');
   });
 
   it('三张表原样读入，条目去掉首尾空白', () => {
-    const config = loadConfig({
-      configPath: configWith(
-        ['[permissions]', 'allow = [" shell:npm test "]', 'ask = ["shell:git push*"]', 'deny = ["shell:rm -rf*"]'].join('\n'),
-      ),
-      env: {},
-    });
+    const { registryPath, configPath } = setup(
+      {},
+      '[permissions]\nallow = [" shell:npm test "]\nask = ["shell:git push*"]\ndeny = ["shell:rm -rf*"]',
+    );
+    const config = loadConfig({ configPath, registryPath, env: {} });
     assert.deepEqual(config.permissions.allow, ['shell:npm test']);
     assert.deepEqual(config.permissions.ask, ['shell:git push*']);
     assert.deepEqual(config.permissions.deny, ['shell:rm -rf*']);
   });
 
   it('未知键、非数组、空条目都拒绝启动', () => {
-    assert.throws(
-      () => loadConfig({ configPath: configWith('[permissions]\nallows = ["x"]\n'), env: {} }),
-      /unknown permissions key/,
-    );
-    assert.throws(
-      () => loadConfig({ configPath: configWith('[permissions]\ndeny = "shell:rm"\n'), env: {} }),
-      /must be an array/,
-    );
-    assert.throws(
-      () => loadConfig({ configPath: configWith('[permissions]\ndeny = ["  "]\n'), env: {} }),
-      /non-empty string/,
-    );
+    const { registryPath, configPath } = setup({}, '[permissions]\nallows = ["x"]');
+    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), /unknown permissions key/);
+    const bad = setup({}, '[permissions]\ndeny = "shell:rm"');
+    assert.throws(() => loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} }), /must be an array/);
+    const empty = setup({}, '[permissions]\ndeny = ["  "]');
+    assert.throws(() => loadConfig({ configPath: empty.configPath, registryPath: empty.registryPath, env: {} }), /non-empty string/);
   });
 
   it('subagent_approval 只认 inherit / strict', () => {
-    assert.equal(
-      loadConfig({ configPath: configWith('subagent_approval = "strict"'), env: {} }).subagentApproval,
-      'strict',
+    const { registryPath, configPath } = setup({}, 'subagent_approval = "strict"');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).subagentApproval, 'strict');
+    const bad = setup({}, 'subagent_approval = "never"');
+    assert.throws(() => loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} }), /subagent_approval must be one of/);
+  });
+});
+
+describe('[aux] 辅助端点', () => {
+  it('未配置时 undefined，即与主端点同源', () => {
+    const { registryPath, configPath } = setup();
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).aux, undefined);
+  });
+
+  it('provider 指向已声明的另一个 provider', () => {
+    const dir = tempDir();
+    const registryPath = join(dir, 'models.json');
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        providers: {
+          main: { baseUrl: 'https://main.example.com/v1', api: 'chat-completions', apiKey: 'k', models: [{ id: 'm' }] },
+          cheap: { baseUrl: 'https://cheap.example.com/v1', api: 'anthropic-messages', apiKey: 'k2', models: [{ id: 'cheap-m' }] },
+        },
+      }),
+      'utf8',
     );
-    assert.throws(
-      () => loadConfig({ configPath: configWith('subagent_approval = "never"'), env: {} }),
-      /subagent_approval must be one of/,
-    );
+    const configPath = join(dir, 'config.toml');
+    writeFileSync(configPath, 'provider = "main"\nmodel = "m"\n[aux]\nprovider = "cheap"\n', 'utf8');
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.aux?.provider, 'cheap');
+  });
+
+  it('aux 不是表时报错', () => {
+    const { registryPath, configPath } = setup({}, 'aux = "x"');
+    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
   });
 });
 
 describe('prompt_cache', () => {
   it('未配置时默认开：agent 多步循环里缓存收益远大于写入成本', () => {
-    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).promptCache, true);
+    const { registryPath, configPath } = setup();
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).promptCache, true);
   });
 
   it('显式 false 时关掉', () => {
-    assert.equal(loadConfig({ configPath: configWith('prompt_cache = false'), env: {} }).promptCache, false);
+    const { registryPath, configPath } = setup({}, 'prompt_cache = false');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).promptCache, false);
   });
 
   it('非布尔值拒绝启动，而不是静默当成 true', () => {
-    assert.throws(
-      () => loadConfig({ configPath: configWith('prompt_cache = "yes"'), env: {} }),
-      ConfigError,
-    );
-  });
-});
-
-describe('[compat]', () => {
-  it('未配置时 undefined，走 URL 推断', () => {
-    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).compat, undefined);
-  });
-
-  it('只配部分字段，其余省略', () => {
-    const config = loadConfig({
-      configPath: configWith('[compat]\nprompt_cache_key = true\nstream_options = false\n'),
-      env: {},
-    });
-    assert.equal(config.compat?.promptCacheKey, true);
-    assert.equal(config.compat?.streamOptions, false);
-    assert.equal(config.compat?.promptCacheRetention, undefined);
-    assert.equal(config.compat?.sessionAffinity, undefined);
-  });
-
-  it('session_affinity 只接受 openai | openrouter | off', () => {
-    const config = loadConfig({
-      configPath: configWith('[compat]\nsession_affinity = "openrouter"\n'),
-      env: {},
-    });
-    assert.equal(config.compat?.sessionAffinity, 'openrouter');
-    assert.throws(
-      () => loadConfig({ configPath: configWith('[compat]\nsession_affinity = "foo"\n'), env: {} }),
-      ConfigError,
-    );
-  });
-
-  it('空表等价于未配置', () => {
-    assert.equal(loadConfig({ configPath: configWith('[compat]\n'), env: {} }).compat, undefined);
-  });
-
-  it('aux.compat 独立于主 [compat]', () => {
-    const config = loadConfig({
-      configPath: configWith(
-        '[compat]\nprompt_cache_key = true\n[aux]\nbase_url = "https://aux.example.com/v1"\n[aux.compat]\nstream_options = false\n',
-      ),
-      env: {},
-    });
-    assert.equal(config.compat?.promptCacheKey, true);
-    assert.equal(config.aux?.compat?.streamOptions, false);
-    assert.equal(config.aux?.compat?.promptCacheKey, undefined);
-  });
-});
-
-describe('[aux] 辅助端点', () => {
-  it('未配置时 undefined，即复用主端点', () => {
-    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).aux, undefined);
-  });
-
-  it('只配部分字段，其余回退主配置', () => {
-    const config = loadConfig({ configPath: configWith('[aux]\nbase_url = "https://aux.example.com/v1"'), env: {} });
-    assert.equal(config.aux?.baseUrl, 'https://aux.example.com/v1');
-    assert.equal(config.aux?.apiKey, undefined, 'undefined 表示回退主 key');
-    assert.equal(config.aux?.api, undefined, 'undefined 表示跟随主协议（含 --api 覆盖）');
-  });
-
-  it('显式空 api_key 表示该端点免鉴权，与顶层同一套三态语义', () => {
-    const config = loadConfig({ configPath: configWith('[aux]\napi_key = ""'), env: {} });
-    assert.equal(config.aux?.apiKey, '');
-  });
-
-  it('api 只在显式给出时取值，不被默认回填成 chat-completions', () => {
-    const config = loadConfig({ configPath: configWith('[aux]\napi = "anthropic-messages"'), env: {} });
-    assert.equal(config.aux?.api, 'anthropic-messages');
-  });
-
-  it('非法 api 报错', () => {
-    assert.throws(() => loadConfig({ configPath: configWith('[aux]\napi = "soap"'), env: {} }), ConfigError);
-  });
-
-  it('aux 不是表时报错', () => {
-    assert.throws(() => loadConfig({ configPath: configWith('aux = "x"'), env: {} }), ConfigError);
+    const { registryPath, configPath } = setup({}, 'prompt_cache = "yes"');
+    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
   });
 });
 
 describe('max_session_tokens', () => {
   it('未配置时默认 0（不限制）', () => {
-    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).maxSessionTokens, 0);
+    const { registryPath, configPath } = setup();
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxSessionTokens, 0);
   });
 
   it('接受非负整数', () => {
-    assert.equal(loadConfig({ configPath: configWith('max_session_tokens = 500000'), env: {} }).maxSessionTokens, 500000);
+    const { registryPath, configPath } = setup({}, 'max_session_tokens = 500000');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxSessionTokens, 500_000);
   });
 
   it('负数拒绝启动', () => {
-    assert.throws(
-      () => loadConfig({ configPath: configWith('max_session_tokens = -1'), env: {} }),
-      ConfigError,
-    );
+    const { registryPath, configPath } = setup({}, 'max_session_tokens = -1');
+    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
   });
 });
 
 describe('max_retries', () => {
   it('未配置时默认 10', () => {
-    assert.equal(loadConfig({ configPath: configWith(''), env: {} }).maxRetries, 10);
+    const { registryPath, configPath } = setup();
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxRetries, 10);
   });
 
   it('接受非负整数，0 表示失败即停', () => {
-    assert.equal(loadConfig({ configPath: configWith('max_retries = 3'), env: {} }).maxRetries, 3);
-    assert.equal(loadConfig({ configPath: configWith('max_retries = 0'), env: {} }).maxRetries, 0);
+    const a = setup({}, 'max_retries = 3');
+    assert.equal(loadConfig({ configPath: a.configPath, registryPath: a.registryPath, env: {} }).maxRetries, 3);
+    const b = setup({}, 'max_retries = 0');
+    assert.equal(loadConfig({ configPath: b.configPath, registryPath: b.registryPath, env: {} }).maxRetries, 0);
   });
 
   it('负数拒绝启动', () => {
-    assert.throws(
-      () => loadConfig({ configPath: configWith('max_retries = -1'), env: {} }),
-      ConfigError,
-    );
+    const { registryPath, configPath } = setup({}, 'max_retries = -1');
+    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
   });
 });

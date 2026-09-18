@@ -18,23 +18,14 @@ export function sphSessionsRoot(): string {
   return underHome('sessions');
 }
 
-/** 已信任工作区清单；与 config/sessions 一样放用户主目录，不进仓库。 */
-export function sphTrustedPath(): string {
-  return underHome('trusted.json');
-}
-
 /**
- * 跨会话的审批授权清单，按项目作用域分桶。
+ * 端点与模型的声明注册表。
  *
- * 放用户主目录而不是工作区里：Claude Code 把「以后别再问」写进项目内的
- * `.claude/settings.local.json`，那是它的选择；sph 的约定是用户级状态一律不落仓库，
- * 免得一个跑过 agent 的项目凭空多出没被 .gitignore 覆盖的文件。
+ * 全部由人写：provider 的 baseUrl / apiKey / headers 与每个模型的 id / contextWindow /
+ * maxTokens 都在这里声明，`config.toml` 用 `provider` + `model` 两个指针选择。不再做
+ * 上游 /models 拉取缓存——上游会新增模型，但缓存永不刷新只会静默地给出旧列表；既然
+ * 目录靠人维护，就让唯一来源也是人。
  */
-export function sphPermissionsPath(): string {
-  return underHome('permissions.json');
-}
-
-/** 上游模型目录缓存（按 base URL 分桶）。纯缓存，删掉只会让下次 /model 慢一拍。 */
 export function sphModelsPath(): string {
   return underHome('models.json');
 }

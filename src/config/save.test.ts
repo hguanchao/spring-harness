@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { parse } from 'smol-toml';
-import { updateConfigFile } from './save.js';
+import { updateConfigFile, updateConfigTableEntry } from './save.js';
 
 function fixture(text: string): { path: string; read: () => string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'sph-save-'));
@@ -112,6 +112,81 @@ describe('updateConfigFile', () => {
     try {
       updateConfigFile(f.path, { approval: 'ask' });
       assert.ok(!/[^\r]\n/.test(f.read()), '每一处换行都应当是 CRLF');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('数组值写入为单行 TOML 数组', () => {
+    const f = fixture('provider = "p"\nmodel = "m"\n');
+    try {
+      updateConfigFile(f.path, { trusted: ['E:\\a', 'E:\\b'] });
+      const parsed = parse(f.read()) as { trusted: string[] };
+      assert.deepEqual(parsed.trusted, ['E:\\a', 'E:\\b']);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('用户手工折成多行的数组被整段替换成单行，不留孤儿行', () => {
+    const f = fixture('provider = "p"\nmodel = "m"\ntrusted = [\n  "E:\\\\a",\n  "E:\\\\b",\n]\n');
+    try {
+      updateConfigFile(f.path, { trusted: ['E:\\c'] });
+      const parsed = parse(f.read()) as { trusted: string[] };
+      assert.deepEqual(parsed.trusted, ['E:\\c'], '整段替换');
+      assert.doesNotMatch(f.read(), /E:\\\\a/, '旧数组行不能残留');
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
+describe('updateConfigTableEntry', () => {
+  it('表不存在时整表新建，键加引号渲染', () => {
+    const f = fixture('provider = "p"\nmodel = "m"\n');
+    try {
+      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['shell npm test']);
+      const parsed = parse(f.read()) as { provider: string; grants: Record<string, string[]> };
+      assert.deepEqual(parsed.grants['E:\\a'], ['shell npm test']);
+      assert.equal(parsed.provider, 'p', '已有内容不动');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('同键重复写入是替换而不是追加；不同键累积', () => {
+    const f = fixture('provider = "p"\n\n[grants]\n"E:\\\\a" = ["old"]\n');
+    try {
+      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['old', 'new']);
+      updateConfigTableEntry(f.path, 'grants', 'E:\\b', ['x']);
+      const parsed = parse(f.read()) as { grants: Record<string, string[]> };
+      assert.deepEqual(parsed.grants['E:\\a'], ['old', 'new'], '同键替换');
+      assert.deepEqual(parsed.grants['E:\\b'], ['x'], '不同键累积');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('表体后的其它表不受影响；表头前没有可写位置也不写错地方', () => {
+    const f = fixture('provider = "p"\nmodel = "m"\n\n[mcp]\ndisabled_servers = []\n');
+    try {
+      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['shell npm test']);
+      const parsed = parse(f.read()) as { grants: Record<string, string[]>; mcp: Record<string, unknown> };
+      assert.deepEqual(parsed.grants['E:\\a'], ['shell npm test'], 'grants 表追加在文件末尾');
+      assert.equal(parsed.mcp.approval, undefined);
+      assert.deepEqual((parsed.mcp as { disabled_servers: string[] }).disabled_servers, []);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('表体内已有的多行数组值被整段替换', () => {
+    const f = fixture('[grants]\n"E:\\\\a" = [\n  "one",\n  "two",\n]\n');
+    try {
+      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['three']);
+      const parsed = parse(f.read()) as { grants: Record<string, string[]> };
+      assert.deepEqual(parsed.grants['E:\\a'], ['three']);
+      assert.doesNotMatch(f.read(), /two/, '旧值行不能残留');
     } finally {
       f.cleanup();
     }

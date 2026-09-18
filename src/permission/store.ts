@@ -5,22 +5,18 @@
  * 位置批准的动作都应该对整个仓库有效，按 cwd 分键会让子目录里启动的会话看不到仓库根上
  * 批准过的授权。grok-build 与 Claude Code 都选了按项目，理由相同。
  *
- * 位置照 sph 的既有约定放 `~/.sph`，**不写进仓库**（理由见 home.ts）。
- *
- * 存的是 `approvalScopeKey` 的产物，也就是**具体动作**而不是工具名——存工具名会把
- * 「批准一条命令 = 放行整个工具」这个洞从会话内放大到跨会话。
+ * 存储在 config.toml 的 `[grants]` 表（键是作用域根）。不叫 `[permissions]`：那是规则表
+ * （allow/ask/deny）的名字，这里存的是已批准的**授权**。存的内容仍是 approvalScopeKey
+ * 的产物——**具体动作**而不是工具名，存工具名会把「批准一条命令 = 放行整个工具」这个
+ * 洞从会话内放大到跨会话。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { sphPermissionsPath } from '../home.js';
+import { sphConfigPath } from '../home.js';
 import { canonicalize, casefoldPath } from '../workspace/boundary.js';
-
-/** 一个作用域下的授权清单；键是规范化的作用域根。 */
-interface PermissionsFile {
-  scopes: Record<string, string[]>;
-}
+import { readState, addGrant } from '../config/state.js';
 
 /**
  * 从工作区根向上找第一个含 `.git` 的目录。
@@ -51,31 +47,6 @@ export function permissionScopeRoot(workspaceRoot: string, home = homedir()): st
   return root;
 }
 
-function readScopes(filePath: string): Record<string, string[]> {
-  if (!existsSync(filePath)) return {};
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const scopes = (parsed as PermissionsFile).scopes;
-    if (!scopes || typeof scopes !== 'object' || Array.isArray(scopes)) return {};
-    const out: Record<string, string[]> = {};
-    for (const [scope, grants] of Object.entries(scopes)) {
-      if (!Array.isArray(grants)) continue;
-      const clean = grants.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
-      if (clean.length > 0) out[scope] = clean;
-    }
-    return out;
-  } catch {
-    // 坏文件当「没有任何授权」：读不回来只会多问几次，绝不会静默放行。
-    return {};
-  }
-}
-
-function writeScopes(filePath: string, scopes: Record<string, string[]>): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify({ scopes } satisfies PermissionsFile, null, 2)}\n`, 'utf8');
-}
-
 /** 授权读写口。TUI 按当前工作区建一个；测试注入临时文件即可。 */
 export interface GrantStore {
   /** 解析后的作用域根，供界面展示。 */
@@ -84,19 +55,16 @@ export interface GrantStore {
   add(key: string): void;
 }
 
-export function createGrantStore(workspaceRoot: string, filePath = sphPermissionsPath()): GrantStore {
+export function createGrantStore(workspaceRoot: string, filePath: string = sphConfigPath()): GrantStore {
   const scope = permissionScopeRoot(workspaceRoot);
   return {
     scope,
     load() {
-      return readScopes(filePath)[scope] ?? [];
+      return readState(filePath).grants[scope] ?? [];
     },
     add(key: string) {
-      // 写前重读：授权可能已被另一个 sph 进程或用户手工加过，整文件覆盖会把那些抹掉。
-      const scopes = readScopes(filePath);
-      const current = scopes[scope] ?? [];
-      if (current.includes(key)) return;
-      writeScopes(filePath, { ...scopes, [scope]: [...current, key] });
+      // addGrant 内部写前重读：授权可能已被另一个 sph 进程批准过，整表覆盖会把那些抹掉。
+      addGrant(scope, key, filePath);
     },
   };
 }

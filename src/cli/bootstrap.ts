@@ -16,7 +16,6 @@ import { openaiAdapter, type LlmClient, type ReasoningEffort } from '../llm/open
 import { responsesAdapter } from '../llm/responses.js';
 import type { ProtocolAdapter } from '../llm/stream-client.js';
 import { createSseClient } from '../llm/stream-client.js';
-import { readModelMeta } from '../llm/model-cache.js';
 import { McpHub, type McpReloadResult } from '../mcp/hub.js';
 import { discoverMcpServers, type McpPreferences, type McpSourceReport } from '../mcp/sources.js';
 import { JobBoard } from '../runtime/jobs.js';
@@ -32,6 +31,15 @@ import { runTurn, type AgentDriver } from '../agent/loop.js';
 import { defaultTools } from '../tools/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
+import {
+  findProvider,
+  loadRegistry,
+  resolveModel,
+  splitProviderModel,
+  type ModelRegistry,
+  type ResolvedModel,
+} from '../config/registry.js';
+import { sphModelsPath } from '../home.js';
 import type { CompatProfile } from '../llm/compat.js';
 import { applyProxy } from '../net/proxy.js';
 import { mergePresetHeaders } from '../llm/presets.js';
@@ -146,15 +154,17 @@ export interface Runtime {
   jobs: JobBoard;
   /** 子代理 worktree 隔离的工作树仓库；cleanup 负责清退。 */
   worktrees: WorktreeStore;
-  /** 按覆盖参数重建 client（TUI 的 /model、/effort 用）。 */
+  /** models.json 的声明：`/model` 列表与按模型解析协议都从这里来。 */
+  readonly registry: ModelRegistry;
+  /** 按模型 id 解析生效协议与容量声明；未声明的模型回落 provider 级。 */
+  resolveModel(options: { model: string; provider?: string; api?: ApiProtocol }): ResolvedModel;
+  /** 按覆盖参数重建 client（TUI 的 /model、/effort 用）；api 省略时按声明解析。 */
   makeClient(overrides: {
     model: string;
-    api: ApiProtocol;
+    provider?: string;
+    api?: ApiProtocol;
     effort?: ReasoningEffort;
     maxTokens?: number;
-    /** 省略用主端点；辅助模型跨厂商时由 makeAuxClient 传入。 */
-    baseUrl?: string;
-    apiKey?: string;
   }): LlmClient;
   /**
    * 辅助调用（压缩摘要 / auto 审批审查器）的 client。
@@ -177,7 +187,9 @@ export interface Runtime {
 
 export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runtime> {
   let config: SphConfig;
+  let registry: ModelRegistry;
   try {
+    registry = loadRegistry(sphModelsPath());
     config = loadConfig({ sandboxOverride: options.sandboxOverride });
   } catch (error) {
     if (error instanceof ConfigError) throw new CliError(error.message, 2);
@@ -186,22 +198,32 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   // 代理是进程级出网开关，必须在任何可能出网的步骤（MCP、模型目录预热）之前装好。
   applyProxy(config.proxy);
 
-  // `--model` 切到一个配置里没记过的模型时，用本地沉淀的容量参数补上 context_window /
-  // max_tokens——否则每换一次模型都要手改配置，忘了就把窗口算错。显式 CLI 参数仍然优先。
-  if (options.model !== undefined && options.model !== config.model) {
-    const meta = readModelMeta(config.baseUrl, options.model);
-    if (meta) {
-      config = {
-        ...config,
-        contextWindow: meta.contextWindow ?? config.contextWindow,
-        maxTokens: meta.maxTokens ?? config.maxTokens,
-      };
-    }
+  // `--model` 支持 `provider/id` 限定（id 含斜杠且前缀不是已声明 provider 名时仍当模型 id）。
+  // 命中的模型若是声明的，其 contextWindow / maxTokens / api 一并生效——否则每换一次模型
+  // 都要手改配置，忘了就把窗口算错。显式 CLI 参数仍然优先。
+  let providerName = config.provider;
+  let effectiveModel = config.model;
+  if (options.model !== undefined) {
+    const split = splitProviderModel(registry.providers, options.model);
+    if (split.provider !== undefined) providerName = split.provider;
+    effectiveModel = split.model;
   }
-
-  // 有效主协议：`--api` 覆盖配置。辅助端点没显式声明协议时沿用它——辅助模型与主模型
-  // 通常同源，协议不一致会直接发错端点。
-  const mainApi: ApiProtocol = options.api ?? config.api;
+  if (providerName !== config.provider || effectiveModel !== config.model || options.api !== undefined) {
+    const provider = findProvider(registry, providerName);
+    const resolved = resolveModel(provider, effectiveModel, { apiOverride: options.api });
+    config = {
+      ...config,
+      provider: providerName,
+      model: effectiveModel,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      httpHeaders: provider.headers,
+      ...(resolved.compat === undefined ? {} : { compat: resolved.compat }),
+      api: resolved.api,
+      contextWindow: resolved.contextWindow ?? config.contextWindow,
+      maxTokens: resolved.maxTokens ?? config.maxTokens,
+    };
+  }
 
   if (options.trust) rememberTrustedWorkspace(options.workspaceRoot);
   if (!isWorkspaceTrusted(options.workspaceRoot)) {
@@ -327,40 +349,54 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       release?.();
       release = next;
     },
+    registry,
+    resolveModel(options) {
+      const provider = options.provider === undefined
+        ? findProvider(registry, config.provider)
+        : findProvider(registry, options.provider);
+      return resolveModel(provider, options.model, { apiOverride: options.api });
+    },
     makeClient(overrides) {
-      const baseUrl = overrides.baseUrl ?? config.baseUrl;
+      const provider = overrides.provider === undefined
+        ? findProvider(registry, config.provider)
+        : findProvider(registry, overrides.provider);
+      const resolved = resolveModel(provider, overrides.model, { apiOverride: overrides.api });
       return createClient({
-        baseUrl,
-        apiKey: overrides.apiKey ?? config.apiKey,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
         model: overrides.model,
-        api: overrides.api,
+        api: resolved.api,
         reasoningEffort: overrides.effort,
         maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
-        headers: mergePresetHeaders(baseUrl, config.httpHeaders),
+        headers: mergePresetHeaders(provider.baseUrl, provider.headers),
         promptCache: config.promptCache,
         sessionId: session.id,
-        compat: config.compat,
+        compat: resolved.compat,
         maxRetries: config.maxRetries,
       });
     },
     makeAuxClient(model) {
       if (model === undefined) return undefined;
-      // 没配 [aux].base_url 就是与主端点同源：此时协议跟随主配置（含 --api 覆盖）。
-      const sharesMainEndpoint = config.aux?.baseUrl === undefined;
+      // 没配 [aux].provider 就是与主端点同源。辅助模型的协议与 compat 按 aux provider
+      // 的声明解析——「便宜的辅助模型」因此跨厂商也成立。
+      const auxProvider = config.aux?.provider === undefined
+        ? findProvider(registry, config.provider)
+        : findProvider(registry, config.aux.provider);
+      const sharesMainEndpoint = auxProvider.name === config.provider;
+      const resolved = resolveModel(auxProvider, model);
       return createClient({
-        baseUrl: config.aux?.baseUrl ?? config.baseUrl,
-        apiKey: config.aux?.apiKey ?? config.apiKey,
+        baseUrl: auxProvider.baseUrl,
+        apiKey: auxProvider.apiKey,
         model,
-        api: config.aux?.api ?? mainApi,
+        api: resolved.api,
         reasoningEffort: config.reasoningEffort,
         // max_tokens 只在同源时继承：不同厂商的输出上限不同，把主模型的限额发给别人的模型
         // 会直接 400。跨端点时交给端点默认值（anthropic 适配层自带 8192 兜底）。
         maxTokens: sharesMainEndpoint ? config.maxTokens : undefined,
-        headers: mergePresetHeaders(config.aux?.baseUrl ?? config.baseUrl, config.httpHeaders),
+        headers: mergePresetHeaders(auxProvider.baseUrl, auxProvider.headers),
         promptCache: config.promptCache,
         sessionId: session.id,
-        // 跨端点时用 [aux.compat]；同源则复用主 [compat]。
-        compat: sharesMainEndpoint ? config.compat : config.aux?.compat,
+        compat: resolved.compat,
         maxRetries: config.maxRetries,
       });
     },

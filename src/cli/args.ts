@@ -11,7 +11,7 @@ export interface CliArgs {
   /** `-c` / `--continue`：续用本工作区最近一次会话。 */
   continueSession: boolean;
   yolo: boolean;
-  /** 把当前工作区写入 ~/.sph/trusted.json，记为已信任；未信任工作区跑 -p 前必须带上。 */
+  /** 把当前工作区写入 config.toml 的 trusted 数组，记为已信任；未信任工作区跑 -p 前必须带上。 */
   trust: boolean;
   sandbox?: SandboxMode;
   model?: string;
@@ -45,6 +45,7 @@ Usage:
   sph export [--format md|json|html] [--session id]   Export a session to stdout
   sph --rpc                 JSONL RPC on stdin/stdout (prompt / abort / quit)
   sph --model <model>       Override the configured model for this process
+                            ("provider/id" also switches provider from models.json)
   sph --effort <level>      Reasoning effort: off | low | medium | high | xhigh | max
   sph --max-tokens <n>      Max output tokens per completion (overrides config max_tokens)
   sph --api <protocol>      Upstream protocol: chat-completions | responses | anthropic-messages

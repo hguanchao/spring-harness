@@ -2,64 +2,66 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
 import {
   APPROVAL_MODES,
-  EMPTY_RULES,
-  SUBAGENT_APPROVAL_POLICIES,
   type ApprovalMode,
   type PermissionRules,
   type SubagentApprovalPolicy,
 } from '../permission/policy.js';
-import { sphConfigPath } from '../home.js';
-import {
-  SESSION_AFFINITY_FORMATS,
-  type CompatProfile,
-  type SessionAffinityFormat,
-} from '../llm/compat.js';
+import { SUBAGENT_APPROVAL_POLICIES } from '../permission/policy.js';
+import { sphConfigPath, sphModelsPath } from '../home.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
+import type { CompatProfile } from '../llm/compat.js';
 import { DEFAULT_MAX_RETRIES } from '../llm/retry.js';
 import type { McpServerConfig } from '../mcp/hub.js';
 import type { McpPreferences } from '../mcp/sources.js';
 import { DEFAULT_SPILL_THRESHOLD } from '../runtime/spill.js';
 import type { SandboxMode } from '../sandbox/types.js';
+import { ConfigError } from './errors.js';
+import { API_PROTOCOLS, type ApiProtocol } from './primitives.js';
+import { findProvider, loadRegistry, resolveModel, type ProviderDeclaration } from './registry.js';
+import { parseGrants, parseRules, parseTrusted } from './state.js';
+
+export { ConfigError, API_PROTOCOLS };
+export type { ApiProtocol };
 
 export type McpServerConfigFile = McpServerConfig;
 
-/** 上游 API 协议形态；决定请求端点、鉴权头与消息编码方式。 */
-export const API_PROTOCOLS = ['chat-completions', 'responses', 'anthropic-messages'] as const;
-export type ApiProtocol = (typeof API_PROTOCOLS)[number];
-
 /**
- * 辅助调用（压缩摘要 / auto 审批审查器）可选的独立端点。
+ * 辅助调用（压缩摘要 / auto 审批审查器）的端点选择。
  *
- * 动因：主模型可能是某个贵的旗舰，而压缩摘要与安全审查器只需要一个便宜模型——它们只读不写、
- * 输出格式固定。此前辅助调用只能复用主配置的 base_url / api_key / api，「便宜的辅助模型」
- * 于是只在同一端点内成立，跨厂商做不到。
- *
- * 三个字段都可省，各自回退主配置。
+ * 只剩一个 provider 指针：端点本体（baseUrl/apiKey/api/headers）在 models.json 的
+ * provider 声明里，config.toml 只回答「辅助调用用哪个 provider」。省略 = 与主端点同源。
  */
 export interface AuxConfig {
-  baseUrl?: string;
-  apiKey?: string;
-  api?: ApiProtocol;
-  /** 辅助端点自己的兼容声明；省略且跨端点时走该端点 URL 推断。 */
-  compat?: CompatProfile;
+  provider?: string;
 }
 
+/**
+ * 解析完成的生效配置。
+ *
+ * `baseUrl` / `apiKey` / `httpHeaders` / `compat` / `api` 来自 models.json 里 provider
+ * 指针指向的声明与当前模型的解析结果——config.toml 不再持有端点，它只回答「用哪个
+ * provider 与模型」。模型级声明缺失的 `contextWindow` / `maxTokens` 由这里的全局值兜底。
+ */
 export interface SphConfig {
-  baseUrl: string;
+  /** models.json 里生效的 provider 名。 */
+  provider: string;
   model: string;
+  baseUrl: string;
   apiKey: string;
+  /** provider 级静态请求头；协议默认头同名时以它为准。 */
+  httpHeaders: Record<string, string>;
+  /** 当前模型生效的 compat（provider 级与模型级合并）。 */
+  compat?: CompatProfile;
+  /** 当前模型生效的协议。 */
+  api: ApiProtocol;
   contextWindow: number;
-  /** 单次输出的最大 Token；未配置时由协议默认（anthropic 8192）或端点决定。 */
+  /** 单次输出的最大 Token；模型未声明且未配置时由协议默认（anthropic 8192）或端点决定。 */
   maxTokens?: number;
   sandbox: SandboxMode;
   reasoningEffort?: ReasoningEffort;
   /** 缺省审批模式；未配置时由 CLI 兜底为 ask。 */
   approval?: ApprovalMode;
-  /**
-   * 针对具体动作的长期规则（`[permissions]`）；省略即无规则。
-   *
-   * 与 `approval` 的分工：模式是全局的当下态度，规则是更具体的长期意图，优先级更高。
-   */
+  /** `[permissions]` 针对具体动作的长期规则；省略即无规则。 */
   permissions: PermissionRules;
   /**
    * 子代理的审批策略；省略按 `inherit`。
@@ -68,20 +70,17 @@ export interface SphConfig {
    * 受审工具一律拒绝、不弹窗、不共享父会话的授权。
    */
   subagentApproval: SubagentApprovalPolicy;
-  api: ApiProtocol;
   mcpServers: McpServerConfigFile[];
-  /** 压缩摘要专用模型（同一个 base_url/api_key）；省略则用主模型。 */
+  /** 压缩摘要专用模型（aux provider 或主 provider 的模型 id）；省略则用主模型。 */
   compactModel?: string;
   /** auto 审批审查器专用模型；省略则用主模型。 */
   reviewModel?: string;
-  /** 辅助调用可选的独立端点；省略则复用主端点。 */
+  /** 辅助调用走哪个 provider；省略 = 与主端点同源。 */
   aux?: AuxConfig;
   /** 工具结果超过这个字符数就落盘，上下文只留预览与路径；0 表示关闭。 */
   spillThreshold: number;
-  /** 附加到每个 LLM 请求的静态头；api_key 为空时由它承担免鉴权会话标识。 */
-  httpHeaders: Record<string, string>;
   /**
-   * 出站代理 URL（覆盖 LLM 请求、模型目录、web_search 等全部出网点）。
+   * 出站代理 URL（覆盖 LLM 请求、web_search 等全部出网点）。
    * 三态：undefined 回退 HTTP(S)_PROXY 环境变量；显式 "" 强制直连；非空必须 http(s)。
    */
   proxy?: string;
@@ -93,11 +92,6 @@ export interface SphConfig {
    * 自动降级（见 llm/compat.ts），所以只在明确要省掉缓存写入时才需要关掉。
    */
   promptCache: boolean;
-  /**
-   * 端点参数声明，覆盖 URL 推断。省略的字段仍走推断。
-   * `prompt_cache = false` 会在组装 caps 时关掉缓存相关位，不看这里。
-   */
-  compat?: CompatProfile;
   /**
    * 会话累计 token 预算（prompt + completion，含子代理与压缩调用）。0 表示不限制（默认）。
    * 计数在会话折叠里，因此活过 resume；超限时在发起下一次调用**之前**中止本轮。
@@ -118,58 +112,58 @@ export interface SphConfig {
   mcpPreferences: McpPreferences;
 }
 
-export const CONFIG_EXAMPLE = `base_url = "https://api.example.com/v1"
+export const CONFIG_EXAMPLE = `# 端点与模型声明在 ~/.sph/models.json（providers 表），这里只选择与行为。
+provider = "my-gateway"        # models.json 里的 provider 名
 model = "example-model"
-# api_key = "..."
-context_window = 256000
-# max_tokens = 8192        # 单次输出上限（正整数，可选；未配置时走协议默认/端点默认）
+context_window = 256000        # 模型未声明 contextWindow 时的兜底
+# max_tokens = 8192            # 模型未声明 maxTokens 时的兜底（正整数）
 sandbox = "workspace"
-# api = "chat-completions"      # chat-completions | responses | anthropic-messages
-# reasoning_effort = "medium"   # off | low | medium | high | xhigh | max
-# approval = "ask"              # ask | auto | yolo（/permission 的选择会写回这里）
+# reasoning_effort = "medium"  # off | low | medium | high | xhigh | max
+# approval = "ask"             # ask | auto | yolo（/permission 的选择会写回这里）
 # subagent_approval = "inherit" # inherit | strict；strict 让子代理一律 fail-closed，不弹窗
-# compact_model = ""            # 压缩摘要用的便宜模型；留空用主模型
-# review_model = ""             # auto 审批审查器用的模型；留空用主模型
-# [aux]                         # 辅助调用（压缩摘要 / auto 审查器）走另一个端点；
-#                               # 整段省略则复用主配置。三个字段都可单独省略。
-# base_url = "https://api.deepseek.com/v1"
-# api_key = "..."
-# api = "chat-completions"      # chat-completions | responses | anthropic-messages
-# spill_threshold = 8192        # 工具结果超过该字符数就落盘，0 关闭
-# subagent_max_depth = 1        # 子代理嵌套深度预算；0 禁止派生，默认 1（扁平，子代理不再派生）
-# prompt_cache = true           # Anthropic 打 prompt-cache 断点，默认开；端点不认时自动降级
-# max_session_tokens = 0        # 会话累计 token 预算（含子代理/压缩调用）；0 = 不限制
-# max_retries = 10              # 上游失败重试次数（不含首次）；0 = 失败即停
+# compact_model = ""           # 压缩摘要用的便宜模型；留空用主模型
+# review_model = ""            # auto 审批审查器用的模型；留空用主模型
+# [aux]                        # 辅助调用走另一个 provider；整段省略则与主端点同源
+# provider = "cheap"
+# spill_threshold = 8192       # 工具结果超过该字符数就落盘，0 关闭
+# subagent_max_depth = 1       # 子代理嵌套深度预算；0 禁止派生，默认 1（扁平，子代理不再派生）
+# prompt_cache = true          # Anthropic 打 prompt-cache 断点，默认开；端点不认时自动降级
+# max_session_tokens = 0       # 会话累计 token 预算（含子代理/压缩调用）；0 = 不限制
+# max_retries = 10             # 上游失败重试次数（不含首次）；0 = 失败即停
 # proxy = "http://127.0.0.1:7890"  # 出站代理；显式 "" = 强制直连，缺省回退 HTTP(S)_PROXY 环境变量
-# [compat]                      # 端点参数声明；省略按 base_url 推断（未知网关不发 cache key）
-# prompt_cache_key = true       # 发 session 路由键；官方 api.openai.com 默认开
-# prompt_cache_retention = true # 发 prompt_cache_retention = "24h"；默认关
-# stream_options = false        # 关掉 stream_options.include_usage
-# session_affinity = "openrouter"  # openai | openrouter | off
-# [permissions]                 # 针对具体动作的长期规则，比 approval 模式更具体
-# allow = ["shell:npm test"]    # 条目为 <tool> 或 <tool>:<pattern>；* 任意长、? 单字符
-# ask = ["shell:git push*"]     # 命中即强制问人（headless 下等于拒绝）
-# deny = ["shell:rm -rf*"]      # 硬边界：deny 连 yolo 也绕不过去
-# [http_headers]                # 附加到每个 LLM 请求的静态头；api_key = ""（显式空）时免鉴权
-# "User-Agent" = "opencode/1.4.3"
-# "X-Opencode-Session" = "some-session-id"
+# trusted = [                  # 已信任的工作区根（TUI 确认后自动写入）
+#   "E:\\\\Projects\\\\demo",
+# ]
+# [permissions]                # 针对具体动作的长期规则，比 approval 模式更具体
+# allow = ["shell:npm test"]   # 条目为 <tool> 或 <tool>:<pattern>；* 任意长、? 单字符
+# ask = ["shell:git push*"]    # 命中即强制问人（headless 下等于拒绝）
+# deny = ["shell:rm -rf*"]     # 硬边界：deny 连 yolo 也绕不过去
+# [grants]                     # 已批准的授权（审批弹窗「总是允许」写回这里），按作用域根分键
+# "E:\\\\Projects\\\\demo" = ["shell npm test"]
+# [http_headers]               # 已移到 models.json 的 provider.headers
+# [compat]                     # 已移到 models.json 的 provider/模型级 compat
 # [[mcp_servers]]
 # name = "demo"
 # command = "npx"
 # args = ["-y", "demo-mcp"]
-# [mcp]                         # MCP 本地启停偏好；外部来源（Claude/Codex/.mcp.json）只读，
+# [mcp]                        # MCP 本地启停偏好；外部来源（Claude/Codex/.mcp.json）只读，
 #                               # 开关记在这里，不改那些文件
 # disabled_servers = ["demo"]   # 本地关掉；对任何来源都生效
 # enabled_servers = []          # 本地打开某个来源自己声明关掉的 server
 #                               # 其余来源按优先级读取：Claude > Codex > .mcp.json
-`;
 
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ConfigError';
-  }
-}
+# models.json 的最小示例（与 config.toml 分开存放）：
+# {
+#   "providers": {
+#     "my-gateway": {
+#       "baseUrl": "https://api.example.com/v1",
+#       "api": "chat-completions",
+#       "apiKey": "$MY_API_KEY",
+#       "models": [{ "id": "example-model", "contextWindow": 256000 }]
+#     }
+#   }
+# }
+`;
 
 export function parseSandboxMode(value: string | undefined): SandboxMode {
   if (value === undefined || value === '') return 'workspace';
@@ -185,23 +179,11 @@ function requireNonEmptyString(value: unknown, key: string): string {
   return value.trim();
 }
 
-function asString(value: unknown, key: string): string | undefined {
-  if (value === undefined) return undefined;
-  return requireNonEmptyString(value, key);
-}
-
-/** 鉴权 key 可选：普通中转站必须配 key；免鉴权网关（靠 http_headers 里的客户端标识识别会话）
- * 用显式 `api_key = ""` 表达「不发 Authorization」。undefined、空串、纯空白同义于空。
- */
-function asOptionalKey(value: unknown, key: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string') throw new ConfigError(`${key} must be a string`);
-  return value.trim();
-}
-
-/** 缺 base_url / model / key 时拒绝启动，避免绑死供应商或空跑。 */
+/** 缺 provider / model / key 时拒绝启动，避免绑死供应商或空跑。 */
 export function loadConfig(options?: {
   configPath?: string;
+  /** models.json 的路径；测试注入临时文件。缺省用 `~/.sph/models.json`。 */
+  registryPath?: string;
   env?: NodeJS.ProcessEnv;
   sandboxOverride?: SandboxMode;
 }): SphConfig {
@@ -216,12 +198,20 @@ export function loadConfig(options?: {
     file = parsed as Record<string, unknown>;
   }
 
-  const baseUrl = asString(file.base_url, 'base_url');
-  const model = asString(file.model, 'model');
-  // key 三态：env 显式配置 > 文件普通值；文件里显式 `""` 表示不发鉴权头（由 http_headers 承担会话识别）。
-  const fileKey = asOptionalKey(file.api_key, 'api_key');
-  const envKey = env.SPH_API_KEY?.trim();
-  const apiKey = envKey || fileKey || '';
+  const registry = loadRegistry(options?.registryPath ?? sphModelsPath(), env);
+  const providerName = requireNonEmptyString(file.provider, 'provider');
+  const provider: ProviderDeclaration = findProvider(registry, providerName);
+  const model = requireNonEmptyString(file.model, 'model');
+
+  // 端点全部来自 provider 声明；空 key + 无 headers 的组合仍然拒绝——那是免鉴权网关
+  // 忘了写会话标识头的配置错误，启动时报错比第一轮请求 401 时报错好排查。
+  if (provider.apiKey === '' && Object.keys(provider.headers).length === 0) {
+    throw new ConfigError(
+      `provider "${providerName}" has no apiKey and no headers. Set apiKey (or headers for keyless gateways).`,
+    );
+  }
+
+  const resolved = resolveModel(provider, model);
   const contextRaw = file.context_window;
   let contextWindow = 256_000;
   if (contextRaw !== undefined) {
@@ -231,28 +221,21 @@ export function loadConfig(options?: {
     contextWindow = Math.floor(contextRaw);
   }
 
-  // 输出上限可选：未配置时保持协议现状（chat-completions/responses 不发字段，anthropic 用默认 8192），
-  // 避免为老配置无谓引入新约束。
+  // 输出上限可选：模型声明 > 配置文件 > 保持协议现状（未配置时 chat-completions/responses
+  // 不发字段，anthropic 用默认 8192），避免为老配置无谓引入新约束。
   const maxTokensRaw = file.max_tokens;
-  const maxTokens = maxTokensRaw === undefined
+  const configMaxTokens = maxTokensRaw === undefined
     ? undefined
     : requireInt(maxTokensRaw, 1, 'max_tokens must be a positive integer');
+  const maxTokens = resolved.maxTokens ?? configMaxTokens;
 
-  const httpHeaders = parseHttpHeaders(file.http_headers);
   const proxy = parseProxy(file.proxy);
-
-  if (!baseUrl || !model || (!apiKey && Object.keys(httpHeaders).length === 0)) {
-    throw new ConfigError(
-      `missing base_url, model, or API key.\nWrite ${path}:\n\n${CONFIG_EXAMPLE}\nSet SPH_API_KEY or api_key ("" + [http_headers] for keyless gateways). SPH_API_KEY wins.`,
-    );
-  }
 
   const sandbox = options?.sandboxOverride ?? parseSandboxMode(asString(file.sandbox, 'sandbox'));
   const reasoningEffort = parseReasoningEffort(file.reasoning_effort);
   const approval = parseApprovalMode(file.approval);
-  const permissions = parsePermissionRules(file.permissions);
+  const permissions = parseRules(file.permissions);
   const subagentApproval = parseSubagentApproval(file.subagent_approval);
-  const api = parseApiProtocol(file.api);
   const mcpServers = parseMcpServers(file.mcp_servers);
   const compactModel = parseOptionalModel(file.compact_model, 'compact_model');
   const reviewModel = parseOptionalModel(file.review_model, 'review_model');
@@ -260,72 +243,37 @@ export function loadConfig(options?: {
   const spillThreshold = parseSpillThreshold(file.spill_threshold);
   const subagentMaxDepth = parseSubagentMaxDepth(file.subagent_max_depth);
   const promptCache = parsePromptCache(file.prompt_cache);
-  const compat = parseCompat(file.compat, 'compat');
   const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
   const maxRetries = parseMaxRetries(file.max_retries);
   const mcpPreferences = parseMcpPreferences(file.mcp);
   return {
-    baseUrl, model, apiKey, contextWindow, maxTokens, sandbox, reasoningEffort, approval, api, mcpServers,
+    provider: providerName,
+    model,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    httpHeaders: provider.headers,
+    ...(resolved.compat === undefined ? {} : { compat: resolved.compat }),
+    api: resolved.api,
+    contextWindow: resolved.contextWindow ?? contextWindow,
+    maxTokens,
+    sandbox, reasoningEffort, approval, mcpServers,
     permissions, subagentApproval,
-    compactModel, reviewModel, aux, spillThreshold, httpHeaders, proxy, subagentMaxDepth, promptCache,
-    compat, maxSessionTokens, maxRetries, mcpPreferences,
+    compactModel, reviewModel, aux, spillThreshold, proxy, subagentMaxDepth, promptCache,
+    maxSessionTokens, maxRetries, mcpPreferences,
   };
 }
 
-/**
- * `[mcp]` 表：只认两个名字列表，缺省即空。
- *
- * 名字列表里出现不存在的 server 不算错误：配置可能来自别的机器或还没导入，静默忽略比
- * 拒绝启动合理。写成非数组才是真的写错了，那时候报错更省事。
- */
-function parseMcpPreferences(value: unknown): McpPreferences {
-  if (value === undefined) return { disabledServers: [], enabledServers: [] };
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('mcp must be a table');
-  }
-  const row = value as Record<string, unknown>;
-  return {
-    disabledServers: parseServerNameList(row.disabled_servers, 'mcp.disabled_servers'),
-    enabledServers: parseServerNameList(row.enabled_servers, 'mcp.enabled_servers'),
-  };
-}
-
-function parseServerNameList(value: unknown, key: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of server names`);
-  return value.map((item, index) => {
-    if (typeof item !== 'string' || item.trim() === '') {
-      throw new ConfigError(`${key}[${index}] must be a non-empty string`);
-    }
-    return item.trim();
-  });
+export function readTrustedGrants(path: string = sphConfigPath()): { trusted: string[]; grants: Record<string, string[]> } {
+  if (!existsSync(path)) return { trusted: [], grants: {} };
+  const parsed = parseToml(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  return { trusted: parseTrusted(parsed.trusted), grants: parseGrants(parsed.grants) };
 }
 
 /**
- * 单独读 `[mcp]` 段。
+ * `[aux]` 表：只有一个 provider 指针，省略即同源。
  *
- * `/mcps` 写完启停偏好后需要就地刷新内存里的那份，而重新 `loadConfig` 会顺带重跑
- * 一堆与 MCP 无关的校验（缺 key 直接抛错），在一次交互中途是不合适的。
- *
- * 读不回来（文件没了/被改坏）返回 undefined，调用方保持旧值——偏好刚写完，此时用空值
- * 覆盖只会让用户刚做的开关凭空消失。
- */
-export function readMcpPreferences(path: string): McpPreferences | undefined {
-  if (!existsSync(path)) return { disabledServers: [], enabledServers: [] };
-  try {
-    const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-    return parseMcpPreferences((parsed as Record<string, unknown>).mcp);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * `[aux]` 表：三个字段全可选，全缺时返回 undefined（等价于「复用主端点」）。
- *
- * `api` 要区分「没写」与「写了默认值」：`parseApiProtocol` 对缺省会回填
- * chat-completions，那会让 aux 悄悄锁死协议而不跟随主配置，所以这里只在显式给出时才取值。
+ * `compact_model` / `review_model` 是 aux provider（缺省即主 provider）里的模型 id，
+ * 协议按该 provider 的声明解析——这正是旧 `sharesMainEndpoint` 逻辑的结构化表达。
  */
 function parseAux(value: unknown): AuxConfig | undefined {
   if (value === undefined) return undefined;
@@ -333,49 +281,8 @@ function parseAux(value: unknown): AuxConfig | undefined {
     throw new ConfigError('aux must be a table');
   }
   const row = value as Record<string, unknown>;
-  const aux: AuxConfig = {};
-  const baseUrl = asString(row.base_url, 'aux.base_url');
-  if (baseUrl !== undefined) aux.baseUrl = baseUrl;
-  // 与顶层 api_key 同一套三态语义：显式空串 = 该端点免鉴权。
-  const apiKey = asOptionalKey(row.api_key, 'aux.api_key');
-  if (apiKey !== undefined) aux.apiKey = apiKey;
-  if (row.api !== undefined && row.api !== '') aux.api = parseApiProtocol(row.api);
-  const compat = parseCompat(row.compat, 'aux.compat');
-  if (compat !== undefined) aux.compat = compat;
-  return Object.keys(aux).length > 0 ? aux : undefined;
-}
-
-function parseOptionalBoolean(value: unknown, key: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') throw new ConfigError(`${key} must be a boolean`);
-  return value;
-}
-
-/** `[compat]`：省略的字段走 URL 推断；空表等价于未配置。 */
-function parseCompat(value: unknown, key: string): CompatProfile | undefined {
-  if (value === undefined) return undefined;
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError(`${key} must be a table`);
-  }
-  const row = value as Record<string, unknown>;
-  const profile: CompatProfile = {};
-  const promptCacheKey = parseOptionalBoolean(row.prompt_cache_key, `${key}.prompt_cache_key`);
-  if (promptCacheKey !== undefined) profile.promptCacheKey = promptCacheKey;
-  const promptCacheRetention = parseOptionalBoolean(row.prompt_cache_retention, `${key}.prompt_cache_retention`);
-  if (promptCacheRetention !== undefined) profile.promptCacheRetention = promptCacheRetention;
-  const streamOptions = parseOptionalBoolean(row.stream_options, `${key}.stream_options`);
-  if (streamOptions !== undefined) profile.streamOptions = streamOptions;
-  if (row.session_affinity !== undefined) {
-    if (typeof row.session_affinity !== 'string') {
-      throw new ConfigError(`${key}.session_affinity must be openai | openrouter | off`);
-    }
-    const affinity = row.session_affinity.trim();
-    if (!(SESSION_AFFINITY_FORMATS as readonly string[]).includes(affinity)) {
-      throw new ConfigError(`${key}.session_affinity must be openai | openrouter | off`);
-    }
-    profile.sessionAffinity = affinity as SessionAffinityFormat;
-  }
-  return Object.keys(profile).length > 0 ? profile : undefined;
+  if (row.provider === undefined || row.provider === '') return undefined;
+  return { provider: requireNonEmptyString(row.provider, 'aux.provider') };
 }
 
 /** 会话 token 预算：非负整数，0 = 不限制（默认）。 */
@@ -441,39 +348,13 @@ export function parseApprovalMode(value: unknown): ApprovalMode | undefined {
   return value as ApprovalMode;
 }
 
-/**
- * `[permissions]` 表：allow / ask / deny 三张字符串表，缺省即空。
- *
- * 条目语法（`<tool>` 或 `<tool>:<pattern>`）由 permission/policy.ts 定义与解释，
- * 这里只管「是不是三张字符串表」——与 `[mcp]` 的偏好解析同一个分工。
- */
-export function parsePermissionRules(value: unknown): PermissionRules {
-  if (value === undefined) return EMPTY_RULES;
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('permissions must be a table with allow / ask / deny lists');
+/** 推理档位可选；未配置时保持 undefined（请求不带 reasoning_effort，走服务端默认）。 */
+export function parseReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || !(REASONING_EFFORTS as readonly string[]).includes(value)) {
+    throw new ConfigError(`reasoning_effort must be one of: ${REASONING_EFFORTS.join(' | ')}`);
   }
-  const row = value as Record<string, unknown>;
-  for (const name of Object.keys(row)) {
-    if (name !== 'allow' && name !== 'ask' && name !== 'deny') {
-      throw new ConfigError(`unknown permissions key: ${name} (allow | ask | deny)`);
-    }
-  }
-  return {
-    allow: parseRuleList(row.allow, 'permissions.allow'),
-    ask: parseRuleList(row.ask, 'permissions.ask'),
-    deny: parseRuleList(row.deny, 'permissions.deny'),
-  };
-}
-
-function parseRuleList(value: unknown, key: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of rules`);
-  return value.map((item, index) => {
-    if (typeof item !== 'string' || item.trim() === '') {
-      throw new ConfigError(`${key}[${index}] must be a non-empty string`);
-    }
-    return item.trim();
-  });
+  return value as ReasoningEffort;
 }
 
 /** 子代理审批策略；省略默认 inherit——沿用既有行为，不静默改语义。 */
@@ -483,15 +364,6 @@ export function parseSubagentApproval(value: unknown): SubagentApprovalPolicy {
     throw new ConfigError(`subagent_approval must be one of: ${SUBAGENT_APPROVAL_POLICIES.join(' | ')}`);
   }
   return value as SubagentApprovalPolicy;
-}
-
-/** 上游协议可选；未配置默认 chat-completions（兼容所有 OpenAI 形态端点）。 */
-export function parseApiProtocol(value: unknown): ApiProtocol {
-  if (value === undefined || value === '') return 'chat-completions';
-  if (typeof value !== 'string' || !(API_PROTOCOLS as readonly string[]).includes(value)) {
-    throw new ConfigError(`api must be one of: ${API_PROTOCOLS.join(' | ')}`);
-  }
-  return value as ApiProtocol;
 }
 
 /**
@@ -518,29 +390,58 @@ function parseProxy(value: unknown): string | undefined {
   return trimmed;
 }
 
-/** 自定义静态请求头可选：全表每项都必须是字符串，格式不对整体拒绝启动。 */
-function parseHttpHeaders(value: unknown): Record<string, string> {
-  if (value === undefined) return {};
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('http_headers must be a table of string values');
-  }
-  const headers: Record<string, string> = {};
-  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (!name.trim() || typeof raw !== 'string' || raw.trim() === '') {
-      throw new ConfigError(`http_headers[${name}] must be a non-empty string`);
-    }
-    headers[name.trim()] = raw.trim();
-  }
-  return headers;
+function asString(value: unknown, key: string): string | undefined {
+  if (value === undefined) return undefined;
+  return requireNonEmptyString(value, key);
 }
 
-/** 推理档位可选；未配置时保持 undefined（请求不带 reasoning_effort，走服务端默认）。 */
-export function parseReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  if (value === undefined || value === '') return undefined;
-  if (typeof value !== 'string' || !(REASONING_EFFORTS as readonly string[]).includes(value)) {
-    throw new ConfigError(`reasoning_effort must be one of: ${REASONING_EFFORTS.join(' | ')}`);
+/**
+ * `[mcp]` 表：只认两个名字列表，缺省即空。
+ *
+ * 名字列表里出现不存在的 server 不算错误：配置可能来自别的机器或还没导入，静默忽略比
+ * 拒绝启动合理。写成非数组才是真的写错了，那时候报错更省事。
+ */
+function parseMcpPreferences(value: unknown): McpPreferences {
+  if (value === undefined) return { disabledServers: [], enabledServers: [] };
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('mcp must be a table');
   }
-  return value as ReasoningEffort;
+  const row = value as Record<string, unknown>;
+  return {
+    disabledServers: parseServerNameList(row.disabled_servers, 'mcp.disabled_servers'),
+    enabledServers: parseServerNameList(row.enabled_servers, 'mcp.enabled_servers'),
+  };
+}
+
+function parseServerNameList(value: unknown, key: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of server names`);
+  return value.map((item, index) => {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new ConfigError(`${key}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+}
+
+/**
+ * 单独读 `[mcp]` 段。
+ *
+ * `/mcps` 写完启停偏好后需要就地刷新内存里的那份，而重新 `loadConfig` 会顺带重跑
+ * 一堆与 MCP 无关的校验（缺 key 直接抛错），在一次交互中途是不合适的。
+ *
+ * 读不回来（文件没了/被改坏）返回 undefined，调用方保持旧值——偏好刚写完，此时用空值
+ * 覆盖只会让用户刚做的开关凭空消失。
+ */
+export function readMcpPreferences(path: string): McpPreferences | undefined {
+  if (!existsSync(path)) return { disabledServers: [], enabledServers: [] };
+  try {
+    const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return parseMcpPreferences((parsed as Record<string, unknown>).mcp);
+  } catch {
+    return undefined;
+  }
 }
 
 function parseMcpServers(value: unknown): McpServerConfigFile[] {
@@ -549,7 +450,7 @@ function parseMcpServers(value: unknown): McpServerConfigFile[] {
   return value.map((row, i) => {
     if (!row || typeof row !== 'object') throw new ConfigError(`mcp_servers[${i}] must be a table`);
     const rec = row as Record<string, unknown>;
-    const name = asString(rec.name, `mcp_servers[${i}].name`);
+    const name = requireNonEmptyString(rec.name, `mcp_servers[${i}].name`);
     const command = asString(rec.command, `mcp_servers[${i}].command`);
     const url = asString(rec.url, `mcp_servers[${i}].url`);
     if (!name || (!command && !url)) {
