@@ -6,7 +6,7 @@ export interface OpenAiTool {
 }
 
 /**
- * 可注入的工具表。默认产品装 17 个内置工具；测试与自定义入口可换一份。
+ * 可注入的工具表。测试与自定义入口可换一份。
  * 同名 register 拒绝——静默覆盖会让「我加的工具没生效」变成另一份定义在跑。
  */
 export class ToolRegistry {

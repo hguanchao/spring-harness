@@ -36,16 +36,16 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
     const approver = new InteractiveApprover(ui);
 
     // 用户批准了 npm test 并选了「总是允许」。
-    assert.equal(await approver.decide({ tool: 'shell', command: 'npm test' }), true);
-    approver.allowForSession({ tool: 'shell', command: 'npm test' });
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm test' }), true);
+    approver.allowForSession({ tool: 'bash', command: 'npm test' });
     assert.equal(ui.asked.length, 1);
 
     // 同一条命令不再问。
-    assert.equal(await approver.decide({ tool: 'shell', command: 'npm test' }), true);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm test' }), true);
     assert.equal(ui.asked.length, 1, '已授权的命令不该重复问');
 
     // 另一条命令必须重新征求同意。修复前键是工具名，这里会被静默放行。
-    assert.equal(await approver.decide({ tool: 'shell', command: 'rm -rf /' }), false);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'rm -rf /' }), false);
     assert.equal(ui.asked.length, 2, '换一条命令必须重新问');
   });
 
@@ -66,7 +66,7 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
     const ui = fakeUi('auto', [true]);
     const approver = new InteractiveApprover(ui, async () => ({ allowed: false, reason: 'looks destructive' }));
 
-    assert.equal(await approver.decide({ tool: 'shell', command: 'rm -rf /' }), true);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'rm -rf /' }), true);
     assert.equal(ui.asked.length, 1, '审查器否决后应交给人判断');
   });
 
@@ -74,21 +74,21 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
     const ui = fakeUi('yolo');
     const approver = new InteractiveApprover(ui);
 
-    assert.equal(await approver.decide({ tool: 'shell', command: 'rm -rf /' }), true);
-    assert.equal(await approver.decide({ tool: 'read_file', path: '/ws/a.txt' }), true);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'rm -rf /' }), true);
+    assert.equal(await approver.decide({ tool: 'read', path: '/ws/a.txt' }), true);
     assert.equal(ui.asked.length, 0);
   });
 
   it('「本项目」的授权落盘：换一个实例（＝换一次会话）仍然生效', async () => {
     const grants = fakeStore();
     const first = new InteractiveApprover(fakeUi('ask'), undefined, grants);
-    first.allowForProject({ tool: 'shell', command: 'npm test' });
+    first.allowForProject({ tool: 'bash', command: 'npm test' });
 
     // 新实例 = 新会话：构造时从存储读回授权。
     const second = new InteractiveApprover(fakeUi('ask'), undefined, grants);
-    assert.equal(await second.decide({ tool: 'shell', command: 'npm test' }), true, '跨会话应直接放行');
+    assert.equal(await second.decide({ tool: 'bash', command: 'npm test' }), true, '跨会话应直接放行');
     assert.equal(
-      await second.decide({ tool: 'shell', command: 'rm -rf /' }),
+      await second.decide({ tool: 'bash', command: 'rm -rf /' }),
       false,
       '同工具的其他命令不受影响',
     );
@@ -97,12 +97,12 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
   it('「本会话」的授权不落盘：新会话必须重新问', async () => {
     const grants = fakeStore();
     const first = new InteractiveApprover(fakeUi('ask'), undefined, grants);
-    first.allowForSession({ tool: 'shell', command: 'npm test' });
-    assert.equal(await first.decide({ tool: 'shell', command: 'npm test' }), true);
+    first.allowForSession({ tool: 'bash', command: 'npm test' });
+    assert.equal(await first.decide({ tool: 'bash', command: 'npm test' }), true);
 
     const second = new InteractiveApprover(fakeUi('ask'), undefined, grants);
     assert.equal(
-      await second.decide({ tool: 'shell', command: 'npm test' }),
+      await second.decide({ tool: 'bash', command: 'npm test' }),
       false,
       '本会话授权不该跨会话生效',
     );
@@ -110,8 +110,8 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
 
   it('没有存储时（headless / 单测）不落盘，只保留本会话授权', async () => {
     const approver = new InteractiveApprover(fakeUi('ask'));
-    approver.allowForProject({ tool: 'shell', command: 'npm test' });
-    assert.equal(await approver.decide({ tool: 'shell', command: 'npm test' }), true);
+    approver.allowForProject({ tool: 'bash', command: 'npm test' });
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm test' }), true);
   });
 });
 
@@ -122,11 +122,11 @@ describe('InteractiveApprover 与 [permissions] 规则', () => {
     const approver = new InteractiveApprover(ui, undefined, grants, {
       allow: [],
       ask: [],
-      deny: ['shell:rm -rf*'],
+      deny: ['bash:rm -rf*'],
     });
-    approver.allowForProject({ tool: 'shell', command: 'rm -rf /' });
+    approver.allowForProject({ tool: 'bash', command: 'rm -rf /' });
 
-    assert.equal(await approver.decide({ tool: 'shell', command: 'rm -rf /' }), false);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'rm -rf /' }), false);
     assert.equal(ui.asked.length, 0, '硬边界不该弹窗征求同意——没有「再问一次」这个选项');
   });
 
@@ -134,21 +134,21 @@ describe('InteractiveApprover 与 [permissions] 规则', () => {
     const ui = fakeUi('yolo', [true]);
     const approver = new InteractiveApprover(ui, undefined, undefined, {
       allow: [],
-      ask: ['shell:git push*'],
+      ask: ['bash:git push*'],
       deny: [],
     });
-    assert.equal(await approver.decide({ tool: 'shell', command: 'git push origin main' }), true);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'git push origin main' }), true);
     assert.equal(ui.asked.length, 1, '用户明确写了「这个必须先问我」，比一次模式切换更具体');
   });
 
   it('allow 规则直接放行，不问也不看模式', async () => {
     const ui = fakeUi('ask');
     const approver = new InteractiveApprover(ui, undefined, undefined, {
-      allow: ['shell:npm test'],
+      allow: ['bash:npm test'],
       ask: [],
       deny: [],
     });
-    assert.equal(await approver.decide({ tool: 'shell', command: 'npm test' }), true);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm test' }), true);
     assert.equal(ui.asked.length, 0);
   });
 });

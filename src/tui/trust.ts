@@ -185,7 +185,7 @@ class TrustScreen implements Component {
     const gap = Math.max(1, this.menuWidth - visibleWidth(label) - keyWidth);
     const raw = `${label}${' '.repeat(gap)}${item.key}`;
     const row = selected
-      ? theme.bg('selectedBg', theme.bold(theme.fg('text', raw)))
+      ? theme.bold(theme.fg('primary', raw))
       : `${theme.bold(theme.fg('text', label))}${' '.repeat(gap)}${theme.fg('muted', item.key)}`;
     const left = ' '.repeat(this.menuLeft);
     const used = this.menuLeft + this.menuWidth;

@@ -502,7 +502,7 @@ export class Loader extends Text {
 	render(width: number): string[] {
 		const w = Math.max(1, width);
 		const leftPad = 1;
-		// 右缘：1 列给滚动条 ▐，再空两格，耗时不要贴着滑块。
+		// 右缘：1 列给滚动条 █，再空两格，耗时不要贴着滑块。
 		const rightPad = 4;
 		const inner = Math.max(1, w - leftPad - rightPad);
 		const now = Date.now();

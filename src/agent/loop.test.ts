@@ -489,7 +489,7 @@ describe('子代理审批策略', () => {
   const SHELL: StreamDelta = {
     text: '',
     finishReason: 'tool-calls',
-    toolCalls: [{ id: 'c1', name: 'shell', arguments: '{"command":"npm test"}' }],
+    toolCalls: [{ id: 'c1', name: 'bash', arguments: '{"command":"npm test"}' }],
   };
   const DONE: StreamDelta = { text: 'done', finishReason: 'stop' };
 

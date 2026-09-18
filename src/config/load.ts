@@ -135,11 +135,11 @@ sandbox = "workspace"
 #   "E:\\\\Projects\\\\demo",
 # ]
 # [permissions]                # 针对具体动作的长期规则，比 approval 模式更具体
-# allow = ["shell:npm test"]   # 条目为 <tool> 或 <tool>:<pattern>；* 任意长、? 单字符
-# ask = ["shell:git push*"]    # 命中即强制问人（headless 下等于拒绝）
-# deny = ["shell:rm -rf*"]     # 硬边界：deny 连 yolo 也绕不过去
+# allow = ["bash:npm test"]    # 条目为 <tool> 或 <tool>:<pattern>；* 任意长、? 单字符
+# ask = ["bash:git push*"]     # 命中即强制问人（headless 下等于拒绝）
+# deny = ["bash:rm -rf*"]      # 硬边界：deny 连 yolo 也绕不过去
 # [grants]                     # 已批准的授权（审批弹窗「总是允许」写回这里），按作用域根分键
-# "E:\\\\Projects\\\\demo" = ["shell npm test"]
+# "E:\\\\Projects\\\\demo" = ["bash npm test"]
 # [http_headers]               # 已移到 models.json 的 provider.headers
 # [compat]                     # 已移到 models.json 的 provider/模型级 compat
 # [[mcp_servers]]

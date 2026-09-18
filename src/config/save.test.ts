@@ -145,9 +145,9 @@ describe('updateConfigTableEntry', () => {
   it('表不存在时整表新建，键加引号渲染', () => {
     const f = fixture('provider = "p"\nmodel = "m"\n');
     try {
-      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['shell npm test']);
+      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['bash npm test']);
       const parsed = parse(f.read()) as { provider: string; grants: Record<string, string[]> };
-      assert.deepEqual(parsed.grants['E:\\a'], ['shell npm test']);
+      assert.deepEqual(parsed.grants['E:\\a'], ['bash npm test']);
       assert.equal(parsed.provider, 'p', '已有内容不动');
     } finally {
       f.cleanup();
@@ -170,9 +170,9 @@ describe('updateConfigTableEntry', () => {
   it('表体后的其它表不受影响；表头前没有可写位置也不写错地方', () => {
     const f = fixture('provider = "p"\nmodel = "m"\n\n[mcp]\ndisabled_servers = []\n');
     try {
-      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['shell npm test']);
+      updateConfigTableEntry(f.path, 'grants', 'E:\\a', ['bash npm test']);
       const parsed = parse(f.read()) as { grants: Record<string, string[]>; mcp: Record<string, unknown> };
-      assert.deepEqual(parsed.grants['E:\\a'], ['shell npm test'], 'grants 表追加在文件末尾');
+      assert.deepEqual(parsed.grants['E:\\a'], ['bash npm test'], 'grants 表追加在文件末尾');
       assert.equal(parsed.mcp.approval, undefined);
       assert.deepEqual((parsed.mcp as { disabled_servers: string[] }).disabled_servers, []);
     } finally {

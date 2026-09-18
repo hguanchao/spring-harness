@@ -125,6 +125,7 @@ const ANSI_FG: Record<string, string> = {
   muted: '90', dim: '90', border: '90', borderMuted: '90',
   toolTitle: '90', toolOutput: '90', mdCodeBlock: '90', mdCodeBlockBorder: '90',
   mdQuote: '90', mdQuoteBorder: '90', mdHr: '90', mdLinkUrl: '90', scrollbarTrack: '90',
+  scrollbarThumb: '90',
   mdLink: '97', mdCode: '94', plan: '94',
   success: '92', error: '91', warning: '93',
 };
@@ -132,7 +133,7 @@ const ANSI_FG: Record<string, string> = {
 /** ansi 模式的背景码：画布交还终端默认底（49）——「跟随终端」的核心；面层用亮黑（100）。 */
 const ANSI_BG: Record<string, string> = {
   bg: '49',
-  selectedBg: '100', userMessageBg: '100', toolPendingBg: '100', scrollbarThumb: '100',
+  selectedBg: '100', userMessageBg: '100', toolPendingBg: '100',
 };
 
 function fgAnsi(color: string, mode: ColorMode): string {

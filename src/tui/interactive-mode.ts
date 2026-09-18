@@ -40,8 +40,8 @@ import { APPROVAL_MODES, HeadlessApprover, type ApprovalMode, type ApprovalReque
 import { createGrantStore } from '../permission/store.js';
 import { updateConfigFile } from '../config/save.js';
 import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
-import type { ApiProtocol } from '../config/load.js';
-import { appendModelDeclaration, splitProviderModel, type ProviderDeclaration, type ResolvedModel } from '../config/registry.js';
+import { API_PROTOCOLS, type ApiProtocol } from '../config/load.js';
+import { appendModelDeclaration, splitProviderModel, upsertModelApi, type ProviderDeclaration, type ResolvedModel } from '../config/registry.js';
 import {
   REASONING_EFFORTS,
   type LlmClient,
@@ -216,7 +216,7 @@ const COMMANDS: readonly CommandItem[] = [
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
-  { id: 'provider', label: '/provider', hint: 'Switch provider; pick a model from its upstream catalog' },
+  { id: 'provider', label: '/provider', hint: 'Switch provider, then model, reasoning effort, and API protocol' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
   { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo' },
   { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
@@ -514,8 +514,8 @@ class InteractiveMode implements ApprovalUi {
       primary: true,
       overscroll: 'chain',
       scrollbar: 'auto',
-      scrollbarTrackStyle: (text) => theme.fg('dim', text),
-      scrollbarThumbStyle: (text) => theme.fg('dim', text),
+      scrollbarTrackStyle: (text) => theme.fg('scrollbarThumb', text),
+      scrollbarThumbStyle: (text) => theme.fg('scrollbarThumb', text),
       scrollbarUntil: this.editorContainer,
     });
     this.transcriptView = transcript;
@@ -1558,7 +1558,7 @@ class InteractiveMode implements ApprovalUi {
    */
   private approvalScopeLabel(request: ApprovalRequest): string {
     switch (request.tool) {
-      case 'shell':
+      case 'bash':
         return 'this exact command';
       case 'mcp':
         return request.command ?? 'this tool';
@@ -2329,10 +2329,11 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * `/provider [name]`：切换 provider 的两步向导。
+   * `/provider [name]`：切换 provider 的四步向导。
    *
-   * 第一步选 provider（带参数则跳过）；第二步选模型——候选 = 已声明 ∪ 上游目录，
-   * 选到未声明的模型就追加进 models.json 再切换。上游拉取失败不算失败：离线时
+   * 选 provider（带参数则跳过）→ 选模型 → 选推理等级 → 选端点协议。
+   * 后两步 Esc 跳过，不影响已经生效的前几步。模型候选 = 已声明 ∪ 上游目录，
+   * 选到未声明的就追加进 models.json 再切换。上游拉取失败不算失败：离线时
    * 仍能在已声明模型里切换，不该被一次网络故障挡住。
    */
   private async commandProvider(argument = ''): Promise<void> {
@@ -2434,8 +2435,7 @@ class InteractiveMode implements ApprovalUi {
     const modelId = selected.value;
     if (!declaredIds.has(modelId)) {
       try {
-        // 追加先于切换：声明是持久层。切换（写 config.toml）失败可以重试，
-        // 但「用了却没声明」的状态一旦出现就要靠人工修 models.json 才能补上。
+        // 只追加当前选中的这一条，不把上游目录整表写进 models.json。
         appendModelDeclaration(sphModelsPath(), provider.name, modelId);
         this.addNotice(`Declared ${modelId} under ${provider.name} in models.json.`, 'success');
       } catch (error) {
@@ -2443,6 +2443,10 @@ class InteractiveMode implements ApprovalUi {
       }
     }
     this.applyModel(modelId, provider.name);
+    const effort = await this.promptEffort();
+    if (effort !== undefined) this.applyEffort(effort);
+    const api = await this.promptApi(this.deps.resolveModel(modelId, provider.name).api);
+    if (api !== undefined) this.applyApi(api, provider, modelId);
   }
 
   /**
@@ -2481,14 +2485,38 @@ class InteractiveMode implements ApprovalUi {
       this.applyEffort(match);
       return;
     }
+    const selected = await this.promptEffort();
+    if (selected !== undefined) this.applyEffort(selected);
+  }
+
+  private async promptEffort(): Promise<ReasoningEffort | undefined> {
     const items: SelectItem[] = REASONING_EFFORTS.map((effort) => ({
       value: effort,
       label: effort,
       description: effort === this.effort ? 'current' : undefined,
     }));
-    const selected = await this.editor.showInlineMenu({ title: 'Reasoning effort', items, maxVisible: 6, primaryColumnWidth: primaryColumnWidthFor(items) });
-    if (!selected) return;
-    this.applyEffort(selected.value as ReasoningEffort);
+    const selected = await this.editor.showInlineMenu({
+      title: 'Reasoning effort',
+      items,
+      maxVisible: 6,
+      primaryColumnWidth: primaryColumnWidthFor(items),
+    });
+    return selected === undefined ? undefined : (selected.value as ReasoningEffort);
+  }
+
+  private async promptApi(current: ApiProtocol): Promise<ApiProtocol | undefined> {
+    const items: SelectItem[] = API_PROTOCOLS.map((api) => ({
+      value: api,
+      label: api,
+      description: api === current ? 'current' : undefined,
+    }));
+    const selected = await this.editor.showInlineMenu({
+      title: 'API protocol',
+      items,
+      maxVisible: 3,
+      primaryColumnWidth: primaryColumnWidthFor(items),
+    });
+    return selected === undefined ? undefined : (selected.value as ApiProtocol);
   }
 
   private applyEffort(effort: ReasoningEffort): void {
@@ -2498,6 +2526,27 @@ class InteractiveMode implements ApprovalUi {
     this.addNotice(
       error ? `Effort set to ${effort} (config write failed: ${error})` : `Effort set to ${effort}`,
       error ? 'warn' : 'success',
+    );
+  }
+
+  /**
+   * 把协议写到该模型的声明上（覆盖 provider 默认），并立刻重建 client。
+   * 内存里的 registry 也改一笔，否则本进程 resolveModel 仍读到旧值。
+   */
+  private applyApi(api: ApiProtocol, provider: ProviderDeclaration, modelId: string): void {
+    let writeError: string | undefined;
+    try {
+      upsertModelApi(sphModelsPath(), provider.name, modelId, api);
+    } catch (error) {
+      writeError = errorMessage(error);
+    }
+    const declared = provider.models.find((row) => row.id === modelId);
+    if (declared) declared.api = api;
+    else provider.models.push({ id: modelId, api });
+    this.client = this.buildClient();
+    this.addNotice(
+      writeError === undefined ? `API set to ${api}` : `API set to ${api} (models.json write failed: ${writeError})`,
+      writeError === undefined ? 'success' : 'warn',
     );
   }
 

@@ -26,7 +26,7 @@ describe('buildResponsesRequest', () => {
     const body = buildResponsesRequest({
       model: 'm',
       messages: [user('hi')],
-      tools: [{ type: 'function', function: { name: 'read_file', description: '', parameters: {} } }],
+      tools: [{ type: 'function', function: { name: 'read', description: '', parameters: {} } }],
     });
     assert.equal(body.tool_choice, 'auto');
   });
@@ -62,7 +62,7 @@ describe('applyResponsesEvent 工具调用', () => {
     applyResponsesEvent(
       JSON.stringify({
         type: 'response.output_item.added',
-        item: { type: 'function_call', id: 'fc_a', call_id: 'call_a', name: 'read_file', arguments: '' },
+        item: { type: 'function_call', id: 'fc_a', call_id: 'call_a', name: 'read', arguments: '' },
       }),
       acc,
     );
@@ -183,7 +183,7 @@ describe('toResponsesInput', () => {
     const items = toResponsesInput([
       { role: 'system', content: 'sys' },
       user('hi'),
-      { role: 'assistant', content: 'yo', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{}' } }] },
+      { role: 'assistant', content: 'yo', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
       { role: 'tool', content: 'out', tool_call_id: 'c1' },
     ]);
     assert.equal(items[0]?.role, 'system');

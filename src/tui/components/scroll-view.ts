@@ -95,6 +95,7 @@ export class ScrollView extends Container {
 
 	get isScrollbarVisible(): boolean {
 		if (this.scrollbar === "always") return this.currentViewportHeight > 0;
+		// 与 grok-build 一样：可滚高度（含 pin-reserve）超出视口才画。留白让「用户消息钉在顶」成为真的滚动底，滑块跟这个范围走。
 		return this.scrollbar === "auto" && this.scrollHeight > this.currentViewportHeight;
 	}
 

@@ -66,7 +66,7 @@ export class SpillStore {
       '...',
       `Preview (last ${Math.min(PREVIEW_TAIL, text.length)} chars):`,
       tail,
-      `Read more with read_file using that absolute path (offset/limit page through it).`,
+      `Read more with read using that absolute path (offset/limit page through it).`,
     ].join('\n');
   }
 }

@@ -5,7 +5,7 @@ import { asString, asStringOrEmpty, guardReadOnlyWrite, type ToolContext, type T
 
 export const writeTool: ToolSpec = {
   name: 'write',
-  description: 'Create a new file or replace an entire file inside the workspace. It overwrites, so read the file first unless you created it in this session; prefer search_replace for a targeted change, and reserve this for new files and full rewrites.',
+  description: 'Create a new file or replace an entire file inside the workspace. It overwrites, so read the file first unless you created it in this session; prefer edit for a targeted change, and reserve this for new files and full rewrites.',
   schema: {
     type: 'object',
     properties: {

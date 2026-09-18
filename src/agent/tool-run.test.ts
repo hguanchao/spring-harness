@@ -13,7 +13,7 @@ function call(id: string, name: string): ToolCallRequest {
 
 describe('isConcurrencySafe', () => {
   it('treats read-like tools as parallel and writers/todo/mcp as exclusive', () => {
-    assert.equal(isConcurrencySafe('read_file'), true);
+    assert.equal(isConcurrencySafe('read'), true);
     assert.equal(isConcurrencySafe('web_search'), true);
     assert.equal(isConcurrencySafe('glob'), true);
     assert.equal(isConcurrencySafe('todo'), false);
@@ -27,7 +27,7 @@ describe('runToolBatch', () => {
   it('commits in model order even when a later parallel call finishes first', async () => {
     const committed: string[] = [];
     await runToolBatch({
-      calls: [call('a', 'read_file'), call('b', 'read_file')],
+      calls: [call('a', 'read'), call('b', 'read')],
       isParallel: () => true,
       async execute(item) {
         await sleep(item.id === 'a' ? 40 : 5);
@@ -44,7 +44,7 @@ describe('runToolBatch', () => {
   it('holds exclusive tools until the preceding parallel batch drains', async () => {
     const events: string[] = [];
     await runToolBatch({
-      calls: [call('r', 'read_file'), call('t', 'todo')],
+      calls: [call('r', 'read'), call('t', 'todo')],
       isParallel: (name) => name !== 'todo',
       async execute(item) {
         events.push(`exec:${item.id}`);
@@ -85,7 +85,7 @@ describe('runToolBatch', () => {
   it('turns execute throws into error results so later slots still commit', async () => {
     const committed: Array<{ id: string; ok: boolean }> = [];
     await runToolBatch({
-      calls: [call('a', 'read_file'), call('b', 'read_file')],
+      calls: [call('a', 'read'), call('b', 'read')],
       isParallel: () => true,
       async execute(item) {
         if (item.id === 'a') throw new Error('boom');

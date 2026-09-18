@@ -1,4 +1,11 @@
 import type { ApiProtocol } from '../config/load.js';
+import {
+  isAnthropicHost,
+  isChatCompletionsGatewayHost,
+  isGoogleGenerativeHost,
+  isOpenAiApiHost,
+  isOpenRouterHost,
+} from '../net/hosts.js';
 import type { SessionAffinityFormat } from './compat.js';
 
 export interface EndpointPreset {
@@ -18,24 +25,23 @@ export function inferEndpointPreset(baseUrl: string): EndpointPreset | undefined
   } catch {
     return undefined;
   }
-  if (host === 'api.anthropic.com' || host.endsWith('.anthropic.com')) {
+  if (isAnthropicHost(host)) {
     return { api: 'anthropic-messages' };
   }
-  if (host === 'api.openai.com' || host.endsWith('.api.openai.com')) {
+  if (isOpenAiApiHost(host)) {
     return { api: 'chat-completions' };
   }
-  if (host.includes('openrouter.ai')) {
+  if (isOpenRouterHost(host)) {
     return {
       api: 'chat-completions',
       sessionAffinity: 'openrouter',
       headers: { 'HTTP-Referer': 'https://github.com/spring-harness', 'X-Title': 'sph' },
     };
   }
-  if (host.includes('deepseek.com') || host.includes('groq.com') || host.includes('together.xyz')
-    || host.includes('fireworks.ai') || host.includes('mistral.ai') || host.includes('together.ai')) {
+  if (isChatCompletionsGatewayHost(host)) {
     return { api: 'chat-completions' };
   }
-  if (host.includes('googleapis.com') || host.includes('generativelanguage')) {
+  if (isGoogleGenerativeHost(host)) {
     return { api: 'chat-completions' };
   }
   return undefined;

@@ -146,18 +146,18 @@ describe('[permissions] 规则与 subagent_approval', () => {
   it('三张表原样读入，条目去掉首尾空白', () => {
     const { registryPath, configPath } = setup(
       {},
-      '[permissions]\nallow = [" shell:npm test "]\nask = ["shell:git push*"]\ndeny = ["shell:rm -rf*"]',
+      '[permissions]\nallow = [" bash:npm test "]\nask = ["bash:git push*"]\ndeny = ["bash:rm -rf*"]',
     );
     const config = loadConfig({ configPath, registryPath, env: {} });
-    assert.deepEqual(config.permissions.allow, ['shell:npm test']);
-    assert.deepEqual(config.permissions.ask, ['shell:git push*']);
-    assert.deepEqual(config.permissions.deny, ['shell:rm -rf*']);
+    assert.deepEqual(config.permissions.allow, ['bash:npm test']);
+    assert.deepEqual(config.permissions.ask, ['bash:git push*']);
+    assert.deepEqual(config.permissions.deny, ['bash:rm -rf*']);
   });
 
   it('未知键、非数组、空条目都拒绝启动', () => {
     const { registryPath, configPath } = setup({}, '[permissions]\nallows = ["x"]');
     assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), /unknown permissions key/);
-    const bad = setup({}, '[permissions]\ndeny = "shell:rm"');
+    const bad = setup({}, '[permissions]\ndeny = "bash:rm"');
     assert.throws(() => loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} }), /must be an array/);
     const empty = setup({}, '[permissions]\ndeny = ["  "]');
     assert.throws(() => loadConfig({ configPath: empty.configPath, registryPath: empty.registryPath, env: {} }), /non-empty string/);

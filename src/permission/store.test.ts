@@ -68,9 +68,9 @@ describe('createGrantStore', () => {
     try {
       const store = createGrantStore(root, file);
       assert.deepEqual([...store.load()], []);
-      store.add('shell npm test');
-      store.add('shell npm test');
-      assert.deepEqual([...store.load()], ['shell npm test']);
+      store.add('bash npm test');
+      store.add('bash npm test');
+      assert.deepEqual([...store.load()], ['bash npm test']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -81,10 +81,10 @@ describe('createGrantStore', () => {
     const b = tempTree({ git: true });
     const file = configWith(a);
     try {
-      createGrantStore(a, file).add('shell npm test');
-      createGrantStore(b, file).add('shell cargo test');
-      assert.deepEqual([...createGrantStore(a, file).load()], ['shell npm test']);
-      assert.deepEqual([...createGrantStore(b, file).load()], ['shell cargo test']);
+      createGrantStore(a, file).add('bash npm test');
+      createGrantStore(b, file).add('bash cargo test');
+      assert.deepEqual([...createGrantStore(a, file).load()], ['bash npm test']);
+      assert.deepEqual([...createGrantStore(b, file).load()], ['bash cargo test']);
     } finally {
       rmSync(a, { recursive: true, force: true });
       rmSync(b, { recursive: true, force: true });
@@ -93,18 +93,18 @@ describe('createGrantStore', () => {
 
   it('授权落在 [grants] 表里，且不破坏 config.toml 其余内容', () => {
     const root = tempTree({ git: true });
-    const file = configWith(root, '\n[permissions]\nallow = ["shell:npm test"]\n');
+    const file = configWith(root, '\n[permissions]\nallow = ["bash:npm test"]\n');
     try {
-      createGrantStore(root, file).add('shell npm test');
+      createGrantStore(root, file).add('bash npm test');
       const parsed = parseToml(readFileSync(file, 'utf8')) as {
         provider: string;
         permissions: { allow: string[] };
         grants: Record<string, string[]>;
       };
       assert.equal(parsed.provider, 'p', 'provider 键原样保留');
-      assert.deepEqual(parsed.permissions.allow, ['shell:npm test'], '[permissions] 规则原样保留');
+      assert.deepEqual(parsed.permissions.allow, ['bash:npm test'], '[permissions] 规则原样保留');
       const scope = permissionScopeRoot(root);
-      assert.deepEqual(parsed.grants[scope], ['shell npm test'], 'grants 以作用域根为键写入');
+      assert.deepEqual(parsed.grants[scope], ['bash npm test'], 'grants 以作用域根为键写入');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

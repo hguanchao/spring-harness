@@ -36,9 +36,9 @@ describe('trusted / grants / permissions 解析', () => {
   });
 
   it('grants 表按作用域分桶，空键值丢弃', () => {
-    assert.deepEqual(parseGrants({ 'E:\\demo': ['shell npm test', ' '] }), { 'E:\\demo': ['shell npm test'] });
+    assert.deepEqual(parseGrants({ 'E:\\demo': ['bash npm test', ' '] }), { 'E:\\demo': ['bash npm test'] });
     assert.throws(() => parseGrants('x'), /must be a table/);
-    assert.throws(() => parseGrants({ demo: 'shell npm test' }), /must be an array/);
+    assert.throws(() => parseGrants({ demo: 'bash npm test' }), /must be an array/);
   });
 
   it('permissions 三张表与未知键', () => {
@@ -68,18 +68,18 @@ describe('写回 config.toml', () => {
   });
 
   it('addGrant 在 [grants] 表体内追加一行，同作用域累积', () => {
-    const path = configWith('provider = "p"\nmodel = "m"\n\n[grants]\n"E:\\\\a" = ["shell npm test"]\n');
-    addGrant('E:\\a', 'shell npm test', path);
+    const path = configWith('provider = "p"\nmodel = "m"\n\n[grants]\n"E:\\\\a" = ["bash npm test"]\n');
+    addGrant('E:\\a', 'bash npm test', path);
     addGrant('E:\\a', 'mcp fs.read_file', path);
     const parsed = parseToml(readFileSync(path, 'utf8')) as { grants: Record<string, string[]> };
-    assert.deepEqual(parsed.grants['E:\\a'], ['shell npm test', 'mcp fs.read_file']);
+    assert.deepEqual(parsed.grants['E:\\a'], ['bash npm test', 'mcp fs.read_file']);
   });
 
   it('addGrant 在没有 [grants] 表时整表新建', () => {
     const path = configWith('provider = "p"\nmodel = "m"\n');
-    addGrant('E:\\a', 'shell npm test', path);
+    addGrant('E:\\a', 'bash npm test', path);
     const parsed = parseToml(readFileSync(path, 'utf8')) as { grants: Record<string, string[]> };
-    assert.deepEqual(parsed.grants['E:\\a'], ['shell npm test']);
+    assert.deepEqual(parsed.grants['E:\\a'], ['bash npm test']);
   });
 
   it('config.toml 语法坏掉时读态直接报错，不静默清空', () => {

@@ -86,16 +86,17 @@ const VERB_WORDS: Record<VerbKind, VerbWords> = {
  * 未登记的工具落进 other——标签只说「Ran N tools」，不编造它做了什么。
  */
 const TOOL_VERB_KINDS: Record<string, VerbKind> = {
-  read_file: 'file',
+  read: 'file',
   skill: 'skill',
   grep: 'search',
   glob: 'search',
   list_dir: 'dir',
   web_search: 'webSearch',
+  web_fetch: 'webSearch',
   subagent: 'subagent',
-  shell: 'command',
+  bash: 'command',
   write: 'edit',
-  search_replace: 'edit',
+  edit: 'edit',
   mcp: 'mcp',
   ask_user: 'ask',
 };

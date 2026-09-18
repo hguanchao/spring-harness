@@ -58,7 +58,7 @@ describe('toAnthropicRequest prompt cache', () => {
     // 下一步随新 assistant 一起进入缓存前缀——比挂在绝对末尾晚一步写入，但锚点不会
     // 随消息增长滑出 lookback 窗口，还省下一个断点槽位。
     const messages: ChatMessage[] = [
-      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{}' } }] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
       { role: 'tool', content: 'exit 0', tool_call_id: 'c1' },
     ];
     const body = toAnthropicRequest({ model: 'm', messages, tools: [] });
@@ -119,7 +119,7 @@ describe('toAnthropicRequest 空块防护', () => {
 
   it('工具返回空内容时兜一个占位块，不留空 content 数组', () => {
     const messages: ChatMessage[] = [
-      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{}' } }] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
       { role: 'tool', content: '', tool_call_id: 'c1' },
     ];
     const body = toAnthropicRequest({ model: 'm', messages, tools: [] });
@@ -129,7 +129,7 @@ describe('toAnthropicRequest 空块防护', () => {
 
   it('有 tool_use 的 assistant 轮照常保留', () => {
     const messages: ChatMessage[] = [
-      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{}' } }] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
     ];
     const body = toAnthropicRequest({ model: 'm', messages, tools: [] });
     const out = body.messages as Array<{ content: Array<Record<string, unknown>> }>;

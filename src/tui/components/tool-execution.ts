@@ -40,12 +40,12 @@ export const TOOL_DETAIL_INDENT = 8;
 
 function previewWindow(toolName: string): { first: number; last: number } {
   switch (toolName) {
-    case 'read_file':
+    case 'read':
       return { first: 5, last: 3 };
     case 'list_dir':
     case 'grep':
       return { first: 8, last: 4 };
-    case 'shell':
+    case 'bash':
       return { first: 2, last: 3 };
     case 'subagent':
       return { first: 12, last: 8 };
@@ -73,18 +73,19 @@ export interface ToolResultInput {
 /**
  * 工具 ID → 界面显示名。
  *
- * 工具 ID 是给模型看的（read_file / search_replace），界面上要的是人一眼能读的短名，
+ * 工具 ID 是给模型看的（read / edit），界面上要的是人一眼能读的短名，
  * 单个工具行与 subagent 活动行用的就是这一列。未登记的工具回落成 ID 本身。
  */
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  read_file: 'Read',
+  read: 'Read',
   write: 'Write',
-  search_replace: 'Edit',
+  edit: 'Edit',
   grep: 'Grep',
   glob: 'Glob',
   list_dir: 'List',
-  shell: 'Bash',
+  bash: 'Bash',
   web_search: 'Search',
+  web_fetch: 'Fetch',
   subagent: 'Subagent',
   todo: 'Todo',
   skill: 'Skill',
@@ -113,17 +114,19 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
   };
 
   switch (toolName) {
-    case 'shell':
+    case 'bash':
       return oneLine(pick('command', 'cmd'));
-    case 'read_file':
+    case 'read':
     case 'write':
     case 'list_dir':
       return oneLine(pick('path', 'file_path', 'filePath'));
     case 'grep':
     case 'glob':
       return oneLine(pick('pattern', 'query'));
-    case 'search_replace':
+    case 'edit':
       return oneLine(pick('path', 'file_path'));
+    case 'web_fetch':
+      return oneLine(pick('url'));
     case 'web_search': {
       const queries = args.queries;
       if (Array.isArray(queries)) {
@@ -261,14 +264,14 @@ export class ToolExecutionComponent extends Container {
   }
 
   /**
-   * 双击循环：收起 → 预览 →（shell / subagent）全文 → 收起。
+   * 双击循环：收起 → 预览 →（bash / subagent）全文 → 收起。
    * Read / List / Grep 停在预览，不把整文件/整份清单打进转录。
    */
   toggleDetail(): void {
     if (!this.expanded) {
       this.expanded = true;
       this.fullDetail = false;
-    } else if ((this.toolName === 'shell' || this.subagentMeta !== undefined) && !this.fullDetail) {
+    } else if ((this.toolName === 'bash' || this.subagentMeta !== undefined) && !this.fullDetail) {
       this.fullDetail = true;
     } else {
       this.expanded = false;
@@ -428,7 +431,7 @@ export class ToolExecutionComponent extends Container {
     const pad = ' '.repeat(TOOL_DETAIL_INDENT);
     const head = visual.slice(0, first).map((line) => `${pad}${paint(line)}`);
     const tail = visual.slice(-last).map((line) => `${pad}${paint(line)}`);
-    const ellipsis = `${pad}${theme.fg('muted', this.toolName === 'shell' && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
+    const ellipsis = `${pad}${theme.fg('muted', this.toolName === 'bash' && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
     this.bodyText.setText([...head, ellipsis, ...tail].join('\n'));
   }
 

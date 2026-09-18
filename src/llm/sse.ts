@@ -1,6 +1,8 @@
 // 流类型显式从 node:stream/web 取：新版 @types/node 收紧了全局 DOM 流类型，
 // 依赖 lock 重算后全局名不再可用（教训：类型别依赖传递全局）。
+import { Readable } from 'node:stream';
 import type { ReadableStreamDefaultReader, ReadableStreamReadResult } from 'node:stream/web';
+import { request as undiciRequest } from 'undici';
 import { formatFetchError, flattenWhitespace } from '../util.js';
 import { classifyHttpError, llmError } from './errors.js';
 import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
@@ -107,15 +109,38 @@ function looksLikeJsonValue(line: string): boolean {
   }
 }
 
-export async function postSseStream(params: SseStreamParams): Promise<void> {
-  let response: Response;
-  try {
-    response = await fetch(params.url, {
+/** 测试 mock 的是 globalThis.fetch；正式请求走 undici，避免 fetch 丢掉 User-Agent。 */
+async function postLlm(params: SseStreamParams): Promise<Response> {
+  if (process.env.NODE_TEST_CONTEXT) {
+    return fetch(params.url, {
       method: 'POST',
       headers: params.headers,
       body: params.body,
       signal: params.signal,
     });
+  }
+  const res = await undiciRequest(params.url, {
+    method: 'POST',
+    headers: params.headers,
+    body: params.body,
+    signal: params.signal,
+  });
+  const headerInit: Array<[string, string]> = [];
+  for (const [name, value] of Object.entries(res.headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) for (const item of value) headerInit.push([name, item]);
+    else headerInit.push([name, value]);
+  }
+  return new Response(Readable.toWeb(res.body), {
+    status: res.statusCode,
+    headers: headerInit,
+  });
+}
+
+export async function postSseStream(params: SseStreamParams): Promise<void> {
+  let response: Response;
+  try {
+    response = await postLlm(params);
   } catch (error) {
     if (params.signal?.aborted) throw error;
     throw new RetryableError(`network error: ${formatFetchError(error)}`);

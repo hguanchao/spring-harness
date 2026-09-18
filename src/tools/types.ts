@@ -102,7 +102,7 @@ export function asStringOrEmpty(args: Record<string, unknown>, key: string): str
 export async function guardReadOnlyWrite(
   ctx: ToolContext,
   relPath: string,
-  tool: 'write' | 'search_replace',
+  tool: 'write' | 'edit',
 ): Promise<ToolResult | undefined> {
   if (ctx.sandboxMode === 'read-only') {
     const allowed = ctx.escalateReadOnlyWrite ? await ctx.escalateReadOnlyWrite(relPath) : false;

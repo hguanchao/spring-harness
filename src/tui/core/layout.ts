@@ -471,8 +471,9 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	const canRevealHiddenAuto = includeHiddenAuto && view.scrollbar === "auto" && scrollHeight > trackHeight;
 	if (!view.isScrollbarVisible && !canRevealHiddenAuto) return undefined;
 
-	// 滑块高度按真实内容算，不含 pin-reserve 空行；位置仍按可滚范围（含留白）走，拖到底才能钉住用户消息。
-	const documentHeight = Math.max(trackHeight, view.contentHeight);
+	// 滑块比例按可滚高度（含 pin-reserve），与 grok-build total_height 一致。
+	// 若只按真实内容，短对话时滑块会铺满整列，看起来像卡住。
+	const documentHeight = Math.max(trackHeight, scrollHeight);
 	const minThumbHeight = Math.min(2, trackHeight);
 	const thumbHeight = Math.max(
 		minThumbHeight,
@@ -520,8 +521,8 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
 
-	// 只画滑块、不画轨道：右半块 ▐ 贴在列右缘。颜色始终中性灰，不跟滚动状态变。
-	const glyph = "▐";
+	// 只画滑块、不画轨道：整格 █ 贴在右缘，比半块 ▐ 宽一截。颜色始终中性灰，不跟滚动状态变。
+	const glyph = "█";
 	const thumb = box.scrollView.scrollbarThumbStyle(glyph);
 	const viewBottom = geometry.trackTop + geometry.trackHeight;
 
@@ -537,9 +538,8 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 		if (isThumb) paintRow(row);
 	}
 
-	// scrollbarUntil：滑块在转录区底时，把 ▐ 接到 until 组件顶（对话框上沿）。
-	// pin-reserve 时空行已经填满视口，再接到输入框会让滑块掉进 Responding 行。
-	if (box.scrollView.pinPad > 0) return;
+	// scrollbarUntil：滑块在转录区底时，把 █ 接到 until 组件顶（对话框上沿）。
+	// 吸顶（pin-reserve）同样置底：跟底时滑块本来就在轨道底，空隙行接到输入框。
 	const until = box.scrollView.scrollbarUntil;
 	if (!until) return;
 	const untilBox = findLayoutBox(layoutRoot(box), until);

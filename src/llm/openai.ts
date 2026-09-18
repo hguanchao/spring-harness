@@ -143,7 +143,11 @@ export function newSseAcc(): SseAcc {
 
 /** OpenAI / Responses 共用的 JSON + Bearer 头。 */
 export function bearerJsonHeaders(apiKey: string): Record<string, string> {
-  return { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
+  return {
+    accept: 'text/event-stream',
+    'content-type': 'application/json',
+    authorization: `Bearer ${apiKey}`,
+  };
 }
 
 /** off / 未设置都不发送推理档位；其余原值透传。 */

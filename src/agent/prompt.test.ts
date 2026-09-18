@@ -115,18 +115,18 @@ describe('工具段的条件拼装', () => {
   });
 
   it('工具不可用时该段整段消失，不留指向不存在工具的指令', () => {
-    const p = base({ allowedTools: new Set(['read_file']) });
-    assert.ok(p.includes('Use read_file'));
-    assert.ok(!p.includes('Use search_replace'), '不可用工具的段落必须消失');
+    const p = base({ allowedTools: new Set(['read']) });
+    assert.ok(p.includes('Use read'));
+    assert.ok(!p.includes('Use edit'), '不可用工具的段落必须消失');
     assert.ok(!p.includes('Use subagent'));
   });
 
   it('只读子代理的工具集下，写工具段落不出现', () => {
     const p = base({ allowedTools: EXPLORE_TOOLS });
     assert.ok(!p.includes('Use write'), '只读会话不该出现 write 段落');
-    assert.ok(!p.includes('Use search_replace'));
-    assert.ok(!p.includes('Use shell'), 'explore 工具集不含 shell');
-    assert.ok(p.includes('Use read_file'));
+    assert.ok(!p.includes('Use edit'));
+    assert.ok(!p.includes('Use bash'), 'explore 工具集不含 bash');
+    assert.ok(p.includes('Use read'));
   });
 
   it('点名禁止最可能的误用替代', () => {
@@ -138,7 +138,7 @@ describe('工具段的条件拼装', () => {
 
   it('grep 命中后用 read_file 看上下文；shell 非零退出先查再继续', () => {
     const p = base();
-    assert.ok(p.includes('Use read_file on a matched file when you need surrounding context'));
+    assert.ok(p.includes('Use read on a matched file when you need surrounding context'));
     assert.ok(p.includes('investigate a non-zero exit before moving on'));
     assert.ok(p.includes('do not poll, sleep-wait, or duplicate a running job'));
   });
@@ -166,11 +166,11 @@ describe('跨轮次状态注入', () => {
   it('sessionStateMessage：goal / 失败 / 计划模式各自呈现', () => {
     const text = sessionStateMessage(
       'fix the flaky test',
-      { tool: 'shell', excerpt: 'exit 1' },
+      { tool: 'bash', excerpt: 'exit 1' },
       true,
     );
     assert.ok(text.includes('Goal: fix the flaky test'));
-    assert.ok(text.includes('shell: exit 1'));
+    assert.ok(text.includes('bash: exit 1'));
     assert.ok(text.includes('Plan mode is ON.'));
     assert.ok(text.includes('Do not implement'), '计划模式引导正文随状态注入');
     assert.ok(text.includes('exit_plan_mode'));

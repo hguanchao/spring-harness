@@ -28,8 +28,8 @@ function occurrences(text: string, needle: string): { first: number; count: numb
 }
 
 export const searchReplaceTool: ToolSpec = {
-  name: 'search_replace',
-  description: 'Replace an exact old_string in a workspace file — not sed or awk. Read the file first unless you created or edited it in this turn. old_string must match exactly once: when it is ambiguous, add surrounding lines to make it unique, or set replace_all to change every occurrence. The line-number prefix shown by read_file is not part of the file — match only the content after it.',
+  name: 'edit',
+  description: 'Replace an exact old_string in a workspace file — not sed or awk. Read the file first unless you created or edited it in this turn. old_string must match exactly once: when it is ambiguous, add surrounding lines to make it unique, or set replace_all to change every occurrence. The line-number prefix shown by read is not part of the file — match only the content after it.',
   schema: {
     type: 'object',
     properties: {
@@ -42,7 +42,7 @@ export const searchReplaceTool: ToolSpec = {
   },
   async execute(args, ctx: ToolContext): Promise<ToolResult> {
     const rel = asString(args, 'path');
-    const denial = await guardReadOnlyWrite(ctx, rel, 'search_replace');
+    const denial = await guardReadOnlyWrite(ctx, rel, 'edit');
     if (denial) return denial;
     const oldString = asString(args, 'old_string');
     const newString = asStringOrEmpty(args, 'new_string');

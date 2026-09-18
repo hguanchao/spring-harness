@@ -71,8 +71,9 @@ TUI commands: /help /new /resume /skills /mcps /plan /goal
               directly, /resume alone opens the picker. /compact folds
               older history into a checkpoint on demand.)
               (/provider switches provider: pick one, its upstream
-              catalog is fetched, then pick a model — an undeclared
-              model is appended to models.json before switching.)
+              catalog is fetched, then pick a model, reasoning effort,
+              and API protocol — an undeclared model is appended to
+              models.json before switching.)
               (a recap is generated automatically when you come back
               after being away)
               /mcps manages servers (enable/disable, add, remove, reload)

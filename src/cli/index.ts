@@ -7,7 +7,9 @@ import { HeadlessApprover, type ApprovalMode } from '../permission/policy.js';
 import { createLlmClassifier } from '../permission/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
-import { sphSpillRoot } from '../home.js';
+import { ConfigError, loadConfig } from '../config/load.js';
+import { loadRegistry } from '../config/registry.js';
+import { sphModelsPath, sphSpillRoot } from '../home.js';
 import { SpillStore } from '../runtime/spill.js';
 import type { TokenUsage } from '../llm/openai.js';
 // 注意：TUI 模块**不要**在顶层 import。它（连同 marked）约 300ms 的加载
@@ -68,6 +70,7 @@ async function bootstrap(
   workspaceRoot: string,
   untrusted: 'error' | 'confirm',
   confirmUntrustedWorkspace?: (workspaceRoot: string) => Promise<boolean>,
+  onCliError?: (error: CliError) => void,
 ): Promise<Runtime | undefined> {
   try {
     return await bootstrapRuntime({
@@ -88,8 +91,9 @@ async function bootstrap(
     });
   } catch (error) {
     if (error instanceof CliError) {
-      process.stderr.write(`${error.message}\n`);
       process.exitCode = error.exitCode;
+      if (onCliError) onCliError(error);
+      else process.stderr.write(`${error.message}\n`);
       return undefined;
     }
     throw error;
@@ -107,12 +111,26 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
     return;
   }
 
+  // 配置都读不出来时不要先画信任页：Yes 之后立刻退屏，看起来像信任页把人踢出去。
+  try {
+    loadRegistry(sphModelsPath());
+    loadConfig();
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      process.stderr.write(`${error.message}\n`);
+      process.exitCode = 2;
+      return;
+    }
+    throw error;
+  }
+
   // 到这一步确定要进 TUI，才付加载成本。
   const { runTui, confirmWorkspaceTrust, TuiAltScreen, ProcessTerminal } = await import('../tui/index.js');
 
   // 未信任时先 start 替代屏幕画信任页；主界面接手同一块屏，中间不退。
   let ui: InstanceType<typeof TuiAltScreen> | undefined;
   let runtime: Runtime | undefined;
+  let deferredError: string | undefined;
   try {
     const needsTrustUi = !args.trust && !isWorkspaceTrusted(workspaceRoot);
     if (needsTrustUi) {
@@ -126,7 +144,9 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       rememberTrustedWorkspace(workspaceRoot);
     }
 
-    runtime = await bootstrap(args, workspaceRoot, 'error');
+    runtime = await bootstrap(args, workspaceRoot, 'error', undefined, (error) => {
+      deferredError = error.message;
+    });
     if (!runtime) return;
     const rt = runtime;
     await runTui({
@@ -175,6 +195,8 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
   } finally {
     ui?.stop({ preserveScreen: true });
     runtime?.cleanup();
+    // 装配失败写在替代屏幕里会被 1049l 清掉，退屏后再打到普通终端。
+    if (deferredError !== undefined) process.stderr.write(`${deferredError}\n`);
   }
 }
 

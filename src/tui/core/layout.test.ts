@@ -42,6 +42,25 @@ describe('contentPaintRight', () => {
   });
 });
 
+describe('auto 滚动条可见性', () => {
+  it('pin-reserve 时滑块按可滚高度缩放，不铺满整列', () => {
+    const body = Array.from({ length: 8 }, (_, i) => `L${i}`).join('\n');
+    const view = new ScrollView(new Text(body, 0, 0), {
+      follow: 'end',
+      primary: true,
+      scrollbar: 'auto',
+    });
+    view.setPinY(6);
+    const frame = renderLayoutFrame(view, 20, 20, () => {});
+    const box = getScrollViewBox(frame, view);
+    assert.ok(box);
+    assert.ok(view.pinPad > 0, '短内容应有 pin-reserve');
+    const geo = getScrollbarGeometry(box);
+    assert.ok(geo, '有可滚留白就应画滑块');
+    assert.ok(geo.thumbHeight < geo.trackHeight, '滑块应短于轨道，才能看出在动');
+  });
+});
+
 describe('scrollbarUntil', () => {
   it('follow-end 时滑块画到 until 组件顶，不停在转录区底', () => {
     const body = Array.from({ length: 40 }, (_, i) => `L${i}`).join('\n');
@@ -77,11 +96,11 @@ describe('scrollbarUntil', () => {
     assert.ok(editorBox.rect.y > scrollBox.rect.y + scrollBox.rect.height);
     const gutter = editorBox.rect.y - 1;
     const gutterLine = frame.lines[gutter] ?? '';
-    assert.equal(stripTerminalSequences(gutterLine), '▐');
+    assert.equal(stripTerminalSequences(gutterLine), '█');
     assert.match(gutterLine, /\x1b\[\d+G/, '空隙行用 CHA 落到滑块列，不铺空格');
   });
 
-  it('pin-reserve 时轨道仍铺满转录区，但不接到 until', () => {
+  it('pin-reserve 吸顶时轨道仍铺满转录区，滑块同样接到 until', () => {
     const body = Array.from({ length: 16 }, (_, i) => `L${i}`).join('\n');
     const editor = new Text('prompt', 0, 0);
     const view = new ScrollView(new Text(body, 0, 0), {
@@ -125,7 +144,7 @@ describe('scrollbarUntil', () => {
     assert.ok(noPadBox && withPad);
     const noPad = getScrollbarGeometry(noPadBox);
     assert.ok(noPad);
-    assert.equal(withPad.thumbHeight, noPad.thumbHeight, '滑块高度不该被 pin-reserve 空行拉长缩短');
+    assert.ok(withPad.thumbHeight <= noPad.thumbHeight, '留白计入可滚高度时滑块应变短，而不是铺满');
     const visit = (box: typeof frame.root): typeof frame.root | undefined => {
       if (box.component === editor) return box;
       for (const child of box.children) {
@@ -137,6 +156,6 @@ describe('scrollbarUntil', () => {
     const editorBox = visit(frame.root);
     assert.ok(editorBox);
     const gutter = editorBox.rect.y - 1;
-    assert.equal(stripTerminalSequences(frame.lines[gutter] ?? '').includes('▐'), false);
+    assert.equal(stripTerminalSequences(frame.lines[gutter] ?? '').includes('█'), true, '吸顶跟底时滑块应接到对话框');
   });
 });

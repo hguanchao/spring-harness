@@ -172,14 +172,14 @@ describe('popTrailingToolRun', () => {
   const call = (id: string): ChatMessage => ({
     role: 'assistant',
     content: '',
-    tool_calls: [{ id, type: 'function', function: { name: 'shell', arguments: '{}' } }],
+    tool_calls: [{ id, type: 'function', function: { name: 'bash', arguments: '{}' } }],
   });
 
   it('drops a dangling tool run so the instruction never follows a tool_use', () => {
     const messages: ChatMessage[] = [
       { role: 'user', content: 'hi' },
       call('c1'),
-      { role: 'tool', content: 'out', tool_call_id: 'c1', name: 'shell' },
+      { role: 'tool', content: 'out', tool_call_id: 'c1', name: 'bash' },
     ];
     popTrailingToolRun(messages);
     assert.deepEqual(messages, [{ role: 'user', content: 'hi' }]);
@@ -189,7 +189,7 @@ describe('popTrailingToolRun', () => {
     const messages: ChatMessage[] = [
       { role: 'user', content: 'hi' },
       call('c1'),
-      { role: 'tool', content: 'out', tool_call_id: 'c1', name: 'read_file' },
+      { role: 'tool', content: 'out', tool_call_id: 'c1', name: 'read' },
       { role: 'user', content: '[tool result image]' },
     ];
     popTrailingToolRun(messages);
@@ -230,7 +230,7 @@ describe('buildRecapRequest', () => {
           ts: '2026-01-01T00:00:00.000Z',
           role: 'assistant',
           content: '',
-          toolCalls: [{ id: 'c1', name: 'shell', arguments: { command: 'ls' } }],
+          toolCalls: [{ id: 'c1', name: 'bash', arguments: { command: 'ls' } }],
         },
       ],
       system: 'sys',

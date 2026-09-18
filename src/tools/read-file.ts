@@ -124,7 +124,7 @@ function resolveReadTarget(workspaceRoot: string, path: string, spillRoot?: stri
 }
 
 export const readFileTool: ToolSpec = {
-  name: 'read_file',
+  name: 'read',
   description:
     'Use this — not shell cat, head, or tail — to inspect a file inside the workspace.'
     + ' Images (png/jpg/jpeg/gif/webp) come back as attachments you can see.'

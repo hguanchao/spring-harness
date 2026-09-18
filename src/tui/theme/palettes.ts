@@ -34,7 +34,8 @@ export const PALETTE = {
 
   selectedBg: CHROME,
   scrollbarTrack: MUTED,
-  scrollbarThumb: CHROME,
+  /** 滑块前景：中性灰，与 dim 同色，不跟滚动状态变。 */
+  scrollbarThumb: '#808080',
   userMessageBg: CHROME,
   userMessageText: TEXT,
   toolPendingBg: MUTED,

@@ -23,9 +23,9 @@ describe('pairingBalancedCut', () => {
       {
         role: 'assistant',
         content: '',
-        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{}' } }],
       },
-      { role: 'tool', content: 'a', tool_call_id: 'c1', name: 'read_file' },
+      { role: 'tool', content: 'a', tool_call_id: 'c1', name: 'read' },
       { role: 'tool', content: 'b', tool_call_id: 'c2', name: 'grep' },
       { role: 'user', content: 'u2' },
     ];
@@ -43,13 +43,13 @@ describe('wire incremental projection', () => {
       session({
         role: 'assistant',
         content: '',
-        toolCalls: [{ id: 'c1', name: 'read_file', arguments: { path: 'a.png' } }],
+        toolCalls: [{ id: 'c1', name: 'read', arguments: { path: 'a.png' } }],
       }),
       session({
         role: 'tool',
         content: 'img',
         toolCallId: 'c1',
-        toolName: 'read_file',
+        toolName: 'read',
         images: ['data:image/png;base64,xx'],
       }),
       session({ role: 'assistant', content: 'done' }),
@@ -99,13 +99,13 @@ describe('stub 头尾预览', () => {
       messages.push(session({
         role: 'assistant',
         content: '',
-        toolCalls: [{ id: `c${i}`, name: 'read_file', arguments: { path: `f${i}` } }],
+        toolCalls: [{ id: `c${i}`, name: 'read', arguments: { path: `f${i}` } }],
       }));
       messages.push(session({
         role: 'tool',
         content: 'x'.repeat(40_000),
         toolCallId: `c${i}`,
-        toolName: 'read_file',
+        toolName: 'read',
       }));
     }
     const result = await projectContext({
@@ -141,7 +141,7 @@ describe('压缩请求复用对话前缀', () => {
       contextWindow: 800,
       client,
       system: 'You are sph',
-      tools: [{ type: 'function', function: { name: 'read_file' } }],
+      tools: [{ type: 'function', function: { name: 'read' } }],
       onCompacting: () => {
         compactingBeforeRequest = captured.length === 0;
       },
@@ -153,7 +153,7 @@ describe('压缩请求复用对话前缀', () => {
     const last = captured[0]?.messages.at(-1);
     assert.equal(last?.role, 'user');
     assert.match(String(last?.content), /compaction engine/);
-    assert.equal((captured[0]?.tools as { function?: { name?: string } }[])[0]?.function?.name, 'read_file');
+    assert.equal((captured[0]?.tools as { function?: { name?: string } }[])[0]?.function?.name, 'read');
   });
 });
 
@@ -224,13 +224,13 @@ describe('stub 边界冻结', () => {
       session({
         role: 'assistant',
         content: '',
-        toolCalls: [{ id: `c${index}`, name: 'read_file', arguments: { path: `f${index}` } }],
+        toolCalls: [{ id: `c${index}`, name: 'read', arguments: { path: `f${index}` } }],
       }),
       session({
         role: 'tool',
         content: 'x'.repeat(TOOL_BYTES),
         toolCallId: `c${index}`,
-        toolName: 'read_file',
+        toolName: 'read',
       }),
     ];
   }
@@ -290,7 +290,7 @@ describe('assistant thinking 回放载荷透传', () => {
       content: '',
       thinking: 'let me look',
       thinkingSignature: 'sig-1',
-      toolCalls: [{ id: 'tu_1', name: 'read_file', arguments: { path: 'a' } }],
+      toolCalls: [{ id: 'tu_1', name: 'read', arguments: { path: 'a' } }],
     }));
     const message = state.messages[0]!;
     assert.equal(message.thinking, 'let me look');

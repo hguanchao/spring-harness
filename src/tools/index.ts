@@ -7,7 +7,7 @@ import { skillTool } from './skill.js';
 import { todoTool } from './todo.js';
 import { askUserTool } from './ask-user.js';
 import { globTool } from './glob.js';
-import { webSearchTool } from './web-search.js';
+import { webFetchTool, webSearchTool } from './web-search.js';
 import { jobsTool } from './jobs.js';
 import { subagentTool } from './subagent.js';
 import { sendSubagentMessageTool } from './send-subagent.js';
@@ -23,7 +23,7 @@ function tagged(tool: ToolSpec, flags: Pick<ToolSpec, 'concurrencySafe' | 'explo
 
 /**
  * 默认产品工具表。标志写在装配处而不是每个工具文件里：漏标对照下面这份清单，
- * 不必在 17 个文件里搜三个布尔值。
+ * 不必在每个工具文件里搜三个布尔值。
  *
  * rootOnly 用于隔离子代理：send_subagent_message 这类工具若对子代理开放，
  * 会形成无主的旁路通道。子代理的 allowedTools 由 ToolRegistry.generalNames() 剔除。
@@ -46,6 +46,7 @@ export const tools: ToolSpec[] = [
   mcpTool,
   tagged(enterPlanModeTool, { rootOnly: true }),
   tagged(exitPlanModeTool, { rootOnly: true }),
+  tagged(webFetchTool, { concurrencySafe: true, explore: true }),
 ];
 
 export function createDefaultToolRegistry(): ToolRegistry {

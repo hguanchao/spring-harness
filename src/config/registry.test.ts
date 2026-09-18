@@ -11,6 +11,7 @@ import {
   parseRegistry,
   resolveModel,
   splitProviderModel,
+  upsertModelApi,
 } from './registry.js';
 import { ConfigError } from './errors.js';
 
@@ -178,5 +179,23 @@ describe('appendModelDeclaration', () => {
     const path = registryFile(BASE);
     assert.throws(() => appendModelDeclaration(path, 'nope', 'x'), /unknown provider/);
     assert.throws(() => appendModelDeclaration(registryFile('{ bad'), 'main', 'x'), /not valid JSON/);
+  });
+});
+
+describe('upsertModelApi', () => {
+  const BASE = JSON.stringify({
+    providers: {
+      main: { baseUrl: 'https://api.example.com/v1', api: 'responses', apiKey: '$MAIN_KEY', models: [{ id: 'glm' }] },
+    },
+  });
+
+  it('已有模型改 api，未声明的追加', () => {
+    const path = registryFile(BASE);
+    upsertModelApi(path, 'main', 'glm', 'anthropic-messages');
+    upsertModelApi(path, 'main', 'new-model', 'chat-completions');
+    const main = findProvider(loadRegistry(path, env), 'main');
+    assert.equal(main.models.find((row) => row.id === 'glm')?.api, 'anthropic-messages');
+    assert.equal(main.models.find((row) => row.id === 'new-model')?.api, 'chat-completions');
+    assert.match(readFileSync(path, 'utf8'), /\$MAIN_KEY/, '$VAR 原样保留');
   });
 });

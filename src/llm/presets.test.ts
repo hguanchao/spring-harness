@@ -16,3 +16,4 @@ describe('endpoint presets', () => {
     assert.ok(merged['HTTP-Referer']);
   });
 });
+

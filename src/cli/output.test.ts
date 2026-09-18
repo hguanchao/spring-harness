@@ -26,7 +26,7 @@ describe('createJsonOutput', () => {
       output.listener({ type: 'text', text: '你好' });
       output.listener({ type: 'text', text: '，世界' });
       output.listener({ type: 'usage', promptTokens: 10, completionTokens: 2, cachedTokens: 4 });
-      output.listener({ type: 'tool_start', name: 'read_file', id: 'c1', args: { path: 'a' } });
+      output.listener({ type: 'tool_start', name: 'read', id: 'c1', args: { path: 'a' } });
       process.stdout.write(output.finalLine());
     });
 

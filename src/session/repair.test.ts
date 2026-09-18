@@ -18,9 +18,9 @@ describe('findDanglingToolCalls', () => {
       msg({
         role: 'assistant',
         content: '',
-        toolCalls: [{ id: 'c1', name: 'read_file', arguments: { path: 'a.ts' } }],
+        toolCalls: [{ id: 'c1', name: 'read', arguments: { path: 'a.ts' } }],
       }),
-      msg({ role: 'tool', content: 'ok', toolCallId: 'c1', toolName: 'read_file' }),
+      msg({ role: 'tool', content: 'ok', toolCallId: 'c1', toolName: 'read' }),
     ]);
     assert.deepEqual(dangling, []);
   });
@@ -31,13 +31,13 @@ describe('findDanglingToolCalls', () => {
         role: 'assistant',
         content: '',
         toolCalls: [
-          { id: 'c1', name: 'read_file', arguments: {} },
+          { id: 'c1', name: 'read', arguments: {} },
           { id: 'c2', name: 'grep', arguments: {} },
         ],
       }),
     ]);
     assert.deepEqual(dangling, [
-      { id: 'c1', name: 'read_file' },
+      { id: 'c1', name: 'read' },
       { id: 'c2', name: 'grep' },
     ]);
   });
@@ -53,7 +53,7 @@ describe('closeInterruptedTurn', () => {
         msg({
           role: 'assistant',
           content: '',
-          toolCalls: [{ id: 'c1', name: 'shell', arguments: {} }],
+          toolCalls: [{ id: 'c1', name: 'bash', arguments: {} }],
         }),
       ];
       assert.equal(closeInterruptedTurn(session, messages), 2);
@@ -79,7 +79,7 @@ describe('repairDanglingTools', () => {
           role: 'assistant',
           content: '',
           toolCalls: [
-            { id: 'c1', name: 'shell', arguments: {} },
+            { id: 'c1', name: 'bash', arguments: {} },
             { id: 'c2', name: 'grep', arguments: {} },
           ],
         }),

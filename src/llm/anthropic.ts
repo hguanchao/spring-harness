@@ -368,6 +368,7 @@ export const anthropicAdapter: ProtocolAdapter = {
   path: '/messages',
   // x-api-key 是 Anthropic 官方鉴权头；同时带 Bearer 兼容只认 OAuth 式网关。
   headers: (apiKey) => ({
+    accept: 'text/event-stream',
     'content-type': 'application/json',
     'x-api-key': apiKey,
     authorization: `Bearer ${apiKey}`,

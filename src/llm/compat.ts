@@ -1,3 +1,5 @@
+import { HOST_OPENAI_API, HOST_OPENROUTER, isOpenAiApiHost, isOpenRouterHost } from '../net/hosts.js';
+
 /**
  * 请求参数容忍度（caps）：把「同一协议在不同端点上的参数差异」收敛成一组布尔位。
  *
@@ -11,7 +13,7 @@
  *
  * 处理分三层，后一层覆盖前一层：
  * 1. 默认当兼容网关：未知 `base_url` 不发 `prompt_cache_key` / `prompt_cache_retention`。
- *    只对 `api.openai.com` 开缓存路由键。不维护厂商名单。
+ *    只对官方 OpenAI API 主机开缓存路由键。不维护厂商名单。
  * 2. `[compat]` 声明：用户点名的位覆盖推断。`prompt_cache = false` 一票否决缓存相关位。
  * 3. 从端点报文反推（degradeRequestCaps）：声明错了或启发式猜不到时，按 400 剥字段。
  *    这是兜底，不是主路径。
@@ -103,15 +105,15 @@ function hostnameOf(baseUrl: string): string | undefined {
 /** 只认官方 OpenAI 域名。未知网关一律当兼容端点，不维护厂商表。 */
 export function isOfficialOpenAI(baseUrl: string): boolean {
   const host = hostnameOf(baseUrl);
-  if (host) return host === 'api.openai.com' || host.endsWith('.api.openai.com');
-  return /(?:^|[/.])api\.openai\.com(?:[:/]|$)/i.test(baseUrl);
+  if (host) return isOpenAiApiHost(host);
+  return new RegExp(`(?:^|[/.])${HOST_OPENAI_API.replaceAll('.', '\\.')}(?:[:/]|$)`, 'i').test(baseUrl);
 }
 
 /** URL 推断亲和头格式：只把 OpenRouter 从默认 openai 形态里摘出来。 */
 export function detectSessionAffinity(baseUrl: string): SessionAffinityFormat {
   const host = hostnameOf(baseUrl);
-  if (host === 'openrouter.ai' || host?.endsWith('.openrouter.ai')) return 'openrouter';
-  if (!host && /openrouter\.ai/i.test(baseUrl)) return 'openrouter';
+  if (host && isOpenRouterHost(host)) return 'openrouter';
+  if (!host && new RegExp(HOST_OPENROUTER.replaceAll('.', '\\.'), 'i').test(baseUrl)) return 'openrouter';
   return 'openai';
 }
 
@@ -125,7 +127,7 @@ export interface InitialCapsOptions {
  *
  * `promptCache` 来自配置，一票否决 Anthropic 断点与 OpenAI 系 cache 字段。
  * 未知 URL 默认不发 `prompt_cache_key` / `prompt_cache_retention`；
- * 只有官方 `api.openai.com` 才开 key。`[compat]` 覆盖推断。
+ * 只有官方 OpenAI API 主机才开 key。`[compat]` 覆盖推断。
  */
 export function initialRequestCaps(
   model: string,

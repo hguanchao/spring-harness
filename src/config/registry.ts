@@ -265,6 +265,47 @@ export function appendModelDeclaration(
   writeAtomically(path, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
+/**
+ * 把模型的生效协议写进 models.json（模型级覆盖 provider 级）。
+ *
+ * `/provider` 向导最后一步用：已有声明就改 `api`，没有就追加。同样不走 parseRegistry，
+ * 避免把 `$VAR` 凭据烙回文件。
+ */
+export function upsertModelApi(
+  path: string,
+  providerName: string,
+  modelId: string,
+  api: ApiProtocol,
+): void {
+  if (!existsSync(path)) {
+    throw new ConfigError(`models.json not found: ${path}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new ConfigError(`models.json is not valid JSON (${path}): ${reason}`);
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.providers)) {
+    throw new ConfigError(`models.json has no providers table: ${path}`);
+  }
+  const provider = (parsed.providers as Record<string, unknown>)[providerName];
+  if (!isRecord(provider)) {
+    throw new ConfigError(`unknown provider "${providerName}" in models.json`);
+  }
+  if (!Array.isArray(provider.models)) {
+    throw new ConfigError(`providers.${providerName}.models must be an array in models.json`);
+  }
+  const row = provider.models.find((item) => isRecord(item) && item.id === modelId);
+  if (isRecord(row)) {
+    row.api = api;
+  } else {
+    provider.models.push({ id: modelId, api });
+  }
+  writeAtomically(path, `${JSON.stringify(parsed, null, 2)}\n`);
+}
+
 export function findProvider(registry: ModelRegistry, name: string): ProviderDeclaration {
   const provider = registry.providers.find((item) => item.name === name);
   if (!provider) {

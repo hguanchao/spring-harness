@@ -55,8 +55,8 @@ function buildThreeIterationGroup(): ToolGroupComponent {
   };
   const rounds: Array<[string, string]> = [
     ['第一轮：先看目录结构。', 'list_dir'],
-    ['第二轮：读构建脚本。', 'read_file'],
-    ['第三轮：跑一次编译。', 'shell'],
+    ['第二轮：读构建脚本。', 'read'],
+    ['第三轮：跑一次编译。', 'bash'],
   ];
   for (const [thinking, tool] of rounds) {
     group.beginThinking();
