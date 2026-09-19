@@ -356,7 +356,8 @@ export class Editor implements Component, Focusable {
 	private paste = { isInPaste: false, pasteBuffer: "" };
 
 	// Prompt history for up/down navigation
-	private history: string[] = [];
+	/** 已提交 prompt（最新在前）；↑ 回放与 /history 面板共用，ts 供面板显示时间。 */
+	private history: Array<{ text: string; ts: number }> = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	private historyDraft: EditorState | null = null;
 
@@ -379,17 +380,6 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
-	/**
-	 * 挂起队列的编辑接管：光标在第一行且宿主返回 true 时 ↑ 被消费。
-	 * 宿主把运行中输入队列带进「队列焦点态」（grok-build 的 queue pane 语义），
-	 * 用户在焦点态里选行/重排/编辑。
-	 */
-	public onQueueEditUp?: () => boolean;
-	/**
-	 * 队列焦点态的前置拦截：宿主消费 ↑↓/⇧J/⇧K/Enter/e/x/Delete/Esc 时返回 true 吞键，
-	 * 未匹配返回 false 落回编辑器正常处理。挂在全部按键处理之前（Ctrl+C 仍直通父层）。
-	 */
-	public onQueueNav?: (data: string) => boolean;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -447,12 +437,17 @@ export class Editor implements Component, Focusable {
 	 * Add a prompt to history for up/down arrow navigation.
 	 * Called after successful submission.
 	 */
-	addToHistory(text: string): void {
+	/** 已提交 prompt 的历史（最新在前）；/history 面板的数据源。 */
+	getHistory(): ReadonlyArray<{ text: string; ts: number }> {
+		return this.history;
+	}
+
+	addToHistory(text: string, ts = Date.now()): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 		// Don't add consecutive duplicates
-		if (this.history.length > 0 && this.history[0] === trimmed) return;
-		this.history.unshift(trimmed);
+		if (this.history.length > 0 && this.history[0].text === trimmed) return;
+		this.history.unshift({ text: trimmed, ts });
 		// Limit history size
 		if (this.history.length > 100) {
 			this.history.pop();
@@ -503,7 +498,7 @@ export class Editor implements Component, Focusable {
 				this.setTextInternal("");
 			}
 		} else {
-			this.setTextInternal(this.history[this.historyIndex] || "", direction === -1 ? "start" : "end");
+			this.setTextInternal(this.history[this.historyIndex]?.text ?? "", direction === -1 ? "start" : "end");
 		}
 	}
 
@@ -770,11 +765,6 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// 队列焦点态的前置拦截：↑↓/⇧J/⇧K/Enter/e/x/Delete/Esc 归队列，其余键落回编辑器。
-		if (this.onQueueNav?.(data) === true) {
-			return;
-		}
-
 		// Undo
 		if (kb.matches(data, "tui.editor.undo")) {
 			this.undo();
@@ -925,15 +915,6 @@ export class Editor implements Component, Focusable {
 
 		// Arrow key navigation (with history support)
 		if (kb.matches(data, "tui.editor.cursorUp")) {
-			// 挂起队列非空时 ↑ 优先接管（历史导航让位）：宿主把队列搬回编辑器编辑。
-			// 正在浏览历史时不抢（保持历史语义）。见 interactive-mode 的 onQueueEditUp。
-			if (
-				this.historyIndex === -1 &&
-				this.isOnFirstVisualLine() &&
-				this.onQueueEditUp?.() === true
-			) {
-				return;
-			}
 			if (
 				this.isOnFirstVisualLine() &&
 				(this.isEditorEmpty() || this.historyIndex > -1 || this.state.cursorCol === 0)

@@ -12,7 +12,7 @@
  * 因此这里的事件投影、会话回放与命令集都按 sph 的语义实现，交互形态保持一致。
  */
 
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { AgentListener, SubagentEvent } from '../agent/events.js';
 import { loadCompaction, projectContext } from '../agent/compact.js';
 import { loadUserTheme } from './theme/theme.js';
@@ -80,7 +80,6 @@ import {
   Container,
   type Component,
   isKeyRelease,
-  matchesKey,
   isViewportTUI,
   type SelectItem,
   type SlashCommand,
@@ -94,8 +93,9 @@ import {
   type TuiMouseEventResult,
   VStack,
   ScrollView,
+  formatKeyText,
 } from './core/index.js';
-import { matchesAppKey } from './app-keybindings.js';
+import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
 import { showConfirmDialog, showInputDialog, showLoadingDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import { mcpStateLabel, renderMcpReport, renderMcpTools, renderSkillsReport } from './reports.js';
@@ -121,6 +121,7 @@ import { ToolGroupComponent } from './components/tool-group.js';
 import { UserMessageComponent } from './components/user-message.js';
 import { userMessageBubbleY } from './components/sticky-user-message.js';
 import { RecapMessageComponent } from './components/recap.js';
+import { generateSessionTitle, TITLE_SOURCE_SAMPLE_CHARS } from './session-title.js';
 import { getEditorTheme, getMarkdownTheme, theme } from './theme/theme.js';
 import { errorMessage, flattenWhitespace, formatDuration } from '../util.js';
 import { readVersion } from '../version.js';
@@ -213,6 +214,7 @@ interface CommandItem {
 
 const COMMANDS: readonly CommandItem[] = [
   { id: 'help', label: '/help', hint: 'List commands and key bindings' },
+  { id: 'history', label: '/history', hint: 'Search and reuse prompt history' },
   { id: 'new', label: '/new', hint: 'Start a new session' },
   { id: 'resume', label: '/resume', hint: 'Resume a previous session, or switch by id' },
   { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises' },
@@ -242,7 +244,6 @@ const SERVER_PREFIX = 'server:';
 const COMMAND_NAMES = new Set<string>([
   ...COMMANDS.map((command) => command.id),
   ...Object.keys(COMMAND_ALIASES),
-  'exit',
 ]);
 
 function message(error: unknown): string {
@@ -255,14 +256,19 @@ const MAX_DOCK_SUBAGENT_ROWS = 5;
 const STEER_RIGHT_PAD = 4;
 /** 挂起条首行上方的空行间距；鼠标 y 换算行下标时要扣掉它。 */
 const STEER_TOP_GAP = 1;
-/** 悬停/焦点行动作按钮链（从右往左紧贴无缝，宽不够整颗放弃）。 */
+/**
+ * 挂起条动作按钮链（从右往左紧贴无缝，宽不够整颗放弃）。纯鼠标操作，无键盘快捷键，
+ * 避免与 TUI 既有按键冲突；[↑]/[↓] 只在该行可移动时渲染。
+ */
 const STEER_BUTTONS: Array<{ action: SteerAction; label: string }> = [
   { action: 'cancel', label: '[cancel]' },
   { action: 'edit', label: '[edit]' },
   { action: 'send', label: '[Send now]' },
+  { action: 'down', label: '[↓]' },
+  { action: 'up', label: '[↑]' },
 ];
 
-type SteerAction = 'cancel' | 'edit' | 'send';
+type SteerAction = 'cancel' | 'edit' | 'send' | 'down' | 'up';
 /** `/provider` 拉上游目录的超时。刻意短：不少中转站根本没有 /models 目录端点（返回 502 或干脆挂住），走代理时 CONNECT 隧道也会拖很久。目录只是发现手段，降级路径（已声明 + 手动输入）才是兜底。 */
 const PROVIDER_FETCH_TIMEOUT_MS = 10_000;
 
@@ -335,7 +341,7 @@ class InteractiveMode implements ApprovalUi {
   /**
    * 运行中输入的挂起条：每帧从 turnInbox 动态渲染，队列空即零占用。
    * 渲染进 steersContainer（工作状态行之下、输入框之上）；容器 shrink 弹性，
-   * 行数多时先压它。行内交互（悬停按钮/双击取回）见 onSteersMouse，键盘见 onQueueNav。
+   * 行数多时先压它。行内交互（悬停按钮/单击选中）见 onSteersMouse，纯鼠标操作。
    */
   private readonly steersBar: Component = {
     invalidate: () => {},
@@ -343,10 +349,8 @@ class InteractiveMode implements ApprovalUi {
     handleMouse: (event) => this.onSteersMouse(event),
   };
   private followUps: string[] = [];
-  /** 挂起队列的选中项下标：↑↓/J/K 与悬停的作用对象；文字加粗亮色标识。 */
+  /** 挂起队列的选中项下标：单击行的加粗标识。 */
   private steerCursor?: number;
-  /** 队列焦点态：编辑器按 ↑ 进入后，↑↓/⇧J/⇧K/Enter/e/x/Delete/Esc 归队列面板（grok-build 同款）。 */
-  private steerFocus = false;
   /** 鼠标悬停的挂起消息下标：该行铺极浅底并亮出动作按钮，移出即隐藏。 */
   private steerHover?: number;
   /** 悬停中的动作按钮：按钮文字按动作变色（cancel 红、edit/send 亮）。 */
@@ -381,6 +385,15 @@ class InteractiveMode implements ApprovalUi {
   private gitBranch?: string;
 
   private running = false;
+  /** 终端 tab 标题的项目段：工作区目录名，一次进程内不变。 */
+  private tabProject = '';
+  /** LLM 生成的会话标题；tab 空闲段用它，落会话事件，resume 回放不重新生成。 */
+  private sessionTitle?: string;
+  /** 标题生成一次性开关：失败也重试的话，坏会话每轮都要白烧一次调用。 */
+  private sessionTitleAttempted = false;
+  /** 首轮标题素材：用户 prompt 与助手正文采样，轮次收尾后交给生成器。 */
+  private titlePrompt?: string;
+  private titleDraft?: string;
   private quitting = false;
   private abort?: AbortController;
   private quitResolve?: () => void;
@@ -445,7 +458,6 @@ class InteractiveMode implements ApprovalUi {
 
   private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
   private contextTokens?: number;
-  private readonly history: string[] = [];
 
   /**
    * Recap 状态。
@@ -510,6 +522,9 @@ class InteractiveMode implements ApprovalUi {
     });
     this.applyEditorBorder();
 
+    // tab 标题带目录名：多开几个 tab 时能分清哪个会话连的是哪个工作区。
+    this.tabProject = basename(deps.workspaceRoot);
+
     this.documentContainer.addChild(this.headerContainer);
     this.documentContainer.addChild(this.chatContainer);
     this.editorContainer.addChild(this.editor);
@@ -525,6 +540,43 @@ class InteractiveMode implements ApprovalUi {
 
   // ------------------------------------------------------------------ 生命周期
 
+  /**
+   * 终端 tab 标题：空闲 `<会话标题> | 项目`（还没有标题时退回 `sph`），工作态
+   * `● <当前活动> | 项目`。活动文本随 setActivity 实时跟进，多 tab 下不用切回去
+   * 就知道哪个在干活、干到哪一步。判定用 activityLabel 而非 running：/compact
+   * 折叠上下文不在轮次里，但也算工作态。forceIdle 给退出路径用：中断收尾是异步的，
+   * 退出时活动词还没清掉，不能留下 ●。
+   */
+  private refreshTabTitle(forceIdle = false): void {
+    const base = this.sessionTitle ?? 'sph';
+    const status = !forceIdle && this.activityLabel !== undefined
+      ? `● ${this.activityLabel}`
+      : base;
+    this.ui.terminal.setTitle(`${status} | ${this.tabProject}`);
+  }
+
+  /** 首轮交换结束后生成会话标题（异步、不阻塞）：成功则落事件并刷新 tab，失败静默。 */
+  private maybeGenerateSessionTitle(): void {
+    const prompt = this.titlePrompt;
+    if (prompt === undefined) return;
+    this.titlePrompt = undefined;
+    const draft = this.titleDraft ?? '';
+    this.titleDraft = undefined;
+    // 首轮请求就失败（断网/403）不算尝试：标题生成不该抢在链路可用性之前烧机会。
+    if (!this.modelResponded) return;
+    this.sessionTitleAttempted = true;
+    void generateSessionTitle(this.client, prompt, draft, {
+      // 主代理同款工具集：免费档网关按请求形态放行，不带会被当外部 API 滥用拒掉。
+      tools: (this.deps.tools ?? defaultTools).schemas(),
+      onUsage: (usage) => this.recordAuxUsage(usage, 'title'),
+    }).then((title) => {
+      if (title === undefined) return;
+      this.sessionTitle = title;
+      this.session.appendEvent('title', { title });
+      if (!this.quitting) this.refreshTabTitle();
+    });
+  }
+
   async run(): Promise<void> {
     this.gitBranch = readGitBranch(this.deps.workspaceRoot);
     this.setupLayout();
@@ -536,12 +588,23 @@ class InteractiveMode implements ApprovalUi {
     // 信任页已经 start 过同一块替代屏幕时，这里只换 layout，不再进第二次屏。
     if (!this.deps.ui) this.ui.start();
     this.ui.setFocus(this.editor);
+    this.refreshTabTitle();
     this.ui.requestRender();
     this.startRecapWatch();
 
     await new Promise<void>((resolve) => {
       this.quitResolve = resolve;
     });
+
+    // 退回主屏幕后递一条会话恢复命令：想接着聊时不用去翻 sessions 目录。
+    // 空会话（打开即退）不打印，避免噪音；headless 路径不加（一次性任务）。
+    if (this.session.readAll().length > 0) {
+      process.stdout.write(`
+session saved. resume with:
+  sph --resume ${this.session.id}
+  sph -c
+`);
+    }
   }
 
   private setupLayout(): void {
@@ -593,19 +656,6 @@ class InteractiveMode implements ApprovalUi {
     };
     // 挂起队列非空时 ↑ 把队列全部搬回编辑器（pi 的 dequeue 语义）：删掉不要的行即取消，
     // Enter 重新挂起。全量搬回而不是逐条——一条规则讲清楚，没有歧义中间态。
-    // grok-build 语义：有队列时 ↑ 进入队列焦点态（选中最后一行），不再整队搬回——
-    // 编辑能力由焦点态里 Enter/e 逐条编辑（原位保存）承担。
-    this.editor.onQueueEditUp = () => {
-      const items = this.turnInbox.peek();
-      if (items.length === 0) return false;
-      this.steerFocus = true;
-      this.steerCursor = items.length - 1;
-      this.steerHover = undefined;
-      this.ui.requestRender();
-      return true;
-    };
-    // 队列焦点态的前置拦截：按键归队列面板，未匹配的落回编辑器（打字等）。
-    this.editor.onQueueNav = (data) => this.handleQueueNavKey(data);
     // 悬停离开检测：任何鼠标移动先清各类悬停高亮（挂起条浅底/提示/按钮、工具行/汇总行浅底）；
     // 若光标仍悬在原目标上，同帧的组件分发会重新点亮——监听器先于分发执行，一清一亮。
     this.ui.onMouseMotion = () => {
@@ -664,6 +714,10 @@ class InteractiveMode implements ApprovalUi {
         this.toggleToolExpansion();
         return { consume: true };
       }
+      if (matchesAppKey(data, 'app.approval.cycle')) {
+        this.cycleApprovalMode();
+        return { consume: true };
+      }
       if (matchesAppKey(data, 'app.clear')) {
         this.handleCtrlC();
         return { consume: true };
@@ -682,11 +736,29 @@ class InteractiveMode implements ApprovalUi {
 
     const view = this.session.readPath();
     this.replayRecords(view.length > 0 ? view : records);
+    this.restorePromptHistory(messagesOf(records));
     this.applyEditorBorder();
     this.pinLatestUserMessage();
     const messageCount = messagesOf(records).length;
     if (messageCount > 0) {
       this.addNotice(`Resumed session ${this.session.id} · ${messageCount} messages`, 'dim');
+    }
+  }
+
+  /**
+   * 会话发过的用户指令回放进输入历史（grok 的 prompt_history 语义：会话级、最新在前）。
+   * 恢复会话（-c / --resume）后按 ↑ 就能翻出上次发过的指令，改了直接重发。
+   * 过滤：斜杠命令、以 '[' 开头的系统合成消息（[session state] / [steering] / [background
+   * task] 等，非用户原文）、超长上下文倾倒——回放的是「指令」，不是消息存档。
+   */
+  private restorePromptHistory(messages: readonly SessionMessage[]): void {
+    for (const message of messages) {
+      if (message.role !== 'user') continue;
+      const content = message.content.trim();
+      if (content === '' || content.startsWith('/') || content.startsWith('[')) continue;
+      if (content.length > 2000) continue;
+      const ts = Number.isNaN(Date.parse(message.ts)) ? Date.now() : Date.parse(message.ts);
+      this.editor.addToHistory(content, ts);
     }
   }
 
@@ -771,6 +843,14 @@ class InteractiveMode implements ApprovalUi {
       this.applyUsage(data);
       return;
     }
+    if (kind === 'title') {
+      // 会话标题：tab 常驻名，resume 直接接续，不重新烧一次生成调用。
+      if (typeof data.title === 'string' && data.title !== '') {
+        this.sessionTitle = data.title;
+        this.sessionTitleAttempted = true;
+      }
+      return;
+    }
     if (kind === 'recap') {
       // 未上屏的 recap（自动长尾输出）只留档，回放时跳过——否则用户会在恢复后
       // 看到一条当时被刻意压下去的跑飞摘要。
@@ -823,12 +903,13 @@ class InteractiveMode implements ApprovalUi {
       return;
     }
     this.editor.setText('');
-    this.history.push(text);
+
 
     if (text.startsWith('/')) {
       await this.handleCommand(text);
       return;
     }
+    this.editor.addToHistory(text);
     if (this.running) {
       // 队列满时拒绝而不是挤掉最旧：静默丢用户的输入是最差的失败模式。
       if (this.turnInbox.full()) {
@@ -888,6 +969,11 @@ class InteractiveMode implements ApprovalUi {
     this.abort = controller;
     this.running = true;
     this.modelResponded = false;
+    // 首轮（且标题还没生成过）记下素材源头；后续轮次不覆盖，素材在 'text' 事件里累积。
+    if (!this.sessionTitleAttempted) {
+      this.titlePrompt = prompt;
+      this.titleDraft = '';
+    }
     this.inFlightPrompt = rewindable ? prompt : undefined;
     this.pendingRewind = undefined;
     // 发出去之后输入框失焦：否则边框一直是聚焦色，像还在打字。
@@ -965,6 +1051,10 @@ class InteractiveMode implements ApprovalUi {
       // 空闲计时从轮次收尾算起：一轮跑两分钟不该把那两分钟算成「用户离开」。
       this.lastActivityAt = Date.now();
       this.setStatusIndicator(undefined);
+      // 指示器清掉后 activityLabel 已归位，此刻刷新才能落回空闲标题。
+      this.refreshTabTitle();
+      // 标题只在首轮交换后生成一次；这里的素材已在上面清点完毕。
+      this.maybeGenerateSessionTitle();
       this.pendingTools.clear();
       // 轮次结束但后台子代理仍在跑（foreground 的 end 事件在工具返回前就已到）：
       // 提醒一句，避免用户以为总结就是全部结论。
@@ -1088,6 +1178,8 @@ class InteractiveMode implements ApprovalUi {
         this.thinkingBuffer = '';
         this.thinkingStartedAt = Date.now();
         this.thinkingGroup?.beginThinking();
+        // 采样里的半截正文也在被丢弃之列，别让它混进标题素材。
+        if (this.titleDraft !== undefined) this.titleDraft = '';
         if (this.streamingAssistant) {
           this.chatContainer.removeChild(this.streamingAssistant);
           this.streamingAssistant = undefined;
@@ -1100,6 +1192,10 @@ class InteractiveMode implements ApprovalUi {
         this.setActivity(WorkingLabel.responding);
         const assistant = this.ensureAssistant();
         assistant.appendText(event.text);
+        // 首轮正文顺手采样：会话标题的素材（超长回复截断，不追加成本）。
+        if (this.titleDraft !== undefined && this.titleDraft.length < TITLE_SOURCE_SAMPLE_CHARS) {
+          this.titleDraft += event.text;
+        }
         this.paint('transcript');
         return;
       }
@@ -1384,14 +1480,14 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * 挂起条：运行中输入队列的可视化（grok-build queue pane 同款）。
+   * 挂起条：运行中输入队列的可视化。纯鼠标操作，无键盘快捷键（避免与 TUI 按键冲突）。
    *
    * 每帧从 turnInbox 动态取数——消息只在轮次收尾后逐条投递，投递一条下一帧自动少一条。
    * 首行上方留一行间距（与状态行脱开）；一格缩进与状态行左缘（leftPad=1）对齐。前缀是
-   * 投递顺序序号（`1.` `2.`…，重排后按新位置重新编号）。鼠标悬停的行或队列焦点态的
-   * 选中行：整行铺浅底（悬停 steerHoverBg 极浅、焦点选中 selectedBg 更强），右侧亮出
-   * 动作按钮 `[Send now] [edit] [cancel]`（右对齐紧贴无缝、右缘与状态行耗时/token 同
-   * 列，宽不够整颗放弃），按钮自身悬停变色。
+   * 投递顺序序号（`1.` `2.`…，重排后按新位置重新编号）。鼠标悬停的行：整行铺极浅底
+   * （steerHoverBg），右侧亮出动作按钮 `[↑] [↓] [Send now] [edit] [cancel]`（右对齐
+   * 紧贴无缝、右缘与状态行耗时/token 同列，宽不够整颗放弃，行不可移动时 ↑/↓ 不渲染，
+   * 按钮自身悬停变色）。
    */
   private renderPendingSteers(width: number): string[] {
     const items = this.turnInbox.peek();
@@ -1401,43 +1497,43 @@ class InteractiveMode implements ApprovalUi {
     }
     const cursor = Math.min(this.steerCursor ?? items.length - 1, items.length - 1);
     const hover = this.steerHover !== undefined && this.steerHover < items.length ? this.steerHover : undefined;
-    // 动作按钮只挂一行：悬停行优先，其次焦点态的选中行（grok 同款——悬停无需先选中即可操作）。
-    const actionRow = hover ?? (this.steerFocus ? cursor : undefined);
-    const buttons = actionRow === undefined ? [] : this.layoutSteerButtons(width);
+    // 动作按钮只挂悬停行（单光标同一时刻至多悬停一行）。
+    const buttons = hover === undefined ? [] : this.layoutSteerButtons(width, hover, items.length);
     const btnStart = buttons[0]?.x0 ?? width - STEER_RIGHT_PAD;
     this.steerButtons = buttons.map((button, i) => {
       const x0 = btnStart + buttons.slice(0, i).reduce((sum, b) => sum + b.label.length, 0);
-      return { row: actionRow!, action: button.action, x0, x1: x0 + button.label.length };
+      return { row: hover!, action: button.action, x0, x1: x0 + button.label.length };
     });
     const lines = items.map((text, index) => {
-      const hovered = index === hover;
-      const selected = this.steerFocus && index === cursor;
       const num = theme.fg('primary', `${index + 1}.`);
       // 带按钮的行：行文按按钮起点截断让位（至少留 1 列间隙）。
-      const avail = index === actionRow ? Math.max(0, btnStart - 4 - 1) : 96;
+      const avail = index === hover ? Math.max(0, btnStart - 4 - 1) : 96;
       const clipped = flattenWhitespace(text).slice(0, avail);
       const styled = index === cursor ? theme.bold(clipped) : theme.fg('muted', clipped);
       let line = ` ${num} ${styled}`;
-      if (index === actionRow) {
+      if (index === hover) {
         const pad = Math.max(1, btnStart - visibleWidth(line));
         line += ' '.repeat(pad);
         for (const button of buttons) line += this.steerButtonLabel(button.action, index);
       }
-      // 悬停行铺极浅底；焦点选中行铺更强的选中底（选中优先，grok 同款）。
+      // 悬停行整行铺极浅底。
       const fill = Math.max(0, width - visibleWidth(line));
-      if (selected) return theme.bg('selectedBg', line + ' '.repeat(fill));
-      if (hovered) return theme.bg('steerHoverBg', line + ' '.repeat(fill));
-      return line;
+      return index === hover ? theme.bg('steerHoverBg', line + ' '.repeat(fill)) : line;
     });
     lines.unshift('');
     return lines;
   }
 
-  /** 布局动作按钮链：从右往左紧贴排布，放不下整颗放弃。空数组 = 宽度不足以放任何按钮。 */
-  private layoutSteerButtons(width: number): Array<{ action: SteerAction; label: string; x0: number }> {
+  /**
+   * 布局动作按钮链：从右往左紧贴排布，放不下整颗放弃；[↑]/[↓] 只在该行可移动时出现。
+   * 空数组 = 宽度不足以放任何按钮。
+   */
+  private layoutSteerButtons(width: number, row: number, count: number): Array<{ action: SteerAction; label: string; x0: number }> {
     let right = width - STEER_RIGHT_PAD;
     const placed: Array<{ action: SteerAction; label: string; x0: number }> = [];
     for (const { action, label } of STEER_BUTTONS) {
+      if (action === 'up' && row === 0) continue;
+      if (action === 'down' && row === count - 1) continue;
       const x0 = right - label.length;
       if (x0 < 5) break; // 行文至少保留一格缩进 + 序号 + 一格空隙
       placed.unshift({ action, label, x0 });
@@ -1446,7 +1542,7 @@ class InteractiveMode implements ApprovalUi {
     return placed;
   }
 
-  /** 动作按钮文案：默认 muted，悬停变色（cancel 红、edit/send 亮文字）。 */
+  /** 动作按钮文案：默认 muted，悬停变色（cancel 红、其余亮文字）。 */
   private steerButtonLabel(action: SteerAction, row: number): string {
     const label = STEER_BUTTONS.find((button) => button.action === action)!.label;
     const hoveredButton = this.steerButtonHover?.row === row && this.steerButtonHover.action === action;
@@ -1455,31 +1551,30 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * 挂起条行内鼠标交互（grok-build queue pane 同款）：按钮命中优先
-   * （[Send now]/[edit]/[cancel] 直接执行动作）；单击行 = 选中并聚焦队列面板。
-   * 双击无特殊语义（grok 的队列行双击是 ListPane 划词，这里没有对应物）。
-   * 左键按下先用 handleSelectablePress 钉行吃掉（与工具行同款）：否则全屏划词路径
-   * 接手，会把消息文本选中。
-   * click 事件必须返回 handled 挡住冒泡，避免同一次点击沿布局链多次送达。
+   * 挂起条行内鼠标交互：按钮命中优先（[↑]/[↓]/[Send now]/[edit]/[cancel] 直接执行
+   * 动作）；单击行 = 选中（加粗标识）。双击无特殊语义。左键按下先用
+   * handleSelectablePress 钉行吃掉（与工具行同款）：否则全屏划词路径接手，
+   * 会把消息文本选中。click 事件必须返回 handled 挡住冒泡，避免同一次点击沿布局链
+   * 多次送达。
    */
   private onSteersMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     const items = this.turnInbox.peek();
+    const row = event.y - STEER_TOP_GAP;
+    const onRow = row >= 0 && row < items.length;
     if (event.type === 'move') {
-      // 悬停：该行铺浅底并亮出动作按钮，同时成为队列焦点态的选中行。移出的隐藏由
-      // onMouseMotion 先清、这里的命中分发再点亮（同帧内一清一亮，不需要绝对坐标）。
-      // 首行是上间距空行：y 换算行下标要扣掉。
-      const row = event.y - STEER_TOP_GAP;
-      if (row >= 0 && row < items.length) {
+      // 悬停：该行铺浅底并亮出动作按钮。移出的隐藏由 onMouseMotion 先清、这里的命中
+      // 分发再点亮（同帧内一清一亮，不需要绝对坐标）。悬停不劫持键盘选中（steerCursor
+      // 只由单击/键盘改，grok 同款——hover 只负责亮按钮）。首行是上间距空行：y 换算
+      // 行下标要扣掉。
+      if (onRow) {
         const button = this.steerButtons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);
         const nextButton = button ? { row, action: button.action } : undefined;
         if (
           this.steerHover !== row ||
-          this.steerCursor !== row ||
           this.steerButtonHover?.row !== nextButton?.row ||
           this.steerButtonHover?.action !== nextButton?.action
         ) {
           this.steerHover = row;
-          this.steerCursor = row;
           this.steerButtonHover = nextButton;
           this.ui.requestRender();
         }
@@ -1487,97 +1582,41 @@ class InteractiveMode implements ApprovalUi {
       return undefined;
     }
     if (event.type === 'press' && event.button === 'left') {
+      // 钉行只发生在有效行上：按在上间距空行不选中、不画行选标记。
+      if (!onRow) return undefined;
       const press = handleSelectablePress(this.steersBar, event);
       if (press) return press;
     }
     if (event.type !== 'click' || event.button !== 'left') return undefined;
-    const row = event.y - STEER_TOP_GAP;
-    if (row < 0 || row >= items.length) return undefined;
+    if (!onRow) return undefined;
     // 按钮命中优先：直接执行动作，不再走行选中。
     const button = this.steerButtons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);
     if (button) {
       if (button.action === 'cancel') this.cancelSteerRow(row);
       else if (button.action === 'edit') this.editSteerRow(row);
-      else this.sendSteerRowNow(row);
+      else if (button.action === 'send') this.sendSteerRowNow(row);
+      else if (button.action === 'up') this.moveSteerRow(row, -1);
+      else this.moveSteerRow(row, 1);
       return { handled: true };
     }
-    // 单击行 = 选中并聚焦队列面板（grok：set_active_pane(Queue)）。
+    // 单击行 = 选中（加粗标识）。
     this.steerCursor = row;
-    this.steerFocus = true;
     this.ui.requestRender();
     return { handled: true };
   }
 
-  /** 队列焦点态按键（grok-build queue pane 同款）：未匹配的返回 false 落回编辑器。 */
-  private handleQueueNavKey(data: string): boolean {
-    if (!this.steerFocus) return false;
-    const items = this.turnInbox.peek();
-    if (items.length === 0) {
-      this.exitSteerFocus();
-      return false;
-    }
-    const cursor = Math.min(this.steerCursor ?? items.length - 1, items.length - 1);
-    const repaint = (): void => this.ui.requestRender();
-    if (matchesKey(data, 'escape')) {
-      this.exitSteerFocus();
-      return true;
-    }
-    if (matchesKey(data, 'up')) {
-      // 首行再 ↑ 保持夹住：越界会误开输入历史并改写草稿（grok 同理）。
-      this.steerCursor = Math.max(0, cursor - 1);
-      repaint();
-      return true;
-    }
-    if (matchesKey(data, 'down')) {
-      // ↓ 越过最后一行回编辑器。
-      if (cursor >= items.length - 1) {
-        this.exitSteerFocus();
-        return true;
-      }
-      this.steerCursor = cursor + 1;
-      repaint();
-      return true;
-    }
-    // 面板内 j/k 导航（grok ListPane 同款）：到边界夹住，不触发退出。
-    if (data === 'j' && cursor < items.length - 1) {
-      this.steerCursor = cursor + 1;
-      repaint();
-      return true;
-    }
-    if (data === 'k' && cursor > 0) {
-      this.steerCursor = cursor - 1;
-      repaint();
-      return true;
-    }
-    // ⇧J 下移 / ⇧K 上移（重排的是选中条，序号随新位置重编）。
-    if (data === 'J' && cursor < items.length - 1) {
-      this.turnInbox.move(cursor, 1);
-      this.steerCursor = cursor + 1;
-      repaint();
-      return true;
-    }
-    if (data === 'K' && cursor > 0) {
-      this.turnInbox.move(cursor, -1);
-      this.steerCursor = cursor - 1;
-      repaint();
-      return true;
-    }
-    if (data === '\r' || data === 'e') {
-      this.editSteerRow(cursor);
-      return true;
-    }
-    if (data === 'x' || matchesKey(data, 'delete') || matchesKey(data, 'backspace')) {
-      this.cancelSteerRow(cursor);
-      return true;
-    }
-    return false;
+  /** [↑]/[↓]：把该行与相邻行交换（序号随新位置重编）。队列结构变化使冻结原位失效。 */
+  private moveSteerRow(index: number, delta: -1 | 1): void {
+    if (!this.turnInbox.move(index, delta)) return;
+    this.steerEditIndex = undefined;
+    this.steerCursor = index + delta;
+    this.ui.requestRender();
   }
 
   /** 取回选中条到输入框编辑：队列里删掉、记住原位置并冻结投递（提交后原位回插）。 */
   private editSteerRow(index: number): void {
     const text = this.turnInbox.removeAt(index);
     if (text === undefined) return;
-    this.exitSteerFocus();
     this.steerEditIndex = index;
     const current = this.editor.getText().trim();
     this.editor.setText(current === '' ? text : `${current}\n\n${text}`);
@@ -1586,36 +1625,33 @@ class InteractiveMode implements ApprovalUi {
     this.ui.requestRender();
   }
 
-  /** 删除选中条（不回填编辑器）：队列空则顺手退出焦点态。 */
+  /** 删除选中条（不回填编辑器）。队列结构变化：冻结编辑的原位置失效。 */
   private cancelSteerRow(index: number): void {
     if (this.turnInbox.removeAt(index) === undefined) return;
-    if (this.turnInbox.peek().length === 0) this.exitSteerFocus();
+    // 队列结构变化：冻结编辑的原位置失效（同 ⇧J/⇧K 的处理）。
+    this.steerEditIndex = undefined;
     this.steerCursor = Math.min(index, this.turnInbox.peek().length - 1);
     this.ui.requestRender();
   }
 
   /** 强制立即发送选中条：中断当前轮，该条作为下一轮 prompt，其余消息保持原队列。 */
   private sendSteerRowNow(index: number): void {
+    // 先确认有可中断的轮次再动队列：反序会在轮次恰好收尾时把消息删成凭空消失。
+    if (!this.abort) return;
     const text = this.turnInbox.removeAt(index);
-    if (text === undefined || !this.abort) return;
-    this.exitSteerFocus();
+    if (text === undefined) return;
     this.sendAfterInterrupt = text;
     this.setActivity(WorkingLabel.cancelling);
     this.abort.abort();
   }
 
-  private exitSteerFocus(): void {
-    if (!this.steerFocus) return;
-    this.steerFocus = false;
-    this.ui.requestRender();
-  }
 
-  /** 队列被整队搬走（立即发送 / 轮次作废）后，选中、编辑占位与焦点态一并失效。 */
+
+  /** 队列被整队搬走（立即发送 / 轮次作废）后，选中、编辑占位一并失效。 */
   private resetSteerState(): void {
     this.steerCursor = undefined;
     this.steerEditIndex = undefined;
     this.steerHover = undefined;
-    this.steerFocus = false;
     this.steerButtonHover = undefined;
   }
 
@@ -1710,6 +1746,8 @@ class InteractiveMode implements ApprovalUi {
   private setActivity(message: string): void {
     if (this.activityLabel === message) return;
     this.activityLabel = message;
+    // 状态行换词的同时把当前活动同步进 tab 标题；重复文案在上面的去重挡掉，不会刷屏。
+    this.refreshTabTitle();
     this.currentIndicator?.setMessageColor((text) => theme.fg('muted', text));
     this.currentIndicator?.setShimmer(true);
     this.currentIndicator?.setMessage(message);
@@ -1738,6 +1776,8 @@ class InteractiveMode implements ApprovalUi {
     }
     const label = formatWorkingWarning(text, this.workingWarningCount);
     this.activityLabel = label;
+    // 警告词绕过 setActivity 直写，tab 标题这里手动跟一次。
+    this.refreshTabTitle();
     this.currentIndicator.setShimmer(false);
     this.currentIndicator.setMessageColor((content) => theme.fg('warning', content));
     this.currentIndicator.setMessage(label);
@@ -1793,6 +1833,8 @@ class InteractiveMode implements ApprovalUi {
     if (this.recapTimer) clearInterval(this.recapTimer);
     this.recapTimer = undefined;
     this.setStatusIndicator(undefined);
+    // 运行中退出会把 ● 留在已死的 tab 上；退屏前复原成空闲标题，tab 上正好留个「这是 sph 会话」的标记。
+    this.refreshTabTitle(true);
     this.ui.stop({ preserveScreen: true });
     this.quitResolve?.();
   }
@@ -1916,6 +1958,9 @@ class InteractiveMode implements ApprovalUi {
       case 'help':
         await this.commandHelp();
         break;
+      case 'history':
+        await this.commandHistory();
+        break;
       case 'new':
         await this.commandNewSession();
         break;
@@ -1952,11 +1997,45 @@ class InteractiveMode implements ApprovalUi {
       case 'export':
         await this.commandExport(argument);
         break;
-      case 'exit':
-        this.quit();
-        break;
       default:
         break;
+    }
+  }
+
+  /**
+   * `/history`：搜索面板列出本会话发过的 prompt（最新在前），输入即按前缀过滤，
+   * 选中回填输入框可直接改了重发。数据与 ↑ 回放共用同一份编辑器历史。
+   */
+  /**
+   * `/history`：弹窗列出本会话发过的 prompt（最新在前，带时间），选中回填输入框
+   * 可直接改了重发。数据与 ↑ 回放共用同一份编辑器历史。
+   */
+  private async commandHistory(): Promise<void> {
+    const history = this.editor.getHistory();
+    if (history.length === 0) {
+      this.addNotice('No prompt history yet — sent prompts land here', 'dim');
+      return;
+    }
+    const items: SelectItem[] = history.map((entry) => {
+      const time = new Date(entry.ts);
+      const sameDay = new Date().toDateString() === time.toDateString();
+      const stamp = sameDay
+        ? `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`
+        : `${String(time.getMonth() + 1).padStart(2, '0')}-${String(time.getDate()).padStart(2, '0')} ${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+      return {
+        value: entry.text,
+        label: `${stamp}  ${flattenWhitespace(entry.text).slice(0, 70)}`,
+      };
+    });
+    const picked = await showSelectDialog(this.ui, {
+      title: 'Prompt history',
+      items,
+      maxVisible: 14,
+      hint: '↑↓ select · Enter reuse · Esc close',
+    });
+    if (picked !== undefined) {
+      this.editor.setText(picked);
+      this.ui.setFocus(this.editor);
     }
   }
 
@@ -1969,14 +2048,28 @@ class InteractiveMode implements ApprovalUi {
     const aliases = Object.entries(COMMAND_ALIASES).map(([alias, canonical]) => `\`/${alias}\` → \`/${canonical}\``);
     if (aliases.length > 0) lines.push(`- Aliases: ${aliases.join(' · ')}`);
     lines.push('');
+    // 键位清单由注册表驱动（app-keybindings 的 when 字段分组）：新增键位只需改注册表，
+    // 帮助自动跟上——手写清单必然漂移，这次收编就是为了消灭它。
     lines.push('## Key bindings');
-    lines.push('- `Esc` — before the model replies, cancel and restore the prompt to the input; after it starts, interrupt output; or close a dialog');
-    lines.push('- `Ctrl+C` — same interrupt as Esc while a turn is running; with no turn running, clear the input, and press it twice to quit');
-    lines.push('- `Ctrl+D` — quit when the input is empty');
-    lines.push('- `Ctrl+O` — expand or collapse tool output');
-    lines.push('- `Ctrl+P` — open the command palette');
+    const grouped = new Map<string, string[]>();
+    for (const definition of Object.values(APP_KEYBINDINGS) as AppKeybindingDefinition[]) {
+      const entry = `- \`${formatKeyText(definition.keys.join('/'))}\` — ${definition.description}`;
+      const group = grouped.get(definition.when) ?? [];
+      group.push(entry);
+      grouped.set(definition.when, group);
+    }
+    for (const [when, entries] of grouped) {
+      lines.push(`### ${when === 'always' ? 'Available anytime' : when}`);
+      lines.push(...entries);
+    }
+    lines.push('');
+    lines.push('## Queue (mouse)');
+    lines.push('- Hover a queued row for [↑] [↓] [Send now] [edit] [cancel] buttons');
+    lines.push('- Click a row to select it; `[edit]` takes it back to the input (queued order preserved)');
+    lines.push('');
+    lines.push('## Editor');
     lines.push('- `/` — slash-command autocomplete in the editor');
-    lines.push('- `Enter` while a turn is running — queue steering (injected after the current step)');
+    lines.push('- `Enter` while a turn is running — queue the message (delivered after the turn ends)');
     lines.push('- `Alt+Enter` — queue a follow-up that starts after this turn');
     await showMessageDialog(this.ui, { title: 'Help', text: lines.join('\n') });
   }
@@ -2351,7 +2444,9 @@ class InteractiveMode implements ApprovalUi {
       this.addNotice(`Compact failed: ${message(error)}`, 'error');
     } finally {
       this.setStatusIndicator(undefined);
-      this.setActivity(WorkingLabel.working);
+      // 指示器清掉后活动词已归位；这里刷新 tab 标题落回空闲，不能再用 setActivity 记词——
+      // 空闲态的假活动词会让 ● 一直挂在 tab 上。
+      this.refreshTabTitle();
     }
   }
 
@@ -2891,6 +2986,13 @@ class InteractiveMode implements ApprovalUi {
     const selected = await this.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: 3, primaryColumnWidth: primaryColumnWidthFor(items) });
     if (!selected) return;
     this.applyApproval(selected.value as ApprovalMode);
+  }
+
+  /** Shift+Tab：在 ask → auto → yolo 间循环审批模式（复用 /permission 的应用逻辑）。 */
+  private cycleApprovalMode(): void {
+    const index = APPROVAL_MODES.indexOf(this.approval);
+    const next = APPROVAL_MODES[(index + 1) % APPROVAL_MODES.length]!;
+    this.applyApproval(next);
   }
 
   private applyApproval(mode: ApprovalMode): void {

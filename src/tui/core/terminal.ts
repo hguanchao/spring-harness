@@ -516,6 +516,11 @@ export class ProcessTerminal implements Terminal {
 	setTitle(title: string): void {
 		// OSC 0;title BEL - set terminal window title
 		process.stdout.write(`\x1b]0;${title}\x07`);
+		if (process.platform === "win32") {
+			// 部分 ConPTY 版本会吞掉应用侧写的 OSC 序列；process.title 在 Windows 上由
+			// libuv 落成 SetConsoleTitleW——与 cmd.exe 刷 tab 标题同一条通路，保底生效。
+			process.title = title;
+		}
 	}
 
 	setProgress(active: boolean): void {

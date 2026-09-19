@@ -356,11 +356,11 @@ export class ToolGroupComponent extends VStack {
 
   private headerHovered = false;
 
-  /** 悬停高亮：汇总行整行铺浅底。返回是否有变化。 */
+  /** 悬停高亮：汇总行整行铺浅底（与挂起条悬停同一极浅色）。返回是否有变化。 */
   private setHeaderHovered(on: boolean): boolean {
     if (this.headerHovered === on) return false;
     this.headerHovered = on;
-    this.headerText.setCustomBgFn(on ? (text) => theme.bg('toolPendingBg', text) : undefined);
+    this.headerText.setCustomBgFn(on ? (text) => theme.bg('steerHoverBg', text) : undefined);
     return true;
   }
 

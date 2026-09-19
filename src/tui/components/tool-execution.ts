@@ -213,11 +213,17 @@ export class ToolExecutionComponent extends Container {
         this.ui.requestRender();
       }
       if (event.button !== 'left') return undefined;
-      // press 钉住整行并挡住全屏选词；click 仍走双击展开。
-      const press = handleSelectablePress(this, event);
-      if (press) return press;
+      // 分行路由（y 为组件内行号，0 = 标题行）：
+      // - 标题行按压：钉行（│ 标记）并接管，供合成 click——双击展开的触发面。
+      // - 正文行按压：放行给全屏划词——工具输出是拖动复制的主要内容，
+      //   划选后右键复制；正文上的双击由选区路径解释为「选词」而非展开。
+      if (event.type === 'press') {
+        if (event.y !== 0) return undefined;
+        const press = handleSelectablePress(this, event);
+        if (press) return press;
+      }
       if (event.type !== 'click') return undefined;
-      if (this.doubleClick.accept(event.x, event.y)) this.toggleDetail();
+      if (event.y === 0 && this.doubleClick.accept(event.x, event.y)) this.toggleDetail();
       return { handled: true };
     });
     this.addChild(this.region);
@@ -226,11 +232,11 @@ export class ToolExecutionComponent extends Container {
 
   private hovered = false;
 
-  /** 悬停高亮只画标题行（正文展开后大面积铺底反而喧宾）。返回是否有变化。 */
+  /** 悬停高亮只画标题行，底色与挂起条/汇总行同一极浅色（大面积亮底喧宾夺主）。返回是否有变化。 */
   private setHovered(on: boolean): boolean {
     if (this.hovered === on) return false;
     this.hovered = on;
-    this.titleText.setCustomBgFn(on ? (text) => theme.bg('toolPendingBg', text) : undefined);
+    this.titleText.setCustomBgFn(on ? (text) => theme.bg('steerHoverBg', text) : undefined);
     this.titleDirty = true;
     return true;
   }
