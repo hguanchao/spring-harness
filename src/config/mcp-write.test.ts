@@ -117,7 +117,7 @@ describe('upsertSphMcpServer', () => {
 
 describe('removeSphMcpServer', () => {
   it('删掉整个块并吸收空行，不留双空行', () => {
-    const f = fixture(EXISTING + '\n[[mcp_servers]]\nname = "gone"\ncommand = "x"\n');
+    const f = fixture(`${EXISTING}\n[[mcp_servers]]\nname = "gone"\ncommand = "x"\n`);
     try {
       assert.equal(removeSphMcpServer(f.path, 'gone'), true);
       const servers = toml(f.path).mcp_servers as Array<Record<string, unknown>>;

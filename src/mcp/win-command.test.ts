@@ -153,7 +153,7 @@ describe('经 cmd.exe 启动 .cmd 启动器跑通 MCP 握手', { skip: process.p
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      assert.fail('20s 内没有连上：' + JSON.stringify(hub.listServers().map((s) => s.problem ?? s.target)));
+      assert.fail(`20s 内没有连上：${JSON.stringify(hub.listServers().map((s) => s.problem ?? s.target))}`);
     } finally {
       hub.dispose();
       rmSync(dir, { recursive: true, force: true });

@@ -557,7 +557,7 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 		for (let row = firstRow; row < lastRow; row++) {
 			const sourceLine = box.lines[offset + row - box.rect.y];
 			if (sourceLine === undefined) continue;
-			let line = sourceLine.replace(OSC133_ZONE_PREFIX, "");
+			const line = sourceLine.replace(OSC133_ZONE_PREFIX, "");
 			// Fast path: a full-width box painting onto an untouched row can use the
 			// source line reference directly. Compositing here would rebuild the row
 			// string through ANSI/grapheme segmentation every frame; padding is

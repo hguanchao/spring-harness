@@ -30,7 +30,7 @@ describe('sanitizeSessionTitle', () => {
   });
 
   it('超长截断到上限并去尾空格', () => {
-    const title = sanitizeSessionTitle('x'.repeat(60) + '   tail');
+    const title = sanitizeSessionTitle(`${'x'.repeat(60)}   tail`);
     assert.equal([...title].length, SESSION_TITLE_MAX_CHARS);
     assert.ok(!title.endsWith(' '));
   });

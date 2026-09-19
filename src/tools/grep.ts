@@ -102,7 +102,7 @@ export const grepTool: ToolSpec = {
     if (startStat.isFile()) files.push(start);
     else walk(start, files);
     const hits: string[] = [];
-    outer: for (const file of files) {
+    for (const file of files) {
       if (!looksTextual(file)) continue;
       let text: string;
       try {
@@ -119,7 +119,7 @@ export const grepTool: ToolSpec = {
         }
         return true;
       });
-      if (hits.length >= HIT_LIMIT) break outer;
+      if (hits.length >= HIT_LIMIT) break;
     }
     if (hits.length === 0) return { ok: true, content: 'no matches' };
     return { ok: true, content: clip(hits.join('\n')) };

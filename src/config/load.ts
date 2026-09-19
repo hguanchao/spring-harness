@@ -112,59 +112,6 @@ export interface SphConfig {
   mcpPreferences: McpPreferences;
 }
 
-export const CONFIG_EXAMPLE = `# 端点与模型声明在 ~/.sph/models.json（providers 表），这里只选择与行为。
-provider = "my-gateway"        # models.json 里的 provider 名
-model = "example-model"
-context_window = 256000        # 模型未声明 contextWindow 时的兜底
-# max_tokens = 8192            # 模型未声明 maxTokens 时的兜底（正整数）
-sandbox = "workspace"
-# reasoning_effort = "medium"  # off | low | medium | high | xhigh | max
-# approval = "ask"             # ask | auto | yolo（/permission 的选择会写回这里）
-# subagent_approval = "inherit" # inherit | strict；strict 让子代理一律 fail-closed，不弹窗
-# compact_model = ""           # 压缩摘要用的便宜模型；留空用主模型
-# review_model = ""            # auto 审批审查器用的模型；留空用主模型
-# [aux]                        # 辅助调用走另一个 provider；整段省略则与主端点同源
-# provider = "cheap"
-# spill_threshold = 8192       # 工具结果超过该字符数就落盘，0 关闭
-# subagent_max_depth = 1       # 子代理嵌套深度预算；0 禁止派生，默认 1（扁平，子代理不再派生）
-# prompt_cache = true          # Anthropic 打 prompt-cache 断点，默认开；端点不认时自动降级
-# max_session_tokens = 0       # 会话累计 token 预算（含子代理/压缩调用）；0 = 不限制
-# max_retries = 10             # 上游失败重试次数（不含首次）；0 = 失败即停
-# proxy = "http://127.0.0.1:7890"  # 出站代理；显式 "" = 强制直连，缺省回退 HTTP(S)_PROXY 环境变量
-# trusted = [                  # 已信任的工作区根（TUI 确认后自动写入）
-#   "E:\\\\Projects\\\\demo",
-# ]
-# [permissions]                # 针对具体动作的长期规则，比 approval 模式更具体
-# allow = ["bash:npm test"]    # 条目为 <tool> 或 <tool>:<pattern>；* 任意长、? 单字符
-# ask = ["bash:git push*"]     # 命中即强制问人（headless 下等于拒绝）
-# deny = ["bash:rm -rf*"]      # 硬边界：deny 连 yolo 也绕不过去
-# [grants]                     # 已批准的授权（审批弹窗「总是允许」写回这里），按作用域根分键
-# "E:\\\\Projects\\\\demo" = ["bash npm test"]
-# [http_headers]               # 已移到 models.json 的 provider.headers
-# [compat]                     # 已移到 models.json 的 provider/模型级 compat
-# [[mcp_servers]]
-# name = "demo"
-# command = "npx"
-# args = ["-y", "demo-mcp"]
-# [mcp]                        # MCP 本地启停偏好；外部来源（Claude/Codex/.mcp.json）只读，
-#                               # 开关记在这里，不改那些文件
-# disabled_servers = ["demo"]   # 本地关掉；对任何来源都生效
-# enabled_servers = []          # 本地打开某个来源自己声明关掉的 server
-#                               # 其余来源按优先级读取：Claude > Codex > .mcp.json
-
-# models.json 的最小示例（与 config.toml 分开存放）：
-# {
-#   "providers": {
-#     "my-gateway": {
-#       "baseUrl": "https://api.example.com/v1",
-#       "api": "chat-completions",
-#       "apiKey": "$MY_API_KEY",
-#       "models": [{ "id": "example-model", "contextWindow": 256000 }]
-#     }
-#   }
-# }
-`;
-
 export function parseSandboxMode(value: string | undefined): SandboxMode {
   if (value === undefined || value === '') return 'workspace';
   if (value === 'off' || value === 'workspace' || value === 'read-only') return value;

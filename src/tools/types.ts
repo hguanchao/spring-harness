@@ -117,7 +117,7 @@ export async function guardReadOnlyWrite(
   return undefined;
 }
 
-export const OUTPUT_LIMIT = 32 * 1024;
+const OUTPUT_LIMIT = 32 * 1024;
 
 /**
  * 单轮内并行前台 subagent 上限：fan-out 调研的常见 sweet spot，超出排队而非拒绝。

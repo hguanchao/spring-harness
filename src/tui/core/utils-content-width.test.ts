@@ -4,7 +4,7 @@ import { contentVisibleWidth, visibleWidth } from './utils.js';
 
 describe('contentVisibleWidth', () => {
   it('行尾铺满的空格不计入内容宽度', () => {
-    const padded = 'Effort set to xhigh' + ' '.repeat(40);
+    const padded = `Effort set to xhigh${' '.repeat(40)}`;
     assert.equal(visibleWidth(padded), 'Effort set to xhigh'.length + 40);
     assert.equal(contentVisibleWidth(padded), 'Effort set to xhigh'.length);
   });

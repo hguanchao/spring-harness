@@ -274,7 +274,7 @@ describe('思考正文统一中性灰', () => {
     assert.ok(content.length >= 3, '应有标题/列表/序号内容行');
     for (const line of content) {
       const colors = [...new Set(colorsOf(line))];
-      assert.deepEqual(colors, [gray], '思考内容行应只有中性灰，实际: ' + colors.join(',') + ' — ' + line.replace(STRIP, ''));
+      assert.deepEqual(colors, [gray], `思考内容行应只有中性灰，实际: ${colors.join(',')} — ${line.replace(STRIP, '')}`);
     }
   });
 });

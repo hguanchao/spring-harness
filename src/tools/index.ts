@@ -50,7 +50,7 @@ export const tools: ToolSpec[] = [
   tagged(webFetchTool, { concurrencySafe: true, explore: true }),
 ];
 
-export function createDefaultToolRegistry(): ToolRegistry {
+function createDefaultToolRegistry(): ToolRegistry {
   return new ToolRegistry(tools);
 }
 

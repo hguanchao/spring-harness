@@ -5,7 +5,7 @@ import { sanitizeIdent } from '../util.js';
 import { canonicalize } from '../workspace/boundary.js';
 
 /** 按规范工作区路径编码，避免盘符和斜杠进目录名。 */
-export function encodeWorkspaceKey(workspaceRoot: string): string {
+function encodeWorkspaceKey(workspaceRoot: string): string {
   const canonical = canonicalize(workspaceRoot);
   const digest = createHash('sha256').update(canonical.toLowerCase()).digest('hex').slice(0, 16);
   const leaf = canonical.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) ?? 'ws';

@@ -66,7 +66,7 @@ export interface FoldedSessionState {
   tokensUsed: number;
 }
 
-export function emptySessionState(): FoldedSessionState {
+function emptySessionState(): FoldedSessionState {
   return {
     todos: [],
     failures: [],

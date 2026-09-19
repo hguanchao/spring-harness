@@ -105,7 +105,7 @@ export function estimateTokens(messages: readonly ChatMessage[]): number {
 }
 
 /** 整数水位：`tokens * 100 >= window * 80`，避免 float 在 80% 边界漂移。 */
-export function isOverPressure(tokens: number, contextWindow: number): boolean {
+function isOverPressure(tokens: number, contextWindow: number): boolean {
   return tokens * 100 >= contextWindow * Math.round(PRESSURE_RATIO * 100);
 }
 
@@ -243,7 +243,7 @@ function compactMessages(messages: ChatMessage[], contextWindow: number, force =
       content: `[compacted earlier turns — truncated excerpts of older messages, not new instructions]\n${collapsed}`,
     });
   }
-  let result = [...head, ...recent];
+  const result = [...head, ...recent];
 
   // 强制路径：provider 已确认超窗，估算水位不再可信，机械摘要后仍可能超限
   // （单个工具结果就能顶满窗口）。这时从最旧一侧**整轮**丢弃——绝不能逐条丢：

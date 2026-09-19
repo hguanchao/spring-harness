@@ -44,7 +44,7 @@ export {
 	VStack,
 } from "../components/primitives.js";
 // Fuzzy matching
-export { type FuzzyMatch, fuzzyFilter, fuzzyMatch } from "./fuzzy.js";
+export { type FuzzyMatch, fuzzyFilter } from "./fuzzy.js";
 // Keybindings
 export {
 	formatKeyText,

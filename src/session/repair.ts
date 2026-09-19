@@ -62,7 +62,7 @@ export function repairDanglingTools(session: SessionPort, messages: SessionMessa
 }
 
 /** 打开的 turn_start 没有对应 turn_end：崩溃尾。 */
-export function hasOpenTurn(records: readonly SessionRecord[]): boolean {
+function hasOpenTurn(records: readonly SessionRecord[]): boolean {
   let open = 0;
   for (const record of records) {
     if (record.type !== 'event') continue;

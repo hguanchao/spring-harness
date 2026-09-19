@@ -14,7 +14,7 @@
  * 算法取自 cross-spawn（npm 生态用同一套规则实测多年），不自创。
  */
 
-import { statSync } from 'node:fs';
+import { statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 
 /** 批处理扩展名：CreateProcess 无法直接执行，必须经 cmd.exe。 */
@@ -46,7 +46,7 @@ function fileExtension(path: string): string {
 }
 
 function tryFile(path: string): ResolvedCommand | undefined {
-  let stat;
+  let stat: Stats;
   try {
     stat = statSync(path);
   } catch {

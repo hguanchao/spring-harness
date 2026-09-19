@@ -4,7 +4,7 @@
  * 只返回文件、不含目录；VCS 元数据目录不进。vendor 目录（node_modules / dist）
  * 也跳过——个人 harness 里扫进去几乎总是噪音。
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { assertInsideWorkspace, toWorkspaceRelative } from '../workspace/boundary.js';
 import { asString, clip, type ToolContext, type ToolResult, type ToolSpec } from './types.js';
@@ -58,7 +58,7 @@ interface Hit {
 
 function walk(dir: string, root: string, hits: Hit[], pattern: string, depth: number): void {
   if (depth > MAX_DEPTH) return;
-  let entries;
+  let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
   } catch {

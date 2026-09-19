@@ -40,7 +40,7 @@ import {
   TOOL_GROUP_INDENT,
   TOOL_MARK,
   TOOL_MEMBER_INDENT,
-  ToolExecutionComponent,
+  type ToolExecutionComponent,
 } from './tool-execution.js';
 
 /** 扫光心跳周期：与状态行 Loader / 子代理行的转圈帧同拍（80ms）。 */

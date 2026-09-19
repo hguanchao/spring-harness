@@ -17,7 +17,7 @@ export type KeyboardProtocolNegotiationSequence =
 	| { type: "kitty-flags"; flags: number }
 	| { type: "device-attributes" };
 
-export function parseKeyboardProtocolNegotiationSequence(
+function parseKeyboardProtocolNegotiationSequence(
 	sequence: string,
 ): KeyboardProtocolNegotiationSequence | undefined {
 	const kittyFlags = sequence.match(/^\x1b\[\?(\d+)u$/);
@@ -34,7 +34,7 @@ function isKeyboardProtocolNegotiationSequencePrefix(sequence: string): boolean 
 	return sequence === "\x1b[" || /^\x1b\[\?[\d;]*$/.test(sequence);
 }
 
-export function isAppleTerminalSession(): boolean {
+function isAppleTerminalSession(): boolean {
 	return process.platform === "darwin" && process.env.TERM_PROGRAM === "Apple_Terminal";
 }
 
@@ -43,7 +43,7 @@ export function isAppleTerminalSession(): boolean {
  * Best-effort: some environments (restricted seccomp or LSM policies) return EACCES
  * for `kill(2)`; in that case the dimensions refresh is skipped rather than crashing.
  */
-export function refreshTerminalDimensions(): void {
+function refreshTerminalDimensions(): void {
 	if (process.platform === "win32" || process.pid <= 0) return;
 	try {
 		process.kill(process.pid, "SIGWINCH");
@@ -52,7 +52,7 @@ export function refreshTerminalDimensions(): void {
 	}
 }
 
-export function normalizeNativeShiftEnterInput(
+function normalizeNativeShiftEnterInput(
 	data: string,
 	shouldDetectNativeShiftEnter: boolean,
 	isShiftPressed: boolean,
@@ -116,7 +116,7 @@ const DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100;
  * dispatching a lone ESC as the Escape key. Legacy Alt+key input is ESC plus
  * another byte, so high-latency transports need a longer reassembly window.
  */
-export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
 	const configured = Number(env.PI_TUI_ESC_TIMEOUT);
 	if (Number.isFinite(configured) && configured > 0) {
 		return configured;

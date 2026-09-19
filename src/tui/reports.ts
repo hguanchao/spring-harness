@@ -67,7 +67,9 @@ export function renderSkillsReport(input: {
   }
 
   lines.push('', '### Loaded from', '', 'Later roots override earlier ones when two skills share a name.', '');
-  roots.forEach((root, index) => lines.push(`${index + 1}. ${code(root)}`));
+  roots.forEach((root, index) => {
+    lines.push(`${index + 1}. ${code(root)}`);
+  });
 
   lines.push(...warningsSection(warnings, 'Warnings'));
   return lines.join('\n');

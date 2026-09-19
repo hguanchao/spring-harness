@@ -20,8 +20,8 @@ export function getWordSegmenter(): Intl.Segmenter {
 
 /** OSC 133 语义区标记（供终端/复用器识别「用户输入 / 助手输出」区块边界）。 */
 export const OSC133_ZONE_START = "\x1b]133;A\x07";
-export const OSC133_ZONE_END = "\x1b]133;B\x07";
-export const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+const OSC133_ZONE_END = "\x1b]133;B\x07";
+const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 /** 行首可能叠了多个 OSC 133 区标；布局/替代屏幕绘制前剥掉，避免占宽。 */
 export const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 

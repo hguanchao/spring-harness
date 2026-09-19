@@ -3,7 +3,7 @@
  * 自管视口上的软件选中，不是终端原生选区。
  */
 
-import { type LayoutBox, type LayoutFrame } from '../core/layout.js';
+import type { LayoutBox, LayoutFrame } from '../core/layout.js';
 import { compositeTuiLine, type Component, type TuiMouseEvent, type TuiMouseEventResult } from '../core/tui.js';
 import { theme } from '../theme/theme.js';
 

@@ -31,7 +31,6 @@ function readFirst(paths: string[], source: MemoryFile['source']): MemoryFile | 
       if (!raw.trim()) continue;
       return { source, path, text: raw.slice(0, FILE_LIMIT) };
     } catch {
-      continue;
     }
   }
   return undefined;
@@ -121,7 +120,6 @@ export class TouchMemory {
             this.pending.push({ relPath: toWorkspaceRelative(this.workspaceRoot, candidate), text });
           }
         } catch {
-          continue;
         }
       }
       const parent = dirname(dir);

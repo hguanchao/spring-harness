@@ -5,7 +5,7 @@ export interface TerminalCapabilities {
 }
 
 let cachedCapabilities: TerminalCapabilities | null = null;
-let capabilityOverrides: Partial<TerminalCapabilities> = {};
+const capabilityOverrides: Partial<TerminalCapabilities> = {};
 
 /**
  * Checks whether the attached tmux client forwards OSC 8 hyperlinks to the

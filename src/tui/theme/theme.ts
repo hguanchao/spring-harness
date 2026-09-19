@@ -14,7 +14,7 @@ export type { ThemeColor };
  */
 export type ColorMode = 'truecolor' | '256color' | 'ansi';
 
-let colorEnabled = detectColorEnabled();
+const colorEnabled = detectColorEnabled();
 
 function detectColorEnabled(): boolean {
   if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== '') return false;

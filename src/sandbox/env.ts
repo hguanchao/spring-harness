@@ -7,12 +7,12 @@
  */
 
 /** 名称里带这些词的环境变量一律不传给子进程（大小写不敏感，覆盖 Windows）。 */
-export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i;
+const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i;
 
 const SPH_PREFIX = 'SPH_';
 
 /** 捕获上限：shell 结果进模型前还会再 clip，这里只挡 `yes` 一类把父进程撑爆的输出。 */
-export const MAX_SPAWN_CAPTURE = 2 * 1024 * 1024;
+const MAX_SPAWN_CAPTURE = 2 * 1024 * 1024;
 
 export function scrubbedParentEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const env: Record<string, string> = {};

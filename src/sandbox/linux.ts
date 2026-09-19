@@ -34,7 +34,7 @@ export function linuxBwrapArgs(
   ];
 }
 
-export function resolveBwrap(): string {
+function resolveBwrap(): string {
   for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap']) {
     if (existsSync(candidate)) return candidate;
   }

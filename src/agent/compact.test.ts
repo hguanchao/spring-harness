@@ -153,7 +153,8 @@ describe('压缩请求复用对话前缀', () => {
     const last = captured[0]?.messages.at(-1);
     assert.equal(last?.role, 'user');
     assert.match(String(last?.content), /compaction engine/);
-    assert.equal((captured[0]?.tools as { function?: { name?: string } }[])[0]?.function?.name, 'read');
+    const tools = captured[0]?.tools as { function?: { name?: string } }[] | undefined;
+    assert.equal(tools?.[0]?.function?.name, 'read');
   });
 });
 

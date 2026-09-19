@@ -36,7 +36,7 @@ function shellName(): string {
 }
 
 /** 本地日历日 + IANA 时区。模型没有墙钟，不写就会用训练截止日当「今天」。 */
-export function localDateLine(now = new Date()): string {
+function localDateLine(now = new Date()): string {
   const locale = Intl.DateTimeFormat().resolvedOptions();
   const date = new Intl.DateTimeFormat('en-CA', {
     timeZone: locale.timeZone,
@@ -242,7 +242,7 @@ Your text is rendered as GitHub-flavored markdown. Use it when it helps: bullets
 }
 
 /** 状态消息的固定开头；TUI 回放据此跳过（快照不该出现在聊天流里）。 */
-export const SESSION_STATE_PREFIX = '[session state — ';
+const SESSION_STATE_PREFIX = '[session state — ';
 
 /** 判断一条 user 消息是否为跨轮次状态快照（sessionStateMessage 的产物）。 */
 export function isSessionStateMessage(content: string): boolean {

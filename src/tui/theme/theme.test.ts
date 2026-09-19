@@ -183,7 +183,7 @@ describe('标题与列表强调色', () => {
     const md = getMarkdownTheme();
     for (const depth of [1, 2, 3, 4, 5, 6] as const) {
       const colors = colorsOf(md.heading('标题', depth));
-      assert.ok(colors.includes(primary), 'h' + depth + ' 应含品牌紫，实际: ' + colors.join(','));
+      assert.ok(colors.includes(primary), `h${depth} 应含品牌紫，实际: ${colors.join(',')}`);
     }
   });
 

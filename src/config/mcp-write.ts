@@ -25,7 +25,7 @@ export interface SphMcpEntry {
 }
 
 /** 一个单行字符串值的渲染，供写回用。 */
-export function tomlString(value: string): string {
+function tomlString(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 

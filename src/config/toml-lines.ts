@@ -63,7 +63,7 @@ export function bracketDelta(code: string): number {
   return delta;
 }
 
-export function parseHeader(code: string): TomlHeader | undefined {
+function parseHeader(code: string): TomlHeader | undefined {
   const trimmed = code.trim();
   if (!trimmed.startsWith('[')) return undefined;
   const array = trimmed.startsWith('[[');

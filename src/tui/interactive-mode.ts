@@ -10,20 +10,29 @@
  *
  * 与参考实现的差异来自运行时的不同：sph 的 agent 核心是 runTurn + AgentListener，
  * 因此这里的事件投影、会话回放与命令集都按 sph 的语义实现，交互形态保持一致。
+ *
+ * 本文件只保留「装配 + 轮次调度 + 事件分派」这条主干；按职责拆出的协作模块：
+ *   - commands.ts          —— 斜杠命令注册表（/help、面板、补全的单一数据源）
+ *   - steer-bar.ts         —— 挂起条（运行中输入队列的渲染与鼠标交互）
+ *   - transcript.ts        —— 事件 → 转录的投影（助手块/思考链/工具组/子代理 dock）
+ *   - session-replay.ts    —— 会话记录 → 界面的回放
+ *   - mcp-commands.ts      —— /mcps 命令域
+ *   - session-commands.ts  —— /history /new /resume /export 命令域
+ *   - settings-commands.ts —— /model /provider /effort /permission 命令域
+ * 协作模块经窄接口（各 *Host）回调宿主，宿主的会话/模型/审批状态不外泄。
  */
 
 import { basename, join } from 'node:path';
-import type { AgentListener, SubagentEvent } from '../agent/events.js';
+import type { AgentListener } from '../agent/events.js';
 import { loadCompaction, projectContext } from '../agent/compact.js';
 import { loadUserTheme } from './theme/theme.js';
 import { sphModelsPath, sphThemePath } from '../home.js';
-import { visibleWidth } from './core/utils.js';
 
-import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
 import { createSteeringInbox, STEERING_QUEUE_LIMIT, type SteeringInbox } from '../runtime/jobs.js';
-import { runTurn, type AgentDriver } from '../agent/loop.js';
+import { jobNotificationText } from '../runtime/jobs.js';
+import { runTurn } from '../agent/loop.js';
 import { TouchMemory } from '../agent/memory.js';
-import { buildSystemPrompt, isSessionStateMessage } from '../agent/prompt.js';
+import { buildSystemPrompt } from '../agent/prompt.js';
 import {
   AUTO_RECAP_RETRY_MS,
   RECAP_IDLE_MS,
@@ -36,49 +45,24 @@ import {
 } from '../agent/recap.js';
 import { scanSkills, skillRoots } from '../skills/scan.js';
 import { createLlmClassifier } from '../permission/auto.js';
-import { APPROVAL_MODES, HeadlessApprover, type ApprovalMode, type ApprovalRequest, type Approver, type PermissionRules, type SubagentApprovalPolicy } from '../permission/policy.js';
+import { HeadlessApprover, type ApprovalMode, type ApprovalRequest, type Approver } from '../permission/policy.js';
 import { createGrantStore } from '../permission/store.js';
 import { updateConfigFile } from '../config/save.js';
-import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
-import { API_PROTOCOLS, type ApiProtocol } from '../config/load.js';
-import { appendModelDeclaration, splitProviderModel, upsertModelApi, type ProviderDeclaration, type ResolvedModel } from '../config/registry.js';
-import {
-  REASONING_EFFORTS,
-  type LlmClient,
-  type ReasoningEffort,
-  type TokenUsage,
-} from '../llm/openai.js';
-import { displayNameForModel, listAvailableModels } from '../llm/models.js';
-import type { McpHub, McpReloadResult } from '../mcp/hub.js';
-import type { McpPreferences, McpSourceReport } from '../mcp/sources.js';
-import type { JobBoard } from '../runtime/jobs.js';
-import { jobNotificationText } from '../runtime/jobs.js';
-import type { WorktreeStore } from '../runtime/worktrees.js';
+import { upsertModelApi, type ProviderDeclaration } from '../config/registry.js';
+import type { ApiProtocol } from '../config/load.js';
+import type { LlmClient, ReasoningEffort, TokenUsage } from '../llm/openai.js';
 import { SpillStore } from '../runtime/spill.js';
-import type { TodoList } from '../runtime/todos.js';
-import type { SandboxHandle } from '../sandbox/types.js';
+import { sessionEventData, type SessionFailure } from '../session/fold.js';
 import {
-  foldSessionState,
-  sessionEventData,
-  type SessionFailure,
-} from '../session/fold.js';
-import { messagesOf } from '../session/query.js';
-import {
-  createSession,
   jsonlSessionFactory,
   JsonlSession,
-  listSessions,
   setCurrentSession,
 } from '../session/store.js';
-import type { SessionFactory } from '../session/types.js';
-import { defaultTools, type ToolRegistry } from '../tools/index.js';
-import { closeInterruptedTurn } from '../session/repair.js';
-import type { SessionMessage, SessionRecord } from '../session/types.js';
+import { defaultTools } from '../tools/index.js';
 import {
   BLOCK_GAP,
   CombinedAutocompleteProvider,
   Container,
-  type Component,
   isKeyRelease,
   isViewportTUI,
   type SelectItem,
@@ -88,223 +72,42 @@ import {
   type TUI,
   TuiAltScreen,
   ProcessTerminal,
-  type Terminal,
-  type TuiMouseEvent,
-  type TuiMouseEventResult,
   VStack,
   ScrollView,
   formatKeyText,
 } from './core/index.js';
 import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
-import { showConfirmDialog, showInputDialog, showLoadingDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
-import { mcpStateLabel, renderMcpReport, renderMcpTools, renderSkillsReport } from './reports.js';
+import { showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
+import { renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
-import { AssistantMessageComponent } from './components/assistant-message.js';
+import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from './components/interaction.js';
+import { clearHoverHighlight } from './components/hover-highlight.js';
+import { toolDisplayName, summarizeArgs } from './components/tool-execution.js';
 import { CustomEditor } from './components/custom-editor.js';
 import { FooterComponent, type FooterData } from './components/footer.js';
 import { HeaderComponent } from './components/header.js';
-import {
-  DynamicBorder,
-  IdleStatus,
-  WorkingLabel,
-  WorkingStatusIndicator,
-  formatWorkingWarning,
-  keyHint,
-  workingWarningKey,
-} from './components/interaction.js';
-import { handleSelectablePress } from './components/selectable-row.js';
-import { clearHoverHighlight } from './components/hover-highlight.js';
-import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, summarizeArgs, toolDisplayName } from './components/tool-execution.js';
-import { SubagentTaskComponent } from './components/subagent-task.js';
-import { ToolGroupComponent } from './components/tool-group.js';
 import { UserMessageComponent } from './components/user-message.js';
 import { userMessageBubbleY } from './components/sticky-user-message.js';
 import { RecapMessageComponent } from './components/recap.js';
 import { generateSessionTitle, TITLE_SOURCE_SAMPLE_CHARS } from './session-title.js';
 import { getEditorTheme, getMarkdownTheme, theme } from './theme/theme.js';
-import { errorMessage, flattenWhitespace, formatDuration } from '../util.js';
+import { errorMessage, flattenWhitespace } from '../util.js';
 import { readVersion } from '../version.js';
+import { COMMANDS, COMMAND_ALIASES, COMMAND_NAMES, primaryColumnWidthFor } from './commands.js';
+import { SteerBar, type SteerBarHost } from './steer-bar.js';
+import { TranscriptProjection, type TranscriptHost } from './transcript.js';
+import { restoreSessionInto, type ReplayHost } from './session-replay.js';
+import { commandMcps } from './mcp-commands.js';
+import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from './session-commands.js';
+import { commandModel, commandProvider, commandEffort, commandPermission, cycleApprovalMode, type SettingsCommandHost } from './settings-commands.js';
+import type { TuiDeps } from './deps.js';
 
-export interface TuiDeps {
-  workspaceRoot: string;
-  sessionDir: string;
-  /** config.toml 路径：/model、/effort、/permission 的选择写回这里，下次启动仍生效。 */
-  configPath: string;
-  /** 欢迎态底部右对齐的登录状态文案（API key / 免鉴权头）。 */
-  authLabel: string;
-  /** config.toml 里生效的 provider 名（models.json 的声明之一）。 */
-  providerName: string;
-  /** models.json 的 provider 声明；/model 列表从这里来（不再拉上游）。 */
-  models(): readonly ProviderDeclaration[];
-  /** 按模型 id（可指定 provider）解析生效协议与容量声明。 */
-  resolveModel(model: string, provider?: string): ResolvedModel;
-  contextWindow: number;
-  maxTokens?: number;
-  sandbox: SandboxHandle;
-  session: JsonlSession;
-  mcp: McpHub;
-  /**
-   * 重新发现并装载 MCP server（`/mcps` 里按 r、改完启停、或导入之后调用）。
-   *
-   * 必需：启动时的首次装载与这里的刷新走的是同一条装配路径，缺了它就只能重启——
-   * 而「改完配置要重启」正是这轮要消掉的那件事。
-   */
-  reloadMcp(): Promise<McpReloadResult>;
-  /** 重新读 `[mcp]` 偏好段；写回 config.toml 之后调用。 */
-  refreshMcpPreferences(): void;
-  /** 生效中的 MCP 启停偏好，供弹窗显示当前状态。 */
-  mcpPreferences: McpPreferences;
-  /** 最近一次发现的候选来源读取结果。 */
-  mcpSources(): readonly McpSourceReport[];
-  todos: TodoList;
-  jobs: JobBoard;
-  approvalMode: ApprovalMode;
-  /** `[permissions]` 规则；省略即无规则。 */
-  permissionRules?: PermissionRules;
-  /** 子代理审批策略；省略按 inherit。 */
-  subagentApproval?: SubagentApprovalPolicy;
-  model: string;
-  effort?: ReasoningEffort;
-  /** /model 与 /effort 改动后按新参数重建 client；api 省略时由 provider 声明按模型解析。 */
-  makeClient(options: { model: string; provider?: string; api?: ApiProtocol; effort?: ReasoningEffort; maxTokens?: number }): LlmClient;
-  /**
-   * 辅助调用（压缩摘要 / auto 审查器）的 client；模型名省略时返回 undefined。
-   *
-   * 必需而非可选：此前这条线没接上，配置了 `compact_model` / `review_model` 也一直用主模型，
-   * 是个静默失效的省钱开关。做成必需，调用方漏接就编译不过。
-   */
-  makeAuxClient(model: string | undefined): LlmClient | undefined;
-  /** CLI 显式给了 --model：启动时不被会话里记录的模型覆盖。 */
-  modelPinned?: boolean;
-  /** 压缩摘要 / auto 审批审查器专用模型；省略都回退主模型。 */
-  compactModel?: string;
-  reviewModel?: string;
-  /** spill 落盘根目录。 */
-  spillRoot?: string;
-  spillThreshold?: number;
-  /** 子代理嵌套深度预算（config.subagent_max_depth）；省略用内置默认 1（扁平）。 */
-  maxSubagentDepth?: number;
-  /** 会话累计 token 预算（config.max_session_tokens）；省略或 0 = 不限制。 */
-  maxSessionTokens?: number;
-  /** 子代理 worktree 隔离的工作树仓库（isolation: worktree 用）。 */
-  worktrees?: WorktreeStore;
-  /** 把会话锁换到另一个 id；失败时抛错，当前会话仍占用。 */
-  claimSession?(id: string): void;
-  /** 可注入工具表 / 会话工厂 / 驱动；省略走产品默认。 */
-  tools?: ToolRegistry;
-  sessions?: SessionFactory;
-  driver?: AgentDriver;
-  /** 注入终端实现；省略用 ProcessTerminal（测试用假终端驱动整条链路）。 */
-  terminal?: Terminal;
-  /**
-   * 已经 start 过的 TUI。信任页会先占用同一块替代屏幕，主界面接手后不得再 start。
-   * 省略则本模块自己创建并 start。
-   */
-  ui?: TUI;
-  /** MCP 启动警告；在 TUI 里用通知展示，避免写 stderr 打穿替代屏幕。 */
-  mcpWarnings?: readonly string[];
-}
-
-interface CommandItem {
-  id: string;
-  label: string;
-  hint: string;
-}
-
-const COMMANDS: readonly CommandItem[] = [
-  { id: 'help', label: '/help', hint: 'List commands and key bindings' },
-  { id: 'history', label: '/history', hint: 'Search and reuse prompt history' },
-  { id: 'new', label: '/new', hint: 'Start a new session' },
-  { id: 'resume', label: '/resume', hint: 'Resume a previous session, or switch by id' },
-  { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises' },
-  { id: 'mcps', label: '/mcps', hint: 'Manage MCP servers: status, enable/disable, add, remove, reload' },
-  { id: 'plan', label: '/plan', hint: 'Enter plan mode, or /plan off to leave' },
-  { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
-  { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions' },
-  { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
-  { id: 'provider', label: '/provider', hint: 'Switch provider, then model, reasoning effort, and API protocol' },
-  { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
-  { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo' },
-  { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
-];
-
-/**
- * 别名 → 正名。正名进菜单（`/help`、Ctrl+P 命令面板），别名只保证还能敲。
- *
- * 这条分工照抄 grok-build：那边的 `/resume` 是会话选择器的正名，`/sessions` 留作
- * 老习惯的重定向。sph 早先只有 `/sessions`，名字留下是因为肌肉记忆和已经写进会话
- * 记录的文本里都是它；新名字与 CLI 的 `sph --resume` 对齐。
- */
-const COMMAND_ALIASES: Readonly<Record<string, string>> = { sessions: 'resume' };
-
-/** 选择列表里 server 条目的 value 前缀，避免和上方的固定动作条目撞名。 */
-const SERVER_PREFIX = 'server:';
-
-const COMMAND_NAMES = new Set<string>([
-  ...COMMANDS.map((command) => command.id),
-  ...Object.keys(COMMAND_ALIASES),
-]);
+// 对外类型面保持在原路径：tui/index.ts 与外部调用方仍从本模块取 TuiDeps。
+export type { TuiDeps } from './deps.js';
 
 function message(error: unknown): string {
   return errorMessage(error);
-}
-
-/** 输入框上方子代理栏最多显示几行，多出来的折成 `… N more`。 */
-const MAX_DOCK_SUBAGENT_ROWS = 5;
-/** 挂起条行右缘预留（4 列 = 1 列滚动条 + 空两格，与状态行 Loader 同款，右缘同列）。 */
-const STEER_RIGHT_PAD = 4;
-/** 挂起条首行上方的空行间距；鼠标 y 换算行下标时要扣掉它。 */
-const STEER_TOP_GAP = 1;
-/**
- * 挂起条动作按钮链（从右往左紧贴无缝，宽不够整颗放弃）。纯鼠标操作，无键盘快捷键，
- * 避免与 TUI 既有按键冲突；[↑]/[↓] 只在该行可移动时渲染。
- */
-const STEER_BUTTONS: Array<{ action: SteerAction; label: string }> = [
-  { action: 'cancel', label: '[cancel]' },
-  { action: 'edit', label: '[edit]' },
-  { action: 'send', label: '[Send now]' },
-  { action: 'down', label: '[↓]' },
-  { action: 'up', label: '[↑]' },
-];
-
-type SteerAction = 'cancel' | 'edit' | 'send' | 'down' | 'up';
-/** `/provider` 拉上游目录的超时。刻意短：不少中转站根本没有 /models 目录端点（返回 502 或干脆挂住），走代理时 CONNECT 隧道也会拖很久。目录只是发现手段，降级路径（已声明 + 手动输入）才是兜底。 */
-const PROVIDER_FETCH_TIMEOUT_MS = 10_000;
-
-/**
- * 斜杠命令弹窗的主列（label 列）宽度：最宽 label + 2 列间隙，下限 8。
- *
- * SelectList 默认 32 列是给「命令表 + 长提示」这类排版用的；对 label 很短的菜单
- * （ask / yolo / effort 档位）会让 description 拖出一大段空白。统一自适应后各弹窗
- * 的列都贴内容，视觉一致。
- */
-function primaryColumnWidthFor(items: readonly SelectItem[]): number {
-  const widest = items.reduce((max, item) => Math.max(max, visibleWidth(item.label)), 0);
-  return Math.max(widest, 8) + 2;
-}
-
-/**
- * 子代理内部事件 → 行内活动段文案，与底部状态行共用同一套词（WorkingLabel）。
- *
- * 返回 undefined 表示这个事件不改变活动段（`tool_end` / `status` / `thinking_start` 不改）。
- * thinking_start 每轮都会发，但很多端点不吐 reasoning，不能一开就切到 Thinking…。
- */
-function subagentActivity(event: SubagentEvent): string | undefined {
-  switch (event.type) {
-    case 'thinking_delta':
-      return WorkingLabel.thinking;
-    case 'thinking_end':
-      return WorkingLabel.working;
-    case 'text':
-      return WorkingLabel.responding;
-    case 'tool_start':
-      return WorkingLabel.running(toolDisplayName(event.name), summarizeArgs(event.name, event.args));
-    case 'error':
-      return flattenWhitespace(event.text).slice(0, 80);
-    default:
-      return undefined;
-  }
 }
 
 /** 交互模式入口。 */
@@ -314,19 +117,19 @@ export async function runTui(deps: TuiDeps): Promise<void> {
   await mode.run();
 }
 
-class InteractiveMode implements ApprovalUi {
-  private readonly deps: TuiDeps;
-  private readonly ui: TUI;
-  private readonly editor: CustomEditor;
+class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, ReplayHost, SessionCommandHost, SettingsCommandHost {
+  public readonly deps: TuiDeps;
+  public readonly ui: TUI;
+  public readonly editor: CustomEditor;
 
   private readonly headerContainer = new Container();
-  private readonly chatContainer = new VStack();
+  public readonly chatContainer = new VStack();
   private readonly documentContainer = new VStack();
-  private readonly pendingContainer = new Container();
+  public readonly pendingContainer = new Container();
   /** 挂起条专属容器：工作状态行之下、输入框之上——排队的话紧贴着要发送的位置。 */
   private readonly steersContainer = new Container();
-  private readonly subagentContainer = new Container();
-  private readonly subagentHeader = new Text('', 0, 0);
+  public readonly subagentContainer = new Container();
+  public readonly subagentHeader = new Text('', 0, 0);
   private readonly statusContainer = new Container();
   private readonly editorContainer = new Container();
   private readonly footerContainer = new Container();
@@ -335,34 +138,17 @@ class InteractiveMode implements ApprovalUi {
   private readonly footer: FooterComponent;
   private readonly header: HeaderComponent;
 
-  private session: JsonlSession;
+  public session: JsonlSession;
   private client: LlmClient;
   private readonly turnInbox: SteeringInbox = createSteeringInbox();
   /**
-   * 运行中输入的挂起条：每帧从 turnInbox 动态渲染，队列空即零占用。
-   * 渲染进 steersContainer（工作状态行之下、输入框之上）；容器 shrink 弹性，
-   * 行数多时先压它。行内交互（悬停按钮/单击选中）见 onSteersMouse，纯鼠标操作。
+   * 挂起条（steer-bar.ts）：运行中输入队列的渲染与鼠标交互。
+   * 队列空时零占用；行内操作（悬停按钮/单击选中/取回编辑）都收在组件里。
    */
-  private readonly steersBar: Component = {
-    invalidate: () => {},
-    render: (width: number) => this.renderPendingSteers(width),
-    handleMouse: (event) => this.onSteersMouse(event),
-  };
+  private readonly steerBar: SteerBar;
+  /** 事件 → 转录的投影（transcript.ts）：助手块/思考链/工具组/子代理 dock 的状态都归它。 */
+  public readonly projection: TranscriptProjection;
   private followUps: string[] = [];
-  /** 挂起队列的选中项下标：单击行的加粗标识。 */
-  private steerCursor?: number;
-  /** 鼠标悬停的挂起消息下标：该行铺极浅底并亮出动作按钮，移出即隐藏。 */
-  private steerHover?: number;
-  /** 悬停中的动作按钮：按钮文字按动作变色（cancel 红、edit/send 亮）。 */
-  private steerButtonHover?: { row: number; action: SteerAction };
-  /** 本帧渲染出的按钮命中区（组件局部坐标，x 为半开区间 [x0, x1)，y = row + STEER_TOP_GAP）。 */
-  private steerButtons: Array<{ row: number; action: SteerAction; x0: number; x1: number }> = [];
-  /**
-   * 双击编辑占位：既是取回消息的原排序位（提交后插回，而不是排到队尾），也是投递
-   * 冻结标志——非空期间轮末自动发送与立即发送全部让路，其余挂起消息等编辑提交后
-   * 按序消化。
-   */
-  private steerEditIndex?: number;
   private readonly approver: InteractiveApprover;
   /** `subagent_approval = "strict"` 时的子代理审批器；inherit 时 undefined（复用 approver）。 */
   private readonly subagentApprover?: Approver;
@@ -399,25 +185,6 @@ class InteractiveMode implements ApprovalUi {
   private quitResolve?: () => void;
   private lastSigintAt = 0;
   private lastSigintTimer?: NodeJS.Timeout;
-
-  private streamingAssistant?: AssistantMessageComponent;
-  private thinkingId?: string;
-  /**
-   * 承载当前思考链的工具分组。
-   *
-   * 思考期间可能插进正文（`thinking_end` 在正文之后才广播），而正文会断开当前分组，
-   * 所以收尾时不能重新 `ensureToolGroup()`——认住开始时那个组，同一段推理才不会被劈成两半。
-   */
-  private thinkingGroup?: ToolGroupComponent;
-  /** 本段思考链的起点，用来给收尾文案算 `Thought for 1.2s`。 */
-  private thinkingStartedAt?: number;
-  /**
-   * 本轮模型是否已经真正响应（思考/正文/工具）。
-   * 不能用「助手组件是否已创建」代替：`thinking_start` 在请求发出前就会广播。
-   * stream_retry 会丢掉半截画面，但一旦响应过就不能再把原文塞回输入框
-   * （对齐 grok in_flight_prompt 在 first activity 后作废）。
-   */
-  private modelResponded = false;
   /** 本轮可 rewind 的用户原文；后台唤醒注入的通知不能塞回输入框。 */
   private inFlightPrompt?: string;
   /** 取消时把原文放回输入框（等 abort 收尾后再做，避免和 thinking_start 抢）。 */
@@ -427,34 +194,8 @@ class InteractiveMode implements ApprovalUi {
    * 轮次收尾（finally）里以这段合并文本立即开新一轮。仅在 sendQueuedNow 设置。
    */
   private sendAfterInterrupt?: string;
-  private readonly pendingTools = new Map<string, ToolExecutionComponent>();
-  private readonly toolGroups: ToolGroupComponent[] = [];
-  /** 当前正在累积的工具分组；助手正文/通知/轮次结束都会把它断开。 */
-  private activeToolGroup?: ToolGroupComponent;
-  private subagentDepth = 0;
-  /** 本组内 subagent 调用的序号（行首的 `Subagent 1`）；分组断开时归零。 */
-  private subagentOrdinal = 0;
   /** 会话的持久化深度下限（resume 恢复），本轮 runTurn 从这里起步。 */
   private sessionDepth = 0;
-  /**
-   * 子代理 id → 主流程里对应的 Task 工具行 + 转录内实时任务块。
-   *
-   * 子代理的内部活动（工具调用、错误）实时刷进任务块（Claude Code 式），聚合结果在
-   * subagent_end 时写到 Task 行的活动后缀上，随后任务块整块撤除、不在时间线常驻。
-   * 后台任务的工具行在 job id 返回时就已完成，所以这里独立于 pendingTools 持有引用。
-   */
-  private readonly subagentLines = new Map<
-    string,
-    {
-      tool: ToolExecutionComponent;
-      description: string;
-      toolCallId?: string;
-      background: boolean;
-      /** 回放路径不建实时块（内部调用明细不落主会话），只有汇总。 */
-      live?: SubagentTaskComponent;
-    }
-  >();
-
 
   private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
   private contextTokens?: number;
@@ -486,8 +227,6 @@ class InteractiveMode implements ApprovalUi {
     this.maxTokens = deps.maxTokens;
     this.approval = deps.approvalMode;
     this.contextWindow = deps.contextWindow;
-    // 挂起条构造即入容器占位：队列空时零占用，不影响布局。
-    this.steersContainer.addChild(this.steersBar);
 
     this.client = this.buildClient();
     // 辅助 client 必须在这里建好：下面构造审批器时要用 reviewClient，runTurn 时要用 compactClient。
@@ -527,6 +266,11 @@ class InteractiveMode implements ApprovalUi {
     // tab 标题带目录名：多开几个 tab 时能分清哪个会话连的是哪个工作区。
     this.tabProject = basename(deps.workspaceRoot);
 
+    // 挂起条与投影依赖的宿主回调此刻都已就位；挂起条构造即入容器占位，队列空时零占用。
+    this.steerBar = new SteerBar(this.turnInbox, this);
+    this.projection = new TranscriptProjection(this);
+    this.steersContainer.addChild(this.steerBar.component);
+
     this.documentContainer.addChild(this.headerContainer);
     this.documentContainer.addChild(this.chatContainer);
     this.editorContainer.addChild(this.editor);
@@ -565,7 +309,7 @@ class InteractiveMode implements ApprovalUi {
     const draft = this.titleDraft ?? '';
     this.titleDraft = undefined;
     // 首轮请求就失败（断网/403）不算尝试：标题生成不该抢在链路可用性之前烧机会。
-    if (!this.modelResponded) return;
+    if (!this.projection.modelResponded) return;
     this.sessionTitleAttempted = true;
     void generateSessionTitle(this.client, prompt, draft, {
       // 主代理同款工具集：免费档网关按请求形态放行，不带会被当外部 API 滥用拒掉。
@@ -658,14 +402,7 @@ class InteractiveMode implements ApprovalUi {
     // 若光标仍悬在原目标上，同帧的组件分发会重新点亮——监听器先于分发执行，一清一亮。
     this.ui.onMouseMotion = () => {
       let changed = clearHoverHighlight();
-      if (this.steerHover !== undefined) {
-        this.steerHover = undefined;
-        changed = true;
-      }
-      if (this.steerButtonHover !== undefined) {
-        this.steerButtonHover = undefined;
-        changed = true;
-      }
+      if (this.steerBar.clearHover()) changed = true;
       if (changed) this.ui.requestRender();
     };
     this.editor.onAction('app.followUp', () => {
@@ -713,7 +450,7 @@ class InteractiveMode implements ApprovalUi {
         return { consume: true };
       }
       if (matchesAppKey(data, 'app.approval.cycle')) {
-        this.cycleApprovalMode();
+        cycleApprovalMode(this);
         return { consume: true };
       }
       if (matchesAppKey(data, 'app.clear')) {
@@ -726,42 +463,42 @@ class InteractiveMode implements ApprovalUi {
 
   // ------------------------------------------------------------------ 会话回放
 
+  /** 恢复会话：记录回放、输入历史回填（实现在 session-replay.ts，状态落位回宿主）。 */
   private restoreSession(): void {
-    let records = this.session.readAll();
-    if (records.length === 0) return;
-    const messages = messagesOf(records);
-    if (closeInterruptedTurn(this.session, messages) > 0) records = this.session.readAll();
-
-    const view = this.session.readPath();
-    this.replayRecords(view.length > 0 ? view : records);
-    this.restorePromptHistory(messagesOf(records));
-    this.applyEditorBorder();
-    this.pinLatestUserMessage();
-    const messageCount = messagesOf(records).length;
-    if (messageCount > 0) {
-      this.addNotice(`Resumed session ${this.session.id} · ${messageCount} messages`, 'dim');
-    }
+    restoreSessionInto(this);
   }
 
-  /**
-   * 会话发过的用户指令回放进输入历史（grok 的 prompt_history 语义：会话级、最新在前）。
-   * 恢复会话（-c / --resume）后按 ↑ 就能翻出上次发过的指令，改了直接重发。
-   * 过滤：斜杠命令、以 '[' 开头的系统合成消息（[session state] / [steering] / [background
-   * task] 等，非用户原文）、超长上下文倾倒——回放的是「指令」，不是消息存档。
-   */
-  private restorePromptHistory(messages: readonly SessionMessage[]): void {
-    for (const message of messages) {
-      if (message.role !== 'user') continue;
-      const content = message.content.trim();
-      if (content === '' || content.startsWith('/') || content.startsWith('[')) continue;
-      if (content.length > 2000) continue;
-      const ts = Number.isNaN(Date.parse(message.ts)) ? Date.now() : Date.parse(message.ts);
-      this.editor.addToHistory(content, ts);
-    }
+  /** 回放折叠出的跨轮次状态落位（ReplayHost）。 */
+  applyFoldedState(state: {
+    goal?: string;
+    lastFailure?: SessionFailure;
+    planMode: boolean;
+    lastRecapMainTurn: number;
+    depth: number;
+  }): void {
+    this.goal = state.goal;
+    this.lastFailure = state.lastFailure;
+    this.plan.active = state.planMode;
+    this.lastRecapMainTurn = state.lastRecapMainTurn;
+    // 持久化深度下限：resume 出的子代理会话不能伪装成顶层继续派生（ds 的 delegationDepth 语义）。
+    this.sessionDepth = state.depth;
+  }
+
+  /** 回放到的 model_selection 事件落位：本进程后续请求按它发（ReplayHost）。 */
+  applyReplayedModel(model: string, contextWindow?: number, maxTokens?: number): void {
+    this.model = model;
+    if (contextWindow !== undefined) this.contextWindow = contextWindow;
+    if (maxTokens !== undefined) this.maxTokens = maxTokens;
+  }
+
+  /** 回放到的会话标题落位（ReplayHost）。 */
+  applySessionTitle(title: string): void {
+    this.sessionTitle = title;
+    this.sessionTitleAttempted = true;
   }
 
   /** 把最新一条用户消息钉在转录顶：回复还没超出一屏时滚到该条，超出后跟底并由 overlay 吸顶。 */
-  private pinLatestUserMessage(): void {
+  public pinLatestUserMessage(): void {
     const view = this.transcriptView;
     if (!view) return;
     const width = Math.max(1, this.ui.terminal.columns);
@@ -774,119 +511,30 @@ class InteractiveMode implements ApprovalUi {
     view.setPinY(pin);
   }
 
-  private replayRecords(records: readonly SessionRecord[]): void {
-    const folded = foldSessionState(records);
-    this.goal = folded.goal;
-    this.lastFailure = folded.failures.at(-1);
-    this.plan.active = folded.planMode;
-    this.lastRecapMainTurn = folded.lastRecapMainTurn;
-    // 持久化深度下限：resume 出的子代理会话不能伪装成顶层继续派生（ds 的 delegationDepth 语义）。
-    this.sessionDepth = folded.depth;
+  // ------------------------------------------------------------------ 挂起条的宿主回调（SteerBarHost）
 
-    for (const record of records) {
-      if (record.type === 'message') {
-        this.replayMessage(record);
-        continue;
-      }
-      this.replayEvent(record.kind, record.data);
-    }
+  public requestRender(): void {
+    this.ui.requestRender();
   }
 
-  private replayMessage(record: SessionMessage): void {
-    if (record.role === 'user') {
-      // 跨轮次状态快照（goal/失败/计划模式）是给模型读的缓存友好注入，不进聊天流——
-      // 每轮一条的重复快照在回放里只会是噪声；最新一条的语义已由当前 turn 的注入保证。
-      if (isSessionStateMessage(record.content)) return;
-      this.chatContainer.addChild(new UserMessageComponent(record.content, getMarkdownTheme()));
-      return;
-    }
-    if (record.role === 'assistant') {
-      // 空文本的纯工具回复不建组件、也不打断分组：与实时路径一致——只有真正的
-      // 回答文本才把工具 run 切开，多个纯工具回复的工具仍并进同一组。
-      if (record.content !== '') {
-        this.breakToolGroup();
-        const component = new AssistantMessageComponent({ markdownTheme: getMarkdownTheme() });
-        component.setText(record.content);
-        this.chatContainer.addChild(component);
-      }
-      for (const call of record.toolCalls ?? []) {
-        const tool = new ToolExecutionComponent(call.name, call.id, call.arguments, this.ui);
-        tool.markExecutionStarted();
-        this.ensureToolGroup().addTool(tool);
-        this.pendingTools.set(call.id, tool);
-      }
-      return;
-    }
-    if (record.role === 'tool') {
-      const tool = record.toolCallId ? this.pendingTools.get(record.toolCallId) : undefined;
-      if (tool) {
-        tool.updateResult({ content: record.content, isError: false });
-        if (record.toolCallId) this.pendingTools.delete(record.toolCallId);
-        return;
-      }
-      const standalone = new ToolExecutionComponent(record.toolName ?? 'tool', record.toolCallId ?? '', {}, this.ui);
-      standalone.updateResult({ content: record.content, isError: false });
-      this.ensureToolGroup().addTool(standalone);
-    }
+  /** 焦点交回输入框（挂起条取回编辑后）。 */
+  public focusEditor(): void {
+    this.ui.setFocus(this.editor);
   }
 
-  private replayEvent(kind: string, data: Record<string, unknown>): void {
-    if (kind === 'model_selection' && typeof data.model === 'string') {
-      this.model = data.model;
-      if (typeof data.contextWindow === 'number') this.contextWindow = data.contextWindow;
-      if (typeof data.maxTokens === 'number') this.maxTokens = data.maxTokens;
-      return;
-    }
-    if (kind === 'usage') {
-      this.applyUsage(data);
-      return;
-    }
-    if (kind === 'title') {
-      // 会话标题：tab 常驻名，resume 直接接续，不重新烧一次生成调用。
-      if (typeof data.title === 'string' && data.title !== '') {
-        this.sessionTitle = data.title;
-        this.sessionTitleAttempted = true;
-      }
-      return;
-    }
-    if (kind === 'recap') {
-      // 未上屏的 recap（自动长尾输出）只留档，回放时跳过——否则用户会在恢复后
-      // 看到一条当时被刻意压下去的跑飞摘要。
-      if (data.shown === false) return;
-      const summary = typeof data.summary === 'string' ? data.summary : '';
-      if (summary !== '') this.addRecap(summary);
-      return;
-    }
-    if (kind === 'subagent' && data.phase === 'start') {
-      // 回放与实时路径同构：按 toolCallId 归位到 Task 工具行，聚合活动无法恢复
-      // （子工具调用不落主会话），只恢复行首文案与 (type, background) 元信息；不建实时行。
-      const id = typeof data.id === 'string' ? data.id : '';
-      const description = typeof data.description === 'string' ? data.description : '';
-      const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined;
-      const tool = toolCallId !== undefined ? this.pendingTools.get(toolCallId) : undefined;
-      if (id !== '' && tool) {
-        const background = data.mode === 'background';
-        tool.attachSubagentMeta({
-          index: ++this.subagentOrdinal,
-          childType: typeof data.childType === 'string' ? data.childType : undefined,
-          background,
-          description,
-        });
-        this.subagentLines.set(id, { tool, description, toolCallId, background });
-      } else {
-        this.addNotice(`subagent · ${description}`, 'dim');
-      }
-      return;
-    }
-    if (kind === 'subagent' && data.phase === 'end') {
-      const ok = data.ok === true;
-      const durationMs = typeof data.durationMs === 'number' && Number.isFinite(data.durationMs) ? data.durationMs : 0;
-      const summary = typeof data.summary === 'string' ? data.summary : '';
-      const tokens = typeof data.tokens === 'number' && Number.isFinite(data.tokens) ? data.tokens : undefined;
-      if (!this.finishSubagentLine(typeof data.id === 'string' ? data.id : '', ok, durationMs, summary, tokens)) {
-        this.addNotice(`subagent · ${ok ? 'done' : 'FAILED'}`, ok ? 'dim' : 'error');
-      }
-    }
+  /** 当前是否存在可中断的轮次（挂起条 [Send now] 的前置检查）。 */
+  public canInterrupt(): boolean {
+    return this.abort !== undefined;
+  }
+
+  /**
+   * 挂起条 [Send now] 的落地：该条作为下一轮 prompt，中断当前轮；
+   * 轮次收尾（finally）里按 sendAfterInterrupt 接续开新一轮。
+   */
+  public sendNow(text: string): void {
+    this.sendAfterInterrupt = text;
+    this.setActivity(WorkingLabel.cancelling);
+    this.abort?.abort();
   }
 
   // ------------------------------------------------------------------ 提交与轮次
@@ -902,7 +550,6 @@ class InteractiveMode implements ApprovalUi {
     }
     this.editor.setText('');
 
-
     if (text.startsWith('/')) {
       await this.handleCommand(text);
       return;
@@ -917,25 +564,21 @@ class InteractiveMode implements ApprovalUi {
         );
         return;
       }
-      if (this.steerEditIndex !== undefined) {
+      if (this.steerBar.editFrozen) {
         // 双击取回后重新挂起：插回原排序位而不是队尾（队列已被 drain 时越界收敛为追加）。
         // 提交即解冻：编辑期间轮次若已收尾，这里补开新轮，让编辑后的消息第一个发出。
-        this.turnInbox.insertAt(this.steerEditIndex, text);
-        this.steerCursor = Math.min(this.steerEditIndex, this.turnInbox.peek().length - 1);
-        this.steerEditIndex = undefined;
+        const head = this.steerBar.insertEdit(text);
         this.ui.requestRender();
         if (!this.running) {
-          const head = this.turnInbox.peek()[0];
           if (head !== undefined) {
-            this.turnInbox.removeAt(0);
-            this.resetSteerState();
+            this.steerBar.dropFirst();
+            this.steerBar.resetState();
             void this.executeTurn(head, true);
           }
         }
         return;
       } else {
-        this.turnInbox.push(text);
-        this.steerCursor = this.turnInbox.peek().length - 1;
+        this.steerBar.push(text);
       }
       // 挂起条随下一帧自动更新（steersBar 每帧动态渲染），不再弹 dim 通知。
       this.ui.requestRender();
@@ -966,7 +609,7 @@ class InteractiveMode implements ApprovalUi {
     const controller = new AbortController();
     this.abort = controller;
     this.running = true;
-    this.modelResponded = false;
+    this.projection.beginTurn();
     // 首轮（且标题还没生成过）记下素材源头；后续轮次不覆盖，素材在 'text' 事件里累积。
     if (!this.sessionTitleAttempted) {
       this.titlePrompt = prompt;
@@ -1025,7 +668,7 @@ class InteractiveMode implements ApprovalUi {
         turnFailed = true;
       }
     } finally {
-      this.finalizeStreaming();
+      this.projection.finalizeStreaming();
       this.running = false;
       this.abort = undefined;
       const rewind = this.pendingRewind;
@@ -1036,8 +679,8 @@ class InteractiveMode implements ApprovalUi {
         // Esc 中断自带队列回填（对齐 pi：abort restores queued messages）——模型还没
         // 响应时整个轮次作废重来，未投递的挂起消息连同原 prompt 一起回到编辑器。
         // 模型已响应的普通中断不在此列：队列继续挂起，下一轮照常自动投递。
-        const stranded = this.turnInbox.drain();
-        this.resetSteerState();
+        const stranded = this.steerBar.drainAll();
+        this.steerBar.resetState();
         const restored = stranded.length > 0
           ? `${rewind}\n\n${stranded.join('\n\n')}`
           : rewind;
@@ -1051,11 +694,11 @@ class InteractiveMode implements ApprovalUi {
       // 新轮时都让路：前者等编辑提交，后者避免并发双轮。
       // 扣住条件：失败且模型零输出。有部分输出说明任务推进过，挂起消息作为下一步
       // 指令照常接管；零输出意味着这一轮什么都没发生，投递只是把队列烧进同一个错误。
-      const holdQueue = turnFailed && !this.modelResponded;
+      const holdQueue = turnFailed && !this.projection.modelResponded;
       const normalEnd = !controller.signal.aborted && rewind === undefined && !holdQueue;
-      const steerNext = normalEnd && this.steerEditIndex === undefined ? this.turnInbox.peek()[0] : undefined;
+      const steerNext = normalEnd && !this.steerBar.editFrozen ? this.steerBar.nextQueued : undefined;
       if (holdQueue) {
-        const held = this.turnInbox.peek().length;
+        const held = this.steerBar.queuedCount;
         if (held > 0) {
           this.addNotice(
             `Turn failed — ${held} queued message${held === 1 ? '' : 's'} kept. Enter sends ${held === 1 ? 'it' : 'them'} now.`,
@@ -1071,11 +714,11 @@ class InteractiveMode implements ApprovalUi {
       this.refreshTabTitle();
       // 标题只在首轮交换后生成一次；这里的素材已在上面清点完毕。
       this.maybeGenerateSessionTitle();
-      this.pendingTools.clear();
+      this.projection.clearPendingTools();
       // 轮次结束但后台子代理仍在跑（foreground 的 end 事件在工具返回前就已到）：
       // 提醒一句，避免用户以为总结就是全部结论。
-      if (this.subagentLines.size > 0) {
-        const n = this.subagentLines.size;
+      if (this.projection.liveSubagentCount > 0) {
+        const n = this.projection.liveSubagentCount;
         this.addNotice(`${n} background subagent${n === 1 ? ' still running' : 's still running'} — /jobs to inspect.`, 'dim');
       }
       // 不在这里 refreshCounters()：用量已由 'usage' 事件在内存里累加，重读整个会话文件
@@ -1091,12 +734,14 @@ class InteractiveMode implements ApprovalUi {
         const prompt = this.sendAfterInterrupt;
         this.sendAfterInterrupt = undefined;
         void this.executeTurn(prompt, true);
+        // biome-ignore lint/correctness/noUnsafeFinally: 轮次收尾接续开新轮是刻意的队列语义，return 用于阻止后续分支
         return;
       }
       if (!this.running && steerNext !== undefined) {
-        this.turnInbox.removeAt(0);
-        this.resetSteerState();
+        this.steerBar.dropFirst();
+        this.steerBar.resetState();
         void this.executeTurn(steerNext, true);
+        // biome-ignore lint/correctness/noUnsafeFinally: 同上——收尾后立即投递队首挂起消息
         return;
       }
       if (!this.running && follow) void this.executeTurn(follow, true);
@@ -1126,10 +771,10 @@ class InteractiveMode implements ApprovalUi {
   private sendQueuedNow(): void {
     if (!this.abort) return;
     // 双击编辑冻结中：立即发送会把其余挂起消息越过正在编辑的那条送出去，不做。
-    if (this.steerEditIndex !== undefined) return;
-    const queued = this.turnInbox.drain();
+    if (this.steerBar.editFrozen) return;
+    const queued = this.steerBar.drainAll();
     if (queued.length === 0) return;
-    this.resetSteerState();
+    this.steerBar.resetState();
     this.sendAfterInterrupt = queued.join('\n\n');
     this.setActivity(WorkingLabel.cancelling);
     this.abort.abort();
@@ -1146,13 +791,13 @@ class InteractiveMode implements ApprovalUi {
     if (this.abort) {
       this.setActivity(WorkingLabel.cancelling);
       const composerEmpty = this.editor.getText().trim() === '';
-      const rewind = !this.modelResponded && this.inFlightPrompt !== undefined && composerEmpty;
+      const rewind = !this.projection.modelResponded && this.inFlightPrompt !== undefined && composerEmpty;
       this.pendingRewind = rewind ? this.inFlightPrompt : undefined;
       this.abort.abort();
       this.addNotice(
         rewind
           ? 'Cancelled — prompt restored to the input.'
-          : this.modelResponded
+          : this.projection.modelResponded
             ? 'Interrupted — output stopped.'
             : 'Cancelled before the model replied.',
         'warn',
@@ -1182,32 +827,28 @@ class InteractiveMode implements ApprovalUi {
    * transcript：转录区内容变了，必须 bump contentGeneration，否则 ScrollView 缓存不重测。
    * dock：底栏/子代理行，走视口通道，避免把整份转录当结构变化重排。
    */
-  private paint(kind: 'transcript' | 'dock'): void {
+  public paint(kind: 'transcript' | 'dock'): void {
     if (kind === 'dock' && isViewportTUI(this.ui)) this.ui.requestViewportRender();
     else this.ui.requestRender();
   }
 
+  /**
+   * 事件分派：agent 事件 → 转录投影（transcript.ts）+ 宿主自有状态（活动词、标题采样、
+   * 用量、审批边框）。渲染细节全部下沉到投影，这里只回答「事件归谁处理」。
+   */
   private readonly listener: AgentListener = (event) => {
     switch (event.type) {
       case 'stream_retry': {
-        this.thinkingGroup?.dropStreamingThinking();
-        this.thinkingBuffer = '';
-        this.thinkingStartedAt = Date.now();
-        this.thinkingGroup?.beginThinking();
+        this.projection.restartThinking();
+        this.projection.dropStreamingAssistant();
         // 采样里的半截正文也在被丢弃之列，别让它混进标题素材。
         if (this.titleDraft !== undefined) this.titleDraft = '';
-        if (this.streamingAssistant) {
-          this.chatContainer.removeChild(this.streamingAssistant);
-          this.streamingAssistant = undefined;
-        }
         this.paint('transcript');
         return;
       }
       case 'text': {
-        this.modelResponded = true;
         this.setActivity(WorkingLabel.responding);
-        const assistant = this.ensureAssistant();
-        assistant.appendText(event.text);
+        this.projection.appendAssistantText(event.text);
         // 首轮正文顺手采样：会话标题的素材（超长回复截断，不追加成本）。
         if (this.titleDraft !== undefined && this.titleDraft.length < TITLE_SOURCE_SAMPLE_CHARS) {
           this.titleDraft += event.text;
@@ -1216,70 +857,35 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'thinking_start': {
-        this.thinkingId = event.id;
-        this.thinkingBuffer = '';
-        this.thinkingStartedAt = Date.now();
         // 不在 start 切 Thinking…：无 reasoning 的工具轮次永远等不到 delta，状态行会假死。
         // 压缩刚结束时要把 Folding context… 收回去，否则会一直挂到第一条 delta。
         if (this.activityLabel === WorkingLabel.compacting) this.setActivity(WorkingLabel.working);
-        this.thinkingGroup = this.ensureToolGroup();
-        this.thinkingGroup.beginThinking();
+        this.projection.beginThinking(event.id);
         this.paint('transcript');
         return;
       }
       case 'thinking_delta': {
-        if (event.id === this.thinkingId) {
-          this.modelResponded = true;
-          this.setActivity(WorkingLabel.thinking);
-          this.thinkingBuffer += event.text;
-          this.thinkingGroup?.setThinking(this.thinkingBuffer, true);
-        }
+        const active = this.projection.appendThinking(event.id, event.text);
+        if (active) this.setActivity(WorkingLabel.thinking);
         this.paint('transcript');
         return;
       }
       case 'thinking_end': {
-        if (event.id === this.thinkingId) {
-          // 正文先于 thinking_end 到达，所以这里必须认住开始时那个组，而不是重新 ensureToolGroup——
-          // 中途的 text 已经断开旧组，重新取会新开一个组，把同一段推理劈成两半。
-          // content 是权威全文；只有它为空的异常路径（思考中途报错，loop 补发 content: ''）
-          // 才回落到已经流出的增量，别把用户已经看到的推理丢掉。
-          const content = event.content !== '' ? event.content : this.thinkingBuffer;
-          this.thinkingGroup?.setThinking(content, false, this.thinkingElapsed());
-          this.thinkingGroup = undefined;
-          this.thinkingStartedAt = undefined;
-          this.thinkingBuffer = '';
-          this.thinkingId = undefined;
-          // 没 reasoning 的工具轮次不会再来 thinking_delta；状态行若还停在 Thinking…，
-          // 这里立刻离开，别等下一步工具/正文。
-          if (this.activityLabel === WorkingLabel.thinking) this.setActivity(WorkingLabel.working);
-        }
+        this.projection.endThinking(event.id, event.content);
+        // 没 reasoning 的工具轮次不会再来 thinking_delta；状态行若还停在 Thinking…，
+        // 这里立刻离开，别等下一步工具/正文。
+        if (this.activityLabel === WorkingLabel.thinking) this.setActivity(WorkingLabel.working);
         this.paint('transcript');
         return;
       }
       case 'tool_start': {
-        this.modelResponded = true;
-        // 工具活动切断当前助手段：下一个 thinking/text 事件经 ensureAssistant 在工具组
-        // 下方新起组件。否则整轮文字都挤进轮首那个组件里，最终总结会排在工具汇总之上，
-        // 变成「全部回答在上、工具组沉底」——时间线要按真实顺序交错（grok-build 语义）。
-        this.streamingAssistant?.setStreaming(false);
-        this.streamingAssistant = undefined;
-        const tool = new ToolExecutionComponent(event.name, event.id, event.args, this.ui);
-        tool.markExecutionStarted();
-        this.ensureToolGroup().addTool(tool);
-        this.pendingTools.set(event.id, tool);
+        this.projection.startTool(event.id, event.name, event.args);
         this.setActivity(WorkingLabel.running(toolDisplayName(event.name), summarizeArgs(event.name, event.args)));
-        // subagent 的实时进度由转录内任务块承担，不进底部「正在跑」区。
-        if (event.name !== 'subagent') this.addPendingToolLine(event.id, event.name, event.args);
         this.paint('transcript');
         return;
       }
       case 'tool_end': {
-        const tool = this.pendingTools.get(event.id);
-        if (tool) {
-          tool.updateResult({ content: event.content, isError: !event.ok });
-          this.pendingTools.delete(event.id);
-        }
-        this.removePendingToolLine(event.id);
+        this.projection.endTool(event.id, event.content, event.ok);
         // 工具收尾后回到「等模型下一步」：可能是压缩，也可能是下一次请求。
         this.setActivity(WorkingLabel.working);
         this.paint('transcript');
@@ -1318,31 +924,14 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'subagent_start': {
-        this.subagentDepth++;
-        // 活动归并到主流程的 Task 工具行上（grok-build 式的单行实时摘要），
-        // 不再发独立通知——通知会打断工具分组，把每个 task 挤成孤立的「1 Tool」组。
-        const tool = event.toolCallId ? this.pendingTools.get(event.toolCallId) : undefined;
-        if (tool) {
-          const background = event.mode === 'background';
-          const index = ++this.subagentOrdinal;
-          tool.attachSubagentMeta({ index, childType: event.childType, background, description: event.description });
-          // 实时进度挂到输入框上方那一栏（跑完即撤，不常驻）；转录里留下的是同一行首文案的
-          // 完成摘要，dock 带类型，转录行只要序号+描述+耗时。
-          const live = new SubagentTaskComponent(this.ui, {
-            index,
-            childType: event.childType,
-            background,
-            description: event.description,
-          });
-          this.subagentLines.set(event.id, {
-            tool,
-            description: event.description,
-            toolCallId: event.toolCallId,
-            background,
-            live,
-          });
-          this.refreshSubagentDock();
-        } else {
+        const started = this.projection.startSubagent({
+          id: event.id,
+          toolCallId: event.toolCallId,
+          childType: event.childType,
+          background: event.mode === 'background',
+          description: event.description,
+        });
+        if (!started) {
           this.addNotice(
             `subagent · ${event.description} (${event.childType}${event.mode === 'background' ? ', background' : ''})`,
             'dim',
@@ -1352,8 +941,7 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'subagent_end': {
-        this.subagentDepth = Math.max(0, this.subagentDepth - 1);
-        if (!this.finishSubagentLine(event.id, event.ok, event.durationMs, event.summary, event.tokens)) {
+        if (!this.projection.finishSubagent(event.id, event.ok, event.durationMs, event.summary, event.tokens)) {
           const label = event.ok
             ? `subagent · done in ${(event.durationMs / 1000).toFixed(1)}s`
             : `subagent · FAILED: ${event.summary.slice(0, 200)}`;
@@ -1363,11 +951,11 @@ class InteractiveMode implements ApprovalUi {
         return;
       }
       case 'subagent_event': {
-        this.onSubagentEvent(event.id, event.event);
+        this.projection.onSubagentEvent(event.id, event.event);
         return;
       }
       case 'done': {
-        this.finalizeStreaming();
+        this.projection.finalizeStreaming();
         this.paint('transcript');
         return;
       }
@@ -1376,318 +964,9 @@ class InteractiveMode implements ApprovalUi {
     }
   };
 
-  /**
-   * 子代理内部活动 → 输入框上方那一行的活动段。
-   *
-   * 同时按显示名累加工具调用计数——计数不当场显示（活动段此时是当前动作），它在收尾时
-   * 顶替活动段，成为那行的持久内容。
-   */
-  private onSubagentEvent(id: string, event: SubagentEvent): void {
-    const entry = this.subagentLines.get(id);
-    if (!entry) {
-      // 行没建出来（异常时序/老会话回放）：退回独立行，至少不让子活动凭空消失。
-      if (event.type === 'tool_start') this.addNotice(`  ↳ ${event.name}`, 'dim');
-      else if (event.type === 'error') this.addNotice(`  ↳ ${event.text}`, 'error');
-      if (event.type === 'tool_start' || event.type === 'error') this.paint('transcript');
-      return;
-    }
-    if (event.type === 'usage') {
-      entry.live?.addTokens(event.promptTokens + event.completionTokens);
-      this.paint('dock');
-      return;
-    }
-    const activity = subagentActivity(event);
-    if (activity !== undefined) entry.live?.setActivity(activity, event.type === 'error');
-    this.paint('dock');
-  }
+  // ------------------------------------------------------------------ 用量
 
-  /**
-   * 刷新输入框上方的子代理栏：段头 + 每个运行中的子代理一行。
-   *
-   * 位置在工作状态提示之上（参考实现 dock 的位置）：转录只留完成摘要，实时进度全在这里，
-   * 跑完即撤。行数超上限就截断，免得 dock 把转录区挤没。
-   */
-  private refreshSubagentDock(): void {
-    this.subagentContainer.clear();
-    const rows = [...this.subagentLines.values()]
-      .map((entry) => entry.live)
-      .filter((live) => live !== undefined);
-    if (rows.length === 0) return;
-
-    const shown = rows.slice(0, MAX_DOCK_SUBAGENT_ROWS);
-    this.subagentHeader.setText(`${' '.repeat(TOOL_GROUP_INDENT)}${theme.fg('dim', `Subagents ${rows.length}`)}`);
-    this.subagentContainer.addChild(this.subagentHeader);
-    for (const row of shown) this.subagentContainer.addChild(row);
-    if (rows.length > shown.length) {
-      this.subagentContainer.addChild(
-        new Text(`${' '.repeat(TOOL_MEMBER_INDENT)}${theme.fg('dim', `… ${rows.length - shown.length} more`)}`, 0, 0),
-      );
-    }
-  }
-
-  /**
-   * 收尾一个子代理：转录行只留 `Subagent N 描述 · 总耗时`，实时 dock 行撤掉。
-   */
-  private finishSubagentLine(id: string, ok: boolean, durationMs: number, summary: string, _tokens?: number): boolean {
-    const entry = this.subagentLines.get(id);
-    if (!entry) return false;
-    entry.live?.dispose();
-    // 报告写进工具详情：否则双击展开没有正文（尤其后台任务 tool_end 只是 job 回执）。
-    const report = summary.trim();
-    if (report !== '') entry.tool.updateResult({ content: report, isError: !ok });
-    if (ok) entry.tool.setActivity(formatDuration(durationMs));
-    else entry.tool.setActivity(`FAILED: ${flattenWhitespace(summary).slice(0, 100)}`, true);
-    this.subagentLines.delete(id);
-    this.refreshSubagentDock();
-    return true;
-  }
-
-  private thinkingBuffer = '';
-  private readonly pendingToolLines = new Map<string, Text>();
-
-  private ensureAssistant(): AssistantMessageComponent {
-    if (!this.streamingAssistant) {
-      this.breakToolGroup();
-      const assistant = new AssistantMessageComponent({ markdownTheme: getMarkdownTheme() });
-      assistant.setStreaming(true);
-      this.chatContainer.addChild(assistant);
-      this.streamingAssistant = assistant;
-    }
-    return this.streamingAssistant;
-  }
-
-  /** 取当前工具分组；没有就新建一个挂到对话流末尾。 */
-  private ensureToolGroup(): ToolGroupComponent {
-    if (!this.activeToolGroup) {
-      const group = new ToolGroupComponent(this.ui);
-      this.chatContainer.addChild(group);
-      this.toolGroups.push(group);
-      this.activeToolGroup = group;
-    }
-    return this.activeToolGroup;
-  }
-
-  /** 断开当前分组：下一个工具调用会另起一组，子代理序号也跟着从头数。 */
-  private breakToolGroup(): void {
-    this.activeToolGroup = undefined;
-    this.subagentOrdinal = 0;
-  }
-
-  private finalizeStreaming(): void {
-    this.breakToolGroup();
-    if (this.streamingAssistant) {
-      this.streamingAssistant.setStreaming(false);
-      this.streamingAssistant = undefined;
-    }
-    // 轮次可能在思考中途收尾（中断/异常），此时 thinking_end 不会再来：主动把成员从
-    // 「运行中」落下，否则转录里会永远留着一行 Thinking…，而且它还会一直占着行不折叠。
-    this.thinkingGroup?.setThinking(this.thinkingBuffer, false, this.thinkingElapsed());
-    this.thinkingBuffer = '';
-    this.thinkingId = undefined;
-    this.thinkingStartedAt = undefined;
-    this.thinkingGroup = undefined;
-    for (const line of this.pendingToolLines.values()) this.pendingContainer.removeChild(line);
-    this.pendingToolLines.clear();
-  }
-
-  /** 本段思考链已耗时；没记到起点时返回 undefined（收尾文案退化成 `Thought`）。 */
-  private thinkingElapsed(): number | undefined {
-    return this.thinkingStartedAt === undefined ? undefined : Date.now() - this.thinkingStartedAt;
-  }
-
-  /**
-   * 挂起条：运行中输入队列的可视化。纯鼠标操作，无键盘快捷键（避免与 TUI 按键冲突）。
-   *
-   * 每帧从 turnInbox 动态取数——消息只在轮次收尾后逐条投递，投递一条下一帧自动少一条。
-   * 首行上方留一行间距（与状态行脱开）；一格缩进与状态行左缘（leftPad=1）对齐。前缀是
-   * 投递顺序序号（`1.` `2.`…，重排后按新位置重新编号）。鼠标悬停的行：整行铺极浅底
-   * （steerHoverBg），右侧亮出动作按钮 `[↑] [↓] [Send now] [edit] [cancel]`（右对齐
-   * 紧贴无缝、右缘与状态行耗时/token 同列，宽不够整颗放弃，行不可移动时 ↑/↓ 不渲染，
-   * 按钮自身悬停变色）。
-   */
-  private renderPendingSteers(width: number): string[] {
-    const items = this.turnInbox.peek();
-    if (items.length === 0) {
-      this.steerButtons = [];
-      return [];
-    }
-    const cursor = Math.min(this.steerCursor ?? items.length - 1, items.length - 1);
-    const hover = this.steerHover !== undefined && this.steerHover < items.length ? this.steerHover : undefined;
-    // 动作按钮只挂悬停行（单光标同一时刻至多悬停一行）。
-    const buttons = hover === undefined ? [] : this.layoutSteerButtons(width, hover, items.length);
-    const btnStart = buttons[0]?.x0 ?? width - STEER_RIGHT_PAD;
-    this.steerButtons = buttons.map((button, i) => {
-      const x0 = btnStart + buttons.slice(0, i).reduce((sum, b) => sum + b.label.length, 0);
-      return { row: hover!, action: button.action, x0, x1: x0 + button.label.length };
-    });
-    const lines = items.map((text, index) => {
-      const num = theme.fg('primary', `${index + 1}.`);
-      // 带按钮的行：行文按按钮起点截断让位（至少留 1 列间隙）。
-      const avail = index === hover ? Math.max(0, btnStart - 4 - 1) : 96;
-      const clipped = flattenWhitespace(text).slice(0, avail);
-      const styled = index === cursor ? theme.bold(clipped) : theme.fg('muted', clipped);
-      let line = ` ${num} ${styled}`;
-      if (index === hover) {
-        const pad = Math.max(1, btnStart - visibleWidth(line));
-        line += ' '.repeat(pad);
-        for (const button of buttons) line += this.steerButtonLabel(button.action, index);
-      }
-      // 悬停行整行铺极浅底。
-      const fill = Math.max(0, width - visibleWidth(line));
-      return index === hover ? theme.bg('steerHoverBg', line + ' '.repeat(fill)) : line;
-    });
-    lines.unshift('');
-    return lines;
-  }
-
-  /**
-   * 布局动作按钮链：从右往左紧贴排布，放不下整颗放弃；[↑]/[↓] 只在该行可移动时出现。
-   * 空数组 = 宽度不足以放任何按钮。
-   */
-  private layoutSteerButtons(width: number, row: number, count: number): Array<{ action: SteerAction; label: string; x0: number }> {
-    let right = width - STEER_RIGHT_PAD;
-    const placed: Array<{ action: SteerAction; label: string; x0: number }> = [];
-    for (const { action, label } of STEER_BUTTONS) {
-      if (action === 'up' && row === 0) continue;
-      if (action === 'down' && row === count - 1) continue;
-      const x0 = right - label.length;
-      if (x0 < 5) break; // 行文至少保留一格缩进 + 序号 + 一格空隙
-      placed.unshift({ action, label, x0 });
-      right = x0;
-    }
-    return placed;
-  }
-
-  /** 动作按钮文案：默认 muted，悬停变色（cancel 红、其余亮文字）。 */
-  private steerButtonLabel(action: SteerAction, row: number): string {
-    const label = STEER_BUTTONS.find((button) => button.action === action)!.label;
-    const hoveredButton = this.steerButtonHover?.row === row && this.steerButtonHover.action === action;
-    if (!hoveredButton) return theme.fg('muted', label);
-    return theme.fg(action === 'cancel' ? 'error' : 'text', label);
-  }
-
-  /**
-   * 挂起条行内鼠标交互：按钮命中优先（[↑]/[↓]/[Send now]/[edit]/[cancel] 直接执行
-   * 动作）；单击行 = 选中（加粗标识）。双击无特殊语义。左键按下先用
-   * handleSelectablePress 钉行吃掉（与工具行同款）：否则全屏划词路径接手，
-   * 会把消息文本选中。click 事件必须返回 handled 挡住冒泡，避免同一次点击沿布局链
-   * 多次送达。
-   */
-  private onSteersMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    const items = this.turnInbox.peek();
-    const row = event.y - STEER_TOP_GAP;
-    const onRow = row >= 0 && row < items.length;
-    if (event.type === 'move') {
-      // 悬停：该行铺浅底并亮出动作按钮。移出的隐藏由 onMouseMotion 先清、这里的命中
-      // 分发再点亮（同帧内一清一亮，不需要绝对坐标）。悬停不劫持键盘选中（steerCursor
-      // 只由单击/键盘改，grok 同款——hover 只负责亮按钮）。首行是上间距空行：y 换算
-      // 行下标要扣掉。
-      if (onRow) {
-        const button = this.steerButtons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);
-        const nextButton = button ? { row, action: button.action } : undefined;
-        if (
-          this.steerHover !== row ||
-          this.steerButtonHover?.row !== nextButton?.row ||
-          this.steerButtonHover?.action !== nextButton?.action
-        ) {
-          this.steerHover = row;
-          this.steerButtonHover = nextButton;
-          this.ui.requestRender();
-        }
-      }
-      return undefined;
-    }
-    if (event.type === 'press' && event.button === 'left') {
-      // 钉行只发生在有效行上：按在上间距空行不选中、不画行选标记。
-      if (!onRow) return undefined;
-      const press = handleSelectablePress(this.steersBar, event);
-      if (press) return press;
-    }
-    if (event.type !== 'click' || event.button !== 'left') return undefined;
-    if (!onRow) return undefined;
-    // 按钮命中优先：直接执行动作，不再走行选中。
-    const button = this.steerButtons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);
-    if (button) {
-      if (button.action === 'cancel') this.cancelSteerRow(row);
-      else if (button.action === 'edit') this.editSteerRow(row);
-      else if (button.action === 'send') this.sendSteerRowNow(row);
-      else if (button.action === 'up') this.moveSteerRow(row, -1);
-      else this.moveSteerRow(row, 1);
-      return { handled: true };
-    }
-    // 单击行 = 选中（加粗标识）。
-    this.steerCursor = row;
-    this.ui.requestRender();
-    return { handled: true };
-  }
-
-  /** [↑]/[↓]：把该行与相邻行交换（序号随新位置重编）。队列结构变化使冻结原位失效。 */
-  private moveSteerRow(index: number, delta: -1 | 1): void {
-    if (!this.turnInbox.move(index, delta)) return;
-    this.steerEditIndex = undefined;
-    this.steerCursor = index + delta;
-    this.ui.requestRender();
-  }
-
-  /** 取回选中条到输入框编辑：队列里删掉、记住原位置并冻结投递（提交后原位回插）。 */
-  private editSteerRow(index: number): void {
-    const text = this.turnInbox.removeAt(index);
-    if (text === undefined) return;
-    this.steerEditIndex = index;
-    const current = this.editor.getText().trim();
-    this.editor.setText(current === '' ? text : `${current}\n\n${text}`);
-    this.steerCursor = Math.min(index, this.turnInbox.peek().length - 1);
-    this.ui.setFocus(this.editor);
-    this.ui.requestRender();
-  }
-
-  /** 删除选中条（不回填编辑器）。队列结构变化：冻结编辑的原位置失效。 */
-  private cancelSteerRow(index: number): void {
-    if (this.turnInbox.removeAt(index) === undefined) return;
-    // 队列结构变化：冻结编辑的原位置失效（同 ⇧J/⇧K 的处理）。
-    this.steerEditIndex = undefined;
-    this.steerCursor = Math.min(index, this.turnInbox.peek().length - 1);
-    this.ui.requestRender();
-  }
-
-  /** 强制立即发送选中条：中断当前轮，该条作为下一轮 prompt，其余消息保持原队列。 */
-  private sendSteerRowNow(index: number): void {
-    // 先确认有可中断的轮次再动队列：反序会在轮次恰好收尾时把消息删成凭空消失。
-    if (!this.abort) return;
-    const text = this.turnInbox.removeAt(index);
-    if (text === undefined) return;
-    this.sendAfterInterrupt = text;
-    this.setActivity(WorkingLabel.cancelling);
-    this.abort.abort();
-  }
-
-
-
-  /** 队列被整队搬走（立即发送 / 轮次作废）后，选中、编辑占位一并失效。 */
-  private resetSteerState(): void {
-    this.steerCursor = undefined;
-    this.steerEditIndex = undefined;
-    this.steerHover = undefined;
-    this.steerButtonHover = undefined;
-  }
-
-  private addPendingToolLine(id: string, name: string, args: Record<string, unknown>): void {
-    const detail = typeof args.command === 'string' ? args.command : (typeof args.path === 'string' ? args.path : '');
-    const oneLine = flattenWhitespace(`${name}${detail ? ` ${detail}` : ''}`).slice(0, 100);
-    const text = new Text(theme.fg('muted', `  ${oneLine}`), 0, 0);
-    this.pendingContainer.addChild(text);
-    this.pendingToolLines.set(id, text);
-  }
-
-  private removePendingToolLine(id: string): void {
-    const line = this.pendingToolLines.get(id);
-    if (line) {
-      this.pendingContainer.removeChild(line);
-      this.pendingToolLines.delete(id);
-    }
-  }
-
-  private applyUsage(data: Record<string, unknown>): void {
+  public applyUsage(data: Record<string, unknown>): void {
     const prompt = data.promptTokens;
     const completion = data.completionTokens;
     const cached = data.cachedTokens;
@@ -1725,8 +1004,8 @@ class InteractiveMode implements ApprovalUi {
 
   // ------------------------------------------------------------------ 视图辅助
 
-  private addNotice(text: string, level: 'dim' | 'warn' | 'error' | 'success' = 'dim'): void {
-    this.breakToolGroup();
+  public addNotice(text: string, level: 'dim' | 'warn' | 'error' | 'success' = 'dim'): void {
+    this.projection.breakToolGroup();
     const color = level === 'error' ? 'error' : level === 'warn' ? 'warning' : level === 'success' ? 'success' : 'dim';
     // 提示行与用户消息/助手正文/工具汇总共用同一条块间距（BLOCK_GAP）：以前它紧贴上一块，
     // 是转录里唯一一处 0 行间隔。
@@ -1801,9 +1080,7 @@ class InteractiveMode implements ApprovalUi {
   }
 
   private toggleToolExpansion(): void {
-    const expand = !this.toolGroups.some((group) => group.isExpanded());
-    for (const group of this.toolGroups) group.setExpanded(expand, false);
-    this.ui.requestRender();
+    this.projection.toggleToolExpansion();
   }
 
   /**
@@ -1975,19 +1252,19 @@ class InteractiveMode implements ApprovalUi {
         await this.commandHelp();
         break;
       case 'history':
-        await this.commandHistory();
+        await commandHistory(this);
         break;
       case 'new':
-        await this.commandNewSession();
+        await commandNewSession(this);
         break;
       case 'resume':
-        await this.commandResume(argument);
+        await commandResume(this, argument);
         break;
       case 'skills':
         await this.commandSkills();
         break;
       case 'mcps':
-        await this.commandMcps();
+        await commandMcps(this);
         break;
       case 'plan':
         await this.commandPlan(argument);
@@ -1999,19 +1276,19 @@ class InteractiveMode implements ApprovalUi {
         await this.commandCompact(argument);
         break;
       case 'model':
-        await this.commandModel(argument);
+        await commandModel(this, argument);
         break;
       case 'provider':
-        await this.commandProvider(argument);
+        await commandProvider(this, argument);
         break;
       case 'effort':
-        await this.commandEffort(argument);
+        await commandEffort(this, argument);
         break;
       case 'permission':
-        await this.commandPermission(argument);
+        await commandPermission(this, argument);
         break;
       case 'export':
-        await this.commandExport(argument);
+        await commandExport(this, argument);
         break;
       default:
         break;
@@ -2019,42 +1296,10 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /**
-   * `/history`：搜索面板列出本会话发过的 prompt（最新在前），输入即按前缀过滤，
-   * 选中回填输入框可直接改了重发。数据与 ↑ 回放共用同一份编辑器历史。
+   * `/help`：命令与键位清单。命令表从注册表取数；键位清单由注册表驱动（app-keybindings
+   * 的 when 字段分组）：新增键位只需改注册表，帮助自动跟上——手写清单必然漂移，
+   * 这次收编就是为了消灭它。
    */
-  /**
-   * `/history`：弹窗列出本会话发过的 prompt（最新在前，带时间），选中回填输入框
-   * 可直接改了重发。数据与 ↑ 回放共用同一份编辑器历史。
-   */
-  private async commandHistory(): Promise<void> {
-    const history = this.editor.getHistory();
-    if (history.length === 0) {
-      this.addNotice('No prompt history yet — sent prompts land here', 'dim');
-      return;
-    }
-    const items: SelectItem[] = history.map((entry) => {
-      const time = new Date(entry.ts);
-      const sameDay = new Date().toDateString() === time.toDateString();
-      const stamp = sameDay
-        ? `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`
-        : `${String(time.getMonth() + 1).padStart(2, '0')}-${String(time.getDate()).padStart(2, '0')} ${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
-      return {
-        value: entry.text,
-        label: `${stamp}  ${flattenWhitespace(entry.text).slice(0, 70)}`,
-      };
-    });
-    const picked = await showSelectDialog(this.ui, {
-      title: 'Prompt history',
-      items,
-      maxVisible: 14,
-      hint: '↑↓ select · Enter reuse · Esc close',
-    });
-    if (picked !== undefined) {
-      this.editor.setText(picked);
-      this.ui.setFocus(this.editor);
-    }
-  }
-
   private async commandHelp(): Promise<void> {
     const lines: string[] = [];
     lines.push('## Commands');
@@ -2064,8 +1309,6 @@ class InteractiveMode implements ApprovalUi {
     const aliases = Object.entries(COMMAND_ALIASES).map(([alias, canonical]) => `\`/${alias}\` → \`/${canonical}\``);
     if (aliases.length > 0) lines.push(`- Aliases: ${aliases.join(' · ')}`);
     lines.push('');
-    // 键位清单由注册表驱动（app-keybindings 的 when 字段分组）：新增键位只需改注册表，
-    // 帮助自动跟上——手写清单必然漂移，这次收编就是为了消灭它。
     lines.push('## Key bindings');
     const grouped = new Map<string, string[]>();
     for (const definition of Object.values(APP_KEYBINDINGS) as AppKeybindingDefinition[]) {
@@ -2105,193 +1348,10 @@ class InteractiveMode implements ApprovalUi {
     });
   }
 
-  /**
-   * MCP 管理器。
-   *
-   * 「选一次 → 做一件事 → 重新选」的循环，而不是一次性只读弹窗：改完开关要能立刻看到新
-   * 状态，否则用户只能反复敲命令来确认刚才那一下到底生效没有。Esc 退出。
-   *
-   * 每一轮都重新取状态：server 崩溃后的懒重连、以及外部配置的改动都会改变它。
-   */
-  private async commandMcps(): Promise<void> {
-    for (;;) {
-      const servers = this.deps.mcp.listServers();
-      const choice = await showSelectDialog(this.ui, {
-        title: `MCP servers (${servers.length})`,
-        maxVisible: 14,
-        hint: 'Enter act · Esc close',
-        items: [
-          { value: 'reload', label: 'Reload from disk', description: 're-read every source and reconnect' },
-          { value: 'report', label: 'Show full report', description: 'sources scanned, warnings, per-server tools' },
-          { value: 'add', label: 'Add a server…', description: `append to ${this.deps.configPath}` },
-          ...servers.map((server) => ({
-            value: `server:${server.name}`,
-            label: `${server.name} — ${mcpStateLabel(server)}`,
-            description: `${server.target} · from ${server.origin.label}`,
-          })),
-        ],
-      });
-      if (choice === undefined) return;
-      if (choice === 'report') {
-        await showMessageDialog(this.ui, {
-          title: 'MCP servers',
-          text: renderMcpReport({
-            servers: this.deps.mcp.listServers(),
-            warnings: [...(this.deps.mcpWarnings ?? [])],
-            sources: [...this.deps.mcpSources()],
-          }),
-          hint: 'Esc close · status is live',
-        });
-        continue;
-      }
-      if (choice === 'reload') {
-        await this.reloadMcpWithNotice();
-        continue;
-      }
-      if (choice === 'add') {
-        await this.addMcpServer();
-        continue;
-      }
-      await this.manageMcpServer(choice.slice(SERVER_PREFIX.length));
-    }
-  }
+  // ------------------------------------------------------------------ 会话切换落地
 
-  /**
-   * 重载 MCP，并把结果讲清楚。
-   *
-   * 只说「已重载」等于没说：用户关心的是**哪个**连上了、哪个被关掉了。
-   */
-  private async reloadMcpWithNotice(): Promise<void> {
-    const result = await this.deps.reloadMcp();
-    const parts: string[] = [];
-    if (result.added.length > 0) parts.push(`+ ${result.added.join(', ')}`);
-    if (result.restarted.length > 0) parts.push(`~ ${result.restarted.join(', ')}`);
-    if (result.removed.length > 0) parts.push(`- ${result.removed.join(', ')}`);
-    this.addNotice(
-      parts.length === 0 ? 'MCP: reloaded, nothing changed' : `MCP: reloaded · ${parts.join(' · ')}`,
-      'dim',
-    );
-    for (const warning of this.deps.mcpWarnings ?? []) this.addNotice(warning, 'warn');
-  }
-
-  private async addMcpServer(): Promise<void> {
-    const rawName = await showInputDialog(this.ui, {
-      title: 'Server name',
-      hint: 'letters, digits, - and _ · Esc cancel',
-    });
-    if (rawName === undefined) return;
-    const name = rawName.trim();
-    // 名字会进 TOML、也会成为工具命名空间，限制字符集比事后处理转义简单得多。
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
-      this.addNotice(`Invalid server name (letters, digits, - and _ only): ${name}`, 'warn');
-      return;
-    }
-    const rawLine = await showInputDialog(this.ui, {
-      title: `Command for ${name}`,
-      hint: 'e.g. npx -y @modelcontextprotocol/server-filesystem . · quote paths with spaces',
-    });
-    if (rawLine === undefined) return;
-    const parsed = splitCommandLine(rawLine.trim());
-    if (parsed === undefined) {
-      this.addNotice('Unbalanced quotes in that command — nothing written.', 'warn');
-      return;
-    }
-    upsertSphMcpServer(this.deps.configPath, { name, command: parsed.command, args: parsed.args });
-    this.addNotice(`Added ${name} to ${this.deps.configPath}`, 'success');
-    await this.reloadMcpWithNotice();
-
-    // 写进去却被项目级同名条目盖住是「设置不生效」的典型来源，必须当场说出来。
-    const written = this.deps.mcp.listServers().find((server) => server.name === name);
-    if (written !== undefined && written.origin.path !== this.deps.configPath) {
-      this.addNotice(
-        `${name} is overridden by ${written.origin.label} (closer/project config wins)`,
-        'warn',
-      );
-    }
-  }
-
-  private async manageMcpServer(name: string): Promise<void> {
-    const server = this.deps.mcp.listServers().find((item) => item.name === name);
-    if (server === undefined) return; // 列表是上一轮取的，条目可能已经不在了
-    type Action = { value: string; label: string; description?: string };
-    const items: Action[] = [
-      {
-        value: 'toggle',
-        label: server.enabled ? 'Disable' : 'Enable',
-        // 外部来源只读，开关记在 sph 自己的配置里——写别人的文件是不可逆的副作用。
-        description: server.origin.editable
-          ? `edit ${server.origin.path}`
-          : `recorded in ${this.deps.configPath} as a local preference`,
-      },
-    ];
-    if (server.connected) {
-      items.push({ value: 'tools', label: 'Show tools', description: `${server.tools.length} available` });
-    }
-    if (server.origin.editable) {
-      items.push({ value: 'remove', label: 'Remove from config', description: server.origin.path });
-    }
-    const action = await showSelectDialog(this.ui, {
-      title: `${server.name} — ${mcpStateLabel(server)}`,
-      bodyText: `${server.target}\nfrom ${server.origin.label}`,
-      items,
-      maxVisible: 4,
-    });
-
-    if (action === 'toggle') {
-      const enabled = !server.enabled;
-      setSphMcpPreference(this.deps.configPath, server.name, {
-        enabled,
-        sourceEnabled: server.sourceEnabled ?? server.enabled,
-      });
-      this.deps.refreshMcpPreferences();
-      await this.reloadMcpWithNotice();
-      return;
-    }
-    if (action === 'tools') {
-      await showMessageDialog(this.ui, {
-        title: `${server.name} tools`,
-        text: renderMcpTools(server),
-        hint: 'Esc close',
-      });
-      return;
-    }
-    if (action === 'remove') {
-      const confirmed = await showConfirmDialog(this.ui, {
-        title: `Remove ${server.name}?`,
-        message: `This deletes the entry from ${server.origin.path}. Nothing else is touched.`,
-        confirmLabel: 'Remove',
-      });
-      if (!confirmed) return;
-      const removed = removeSphMcpServer(server.origin.path, server.name);
-      this.addNotice(
-        removed ? `Removed ${server.name} from ${server.origin.path}` : `${server.name} was already gone`,
-        removed ? 'success' : 'warn',
-      );
-      // 名字没了，可能还留着一条只认识它的本地偏好；留着会在同名条目重新出现时突然生效。
-      setSphMcpPreference(this.deps.configPath, server.name, { enabled: true, sourceEnabled: true });
-      this.deps.refreshMcpPreferences();
-      await this.reloadMcpWithNotice();
-    }
-  }
-
-  /**
-   * 把外部来源的 server 固化进 sph 自己的配置。
-   *
-   * 两条路径都要能走：外部来源平时是**静默读取**的（保持无缝），但一旦用户决定「就按现在
-   * 这份来」，继续同时读两处就会让外部文件日后的改动继续悄悄影响运行时。导入即截止。
-   *
-   * 落点可选：用户级适合个人常用的 server，项目级适合要跟着仓库提交、给同事共享的。
-   * 传 undefined 走用户级。
-   */
-  private async commandNewSession(): Promise<void> {
-    const confirmed = await showConfirmDialog(this.ui, {
-      title: 'Start a new session?',
-      message: 'The current conversation stays on disk and can be resumed later.',
-      confirmLabel: 'New session',
-      cancelLabel: 'Cancel',
-    });
-    if (!confirmed) return;
-    const next = createSession(this.deps.sessionDir, this.deps.workspaceRoot);
+  /** /new 确认后的落地（SessionCommandHost）：锁成功才切，失败仍占用当前会话。 */
+  public startSession(next: JsonlSession): void {
     try {
       this.deps.claimSession?.(next.id);
     } catch (error) {
@@ -2309,76 +1369,8 @@ class InteractiveMode implements ApprovalUi {
     this.addNotice(`Started session ${this.session.id}`, 'success');
   }
 
-  private async commandExport(argument: string): Promise<void> {
-    const format = argument === 'json' || argument === 'html' ? argument : 'md';
-    const body = format === 'json'
-      ? exportJson(this.session)
-      : format === 'html'
-        ? exportHtml(this.session)
-        : exportMarkdown(this.session);
-    await showMessageDialog(this.ui, {
-      title: `Export (${format})`,
-      text: `\`\`\`\n${body.slice(0, 12_000)}${body.length > 12_000 ? '\n…' : ''}\n\`\`\``,
-    });
-  }
-
-  /**
-   * `/resume [id]`：带 id 前缀匹配直接切换，不带 id 打开选择器。
-   *
-   * 为什么保留 id 参数：sph 的内联选择器是纯列表模态，除 ↑↓/Enter/Esc 外一律吞键，
-   * 没法像 grok-build 那样「在选择器里粘贴 id 直接加载」，所以「按 id 直达」只剩参数
-   * 这一条路。正名与 CLI 的 `sph --resume <id>` 对齐，`/sessions` 保留为别名。
-   *
-   * 只有主会话可选。子代理会话是主会话跑出来的内部转录（同一个目录、独立文件），
-   * 切进去等于把某次 subagent 的中间过程当成一段独立对话继续，语义上不成立；
-   * 按 id 精确查找时要把它们一起捞出来，才能区分「不存在」和「是子代理会话」，
-   * 否则用户从工具详情里抄来的子会话 id 只会得到一句「没有匹配的会话」。
-   */
-  private async commandResume(id: string): Promise<void> {
-    if (id !== '') {
-      const sessions = await listSessions(this.deps.sessionDir, { includeSubagents: true });
-      const match = sessions.find((info) => info.id === id || info.id.startsWith(id));
-      if (!match) {
-        this.addNotice(`No session matching "${id}".`, 'warn');
-        return;
-      }
-      if (match.parentId !== undefined) {
-        this.addNotice(
-          `Session ${match.id} is a subagent session of ${match.parentId} — /resume ${match.parentId} opens the main session.`,
-          'warn',
-        );
-        return;
-      }
-      if (match.id === this.session.id) {
-        this.addNotice('Already on that session.', 'dim');
-        return;
-      }
-      this.switchSession(match.id);
-      return;
-    }
-
-    const sessions = await listSessions(this.deps.sessionDir);
-    if (sessions.length === 0) {
-      this.addNotice('No sessions yet.', 'dim');
-      return;
-    }
-    const items: SelectItem[] = sessions.map((info) => ({
-      value: info.id,
-      label: `${info.id}${info.id === this.session.id ? '  (current)' : ''}`,
-      description: `${new Date(info.mtimeMs).toISOString().replace('T', ' ').slice(0, 16)} · ${info.messages} msgs${this.subagentCountLabel(info.subagents)} · ${info.preview}`,
-    }));
-    const selected = await this.editor.showInlineMenu({ title: 'Sessions', items, maxVisible: 12, primaryColumnWidth: primaryColumnWidthFor(items) });
-    if (!selected || selected.value === this.session.id) return;
-    this.switchSession(selected.value);
-  }
-
-  /** 列表里主会话的副标题后缀：让「这个会话派过几个子代理」可见。 */
-  private subagentCountLabel(count: number): string {
-    return count === 0 ? '' : ` · ${count} subagent${count === 1 ? '' : 's'}`;
-  }
-
-  /** 切到指定会话并把状态从日志回放出来；调用方负责过滤「已在该会话」。 */
-  private switchSession(id: string): void {
+  /** /resume 的落地（SessionCommandHost）：claim 会话锁、换会话文件、回放恢复。 */
+  public switchToSession(id: string): void {
     try {
       this.deps.claimSession?.(id);
     } catch (error) {
@@ -2490,7 +1482,7 @@ class InteractiveMode implements ApprovalUi {
     if (Date.now() - this.lastActivityAt < RECAP_IDLE_MS) return;
     if (this.ui.hasOverlay()) return;
     // 后台子代理还在跑时不 recap：它会继续写会话，摘要马上就过时。
-    if (this.subagentLines.size > 0) return;
+    if (this.projection.liveSubagentCount > 0) return;
     if (Date.now() < this.recapRetryAfter) return;
     // 退避在**派发前**记下：闸门被拒也算一次尝试，否则会退化成每 30s 一次的全量读盘。
     this.recapRetryAfter = Date.now() + AUTO_RECAP_RETRY_MS;
@@ -2592,7 +1584,7 @@ class InteractiveMode implements ApprovalUi {
 
   /** 手动 recap 的 pending 行：拿到结果后原地换正文，失败/取消时整块撤掉。 */
   private startRecapBlock(): RecapMessageComponent {
-    this.breakToolGroup();
+    this.projection.breakToolGroup();
     const block = new RecapMessageComponent('', true);
     this.chatContainer.addChild(block);
     this.pendingRecap = block;
@@ -2608,11 +1600,13 @@ class InteractiveMode implements ApprovalUi {
   }
 
   /** 把一行 recap 摘要挂进对话流。 */
-  private addRecap(summary: string): void {
-    this.breakToolGroup();
+  public addRecap(summary: string): void {
+    this.projection.breakToolGroup();
     this.chatContainer.addChild(new RecapMessageComponent(summary));
     this.ui.requestRender();
   }
+
+  // ------------------------------------------------------------------ 计划模式
 
   private writePlanMode(active: boolean): void {
     if (this.plan.active === active) {
@@ -2671,6 +1665,8 @@ class InteractiveMode implements ApprovalUi {
     };
   }
 
+  // ------------------------------------------------------------------ Goal
+
   private async commandGoal(argument: string): Promise<void> {
     if (argument === '') {
       if (this.goal) {
@@ -2699,177 +1695,23 @@ class InteractiveMode implements ApprovalUi {
     this.addNotice(this.goal ? `Goal set: ${this.goal}` : 'Goal cleared.', 'success');
   }
 
-  private async commandModel(argument = ''): Promise<void> {
-    if (argument !== '') {
-      this.applyModel(argument);
-      return;
-    }
-    // 候选只来自 models.json 的声明：模型目录是显式维护的清单，不再从上游拉取缓存——
-    // 上游会新增模型，而拉一次就存住的缓存只会静默地给出旧列表。
-    const providers = this.deps.models();
-    if (providers.length === 0) {
-      this.addNotice('No models declared in models.json.', 'warn');
-      return;
-    }
-    // description 列内排三段：模型 ID / 提供商 / 状态。各段按最宽值 pad（间隙 2），
-    // 加上 label 列就是四列；中文名混排时字符数不等于显示宽，按 visibleWidth 对齐才不会锯齿。
-    const widthOf = (text: string): number => visibleWidth(text);
-    const idColumnWidth = Math.max(...providers.flatMap((provider) => provider.models.map((row) => widthOf(row.id))));
-    const providerColumnWidth = Math.max(...providers.map((provider) => widthOf(provider.name)));
-    const labelColumnWidth = Math.max(
-      ...providers.flatMap((provider) =>
-        provider.models.map((row) => widthOf(row.name ?? displayNameForModel(row.id))),
-      ),
-    );
-    const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
-    const items: SelectItem[] = providers.flatMap((provider) =>
-      provider.models.map((declared) => {
-        const value = provider.name === this.provider ? declared.id : `${provider.name}/${declared.id}`;
-        const isCurrent = provider.name === this.provider && declared.id === this.model;
-        return {
-          value,
-          label: declared.name ?? displayNameForModel(declared.id),
-          description: `${padTo(declared.id, idColumnWidth)}${padTo(provider.name, providerColumnWidth)}${
-            isCurrent ? 'current' : ''
-          }`.trimEnd(),
-        };
-      }),
-    );
-    if (items.length === 0) {
-      this.addNotice('No models declared in models.json.', 'warn');
-      return;
-    }
-    const selected = await this.editor.showInlineMenu({
-      title: 'Model',
-      items,
-      maxVisible: 14,
-      // 主列贴内容收紧：默认 32 列会让短模型名后面拖一长条空白，四列观感才散。
-      primaryColumnWidth: labelColumnWidth + 2,
-    });
-    if (!selected || selected.value === `${this.provider}/${this.model}`) return;
-    const { provider, model } = splitProviderModel(providers, selected.value);
-    this.applyModel(model, provider);
+  // ------------------------------------------------------------------ 模型/审批的应用（设置命令的宿主回调）
+
+  /** 设置命令读取当前值（SettingsCommandHost）。 */
+  public currentProvider(): string {
+    return this.provider;
   }
 
-  /**
-   * `/provider [name]`：切换 provider 的四步向导。
-   *
-   * 选 provider（带参数则跳过）→ 选模型 → 选推理等级 → 选端点协议。
-   * 后两步 Esc 跳过，不影响已经生效的前几步。模型候选 = 已声明 ∪ 上游目录，
-   * 选到未声明的就追加进 models.json 再切换。上游拉取失败不算失败：离线时
-   * 仍能在已声明模型里切换，不该被一次网络故障挡住。
-   */
-  private async commandProvider(argument = ''): Promise<void> {
-    const providers = this.deps.models();
-    // 列对齐基元：两处菜单（provider 选择、模型选择）共用同一套宽与 pad。
-    const widthOf = (text: string): number => visibleWidth(text);
-    const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
-    let targetName = argument.trim();
-    if (targetName === '') {
-      // description 排两段：baseUrl / 状态，各按最宽值对齐，current 不会锯齿。
-      const baseUrlColumnWidth = Math.max(...providers.map((provider) => widthOf(provider.baseUrl)));
-      const items: SelectItem[] = providers.map((provider) => ({
-        value: provider.name,
-        label: provider.name,
-        description: `${padTo(
-          provider.baseUrl,
-          baseUrlColumnWidth,
-        )}${provider.name === this.provider ? 'current' : ''}`.trimEnd(),
-      }));
-      const selected = await this.editor.showInlineMenu({
-        title: 'Provider',
-        items,
-        maxVisible: 14,
-        primaryColumnWidth: primaryColumnWidthFor(items),
-      });
-      if (!selected) return;
-      targetName = selected.value;
-    }
-    const provider = providers.find((item) => item.name === targetName);
-    if (!provider) {
-      this.addNotice(
-        `Unknown provider: ${targetName} (declared in models.json: ${providers.map((item) => item.name).join(', ')})`,
-        'warn',
-      );
-      return;
-    }
+  public currentModel(): string {
+    return this.model;
+  }
 
-    // 拉取过程用弹窗呈现：通知行会一闪而过且被打断，模态加载框让「正在等网络」这件事显式化。
-    const loading = showLoadingDialog(this.ui, {
-      title: provider.name,
-      text: `Fetching models from ${provider.baseUrl}…`,
-    });
-    let fetched: readonly string[] = [];
-    let catalogUnavailable = false;
-    try {
-      fetched = await listAvailableModels(provider.baseUrl, provider.apiKey, {
-        headers: provider.headers,
-        signal: AbortSignal.timeout(PROVIDER_FETCH_TIMEOUT_MS),
-      });
-    } catch (error) {
-      // 不少中转站没有 /models 目录端点（502 或挂住），这不是异常路径而是常态，
-      // 所以把「Esc 后手动输入」一并说清，而不是只报错。
-      catalogUnavailable = true;
-      this.addNotice(
-        `Fetch failed (${errorMessage(error)}) — the gateway may not offer a /models endpoint. Pick a declared model, or press Esc to type a model id.`,
-        'warn',
-      );
-    } finally {
-      loading.hide();
-    }
-    const declaredIds = new Set(provider.models.map((row) => row.id));
-    // 候选 = 已声明 ∪ 上游目录去重。是否已声明对选择行为没有差别（未声明的选中即追加），
-    // 所以不做 declared 标记——列表只回答「模型 ID 是什么、当前用的是哪个」两件事。
-    const candidates = [
-      ...provider.models.map((row) => ({ id: row.id, name: row.name })),
-      ...fetched
-        .filter((id) => !declaredIds.has(id))
-        .map((id) => ({ id, name: undefined })),
-    ];
-    // description 列排两段：模型 ID / 状态，各按最宽值 pad（间隙 2），label 列随内容收紧。
-    const idColumnWidth = Math.max(...candidates.map((candidate) => widthOf(candidate.id)));
-    const labelColumnWidth = Math.max(
-      ...candidates.map((candidate) => widthOf(candidate.name ?? displayNameForModel(candidate.id))),
-    );
-    const items: SelectItem[] = candidates.map((candidate) => {
-      const isCurrent = provider.name === this.provider && candidate.id === this.model;
-      return {
-        value: candidate.id,
-        label: candidate.name ?? displayNameForModel(candidate.id),
-        description: `${padTo(candidate.id, idColumnWidth)}${isCurrent ? 'current' : ''}`.trimEnd(),
-      };
-    });
-    let selected = await this.editor.showInlineMenu({
-      title: `Model @ ${provider.name}`,
-      items,
-      maxVisible: 14,
-      primaryColumnWidth: labelColumnWidth + 2,
-    });
-    if (!selected && catalogUnavailable) {
-      // 目录拉不到时的兜底：直接键入网关侧的模型 id，随后照样追加进 models.json。
-      const typed = await showInputDialog(this.ui, {
-        title: `Model id @ ${provider.name}`,
-        hint: 'Type the model id exactly as the gateway expects it',
-      });
-      if (typed === undefined || typed.trim() === '') return;
-      selected = { value: typed.trim(), label: typed.trim() };
-    }
-    if (!selected) return;
-    const modelId = selected.value;
-    if (!declaredIds.has(modelId)) {
-      try {
-        // 只追加当前选中的这一条，不把上游目录整表写进 models.json。
-        appendModelDeclaration(sphModelsPath(), provider.name, modelId);
-        this.addNotice(`Declared ${modelId} under ${provider.name} in models.json.`, 'success');
-      } catch (error) {
-        this.addNotice(`Failed to append ${modelId} to models.json: ${errorMessage(error)}`, 'warn');
-      }
-    }
-    this.applyModel(modelId, provider.name);
-    const effort = await this.promptEffort();
-    if (effort !== undefined) this.applyEffort(effort);
-    const api = await this.promptApi(this.deps.resolveModel(modelId, provider.name).api);
-    if (api !== undefined) this.applyApi(api, provider, modelId);
+  public currentEffort(): ReasoningEffort | undefined {
+    return this.effort;
+  }
+
+  public currentApproval(): ApprovalMode {
+    return this.approval;
   }
 
   /**
@@ -2878,7 +1720,7 @@ class InteractiveMode implements ApprovalUi {
    * 声明了容量的模型一并生效 contextWindow / maxTokens——换模型后窗口不再是旧的；
    * 未声明的模型保持现值，兜底由 config.toml 的全局值管。
    */
-  private applyModel(model: string, providerName?: string): void {
+  public applyModel(model: string, providerName?: string): void {
     const provider = providerName ?? this.provider;
     const resolved = this.deps.resolveModel(model, provider);
     this.provider = provider;
@@ -2898,51 +1740,7 @@ class InteractiveMode implements ApprovalUi {
     );
   }
 
-  private async commandEffort(argument = ''): Promise<void> {
-    if (argument !== '') {
-      const match = REASONING_EFFORTS.find((effort) => effort === argument);
-      if (!match) {
-        this.addNotice(`Unknown effort: ${argument} (${REASONING_EFFORTS.join(' | ')})`, 'warn');
-        return;
-      }
-      this.applyEffort(match);
-      return;
-    }
-    const selected = await this.promptEffort();
-    if (selected !== undefined) this.applyEffort(selected);
-  }
-
-  private async promptEffort(): Promise<ReasoningEffort | undefined> {
-    const items: SelectItem[] = REASONING_EFFORTS.map((effort) => ({
-      value: effort,
-      label: effort,
-      description: effort === this.effort ? 'current' : undefined,
-    }));
-    const selected = await this.editor.showInlineMenu({
-      title: 'Reasoning effort',
-      items,
-      maxVisible: 6,
-      primaryColumnWidth: primaryColumnWidthFor(items),
-    });
-    return selected === undefined ? undefined : (selected.value as ReasoningEffort);
-  }
-
-  private async promptApi(current: ApiProtocol): Promise<ApiProtocol | undefined> {
-    const items: SelectItem[] = API_PROTOCOLS.map((api) => ({
-      value: api,
-      label: api,
-      description: api === current ? 'current' : undefined,
-    }));
-    const selected = await this.editor.showInlineMenu({
-      title: 'API protocol',
-      items,
-      maxVisible: 3,
-      primaryColumnWidth: primaryColumnWidthFor(items),
-    });
-    return selected === undefined ? undefined : (selected.value as ApiProtocol);
-  }
-
-  private applyEffort(effort: ReasoningEffort): void {
+  public applyEffort(effort: ReasoningEffort): void {
     this.effort = effort;
     this.client = this.buildClient();
     const error = this.writeConfig({ reasoning_effort: effort });
@@ -2956,7 +1754,7 @@ class InteractiveMode implements ApprovalUi {
    * 把协议写到该模型的声明上（覆盖 provider 默认），并立刻重建 client。
    * 内存里的 registry 也改一笔，否则本进程 resolveModel 仍读到旧值。
    */
-  private applyApi(api: ApiProtocol, provider: ProviderDeclaration, modelId: string): void {
+  public applyApi(api: ApiProtocol, provider: ProviderDeclaration, modelId: string): void {
     let writeError: string | undefined;
     try {
       upsertModelApi(sphModelsPath(), provider.name, modelId, api);
@@ -2973,45 +1771,7 @@ class InteractiveMode implements ApprovalUi {
     );
   }
 
-  /**
-   * `/permission [mode]`：无参数打开选择器，带参数直接设。
-   *
-   * 命令名对齐 dsh 的 `/permission`；写回的配置键仍是 `approval`——那是「审批策略」这个
-   * 概念的名字，而且已经躺在用户既有的 config.toml 里，跟着改名会静默丢掉他们的设置。
-   */
-  private async commandPermission(argument = ''): Promise<void> {
-    if (argument !== '') {
-      const match = APPROVAL_MODES.find((mode) => mode === argument);
-      if (!match) {
-        this.addNotice(`Unknown approval mode: ${argument} (${APPROVAL_MODES.join(' | ')})`, 'warn');
-        return;
-      }
-      this.applyApproval(match);
-      return;
-    }
-    const items: SelectItem[] = APPROVAL_MODES.map((mode) => ({
-      value: mode,
-      label: mode,
-      description:
-        mode === 'ask'
-          ? 'Ask before every reviewed tool call'
-          : mode === 'auto'
-            ? 'Let a model reviewer decide, escalate to you when unsure'
-            : 'Approve everything automatically',
-    }));
-    const selected = await this.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: 3, primaryColumnWidth: primaryColumnWidthFor(items) });
-    if (!selected) return;
-    this.applyApproval(selected.value as ApprovalMode);
-  }
-
-  /** Shift+Tab：在 ask → auto → yolo 间循环审批模式（复用 /permission 的应用逻辑）。 */
-  private cycleApprovalMode(): void {
-    const index = APPROVAL_MODES.indexOf(this.approval);
-    const next = APPROVAL_MODES[(index + 1) % APPROVAL_MODES.length]!;
-    this.applyApproval(next);
-  }
-
-  private applyApproval(mode: ApprovalMode): void {
+  public applyApproval(mode: ApprovalMode): void {
     this.approval = mode;
     this.applyEditorBorder();
     const error = this.writeConfig({ approval: mode });
@@ -3025,7 +1785,7 @@ class InteractiveMode implements ApprovalUi {
    * 输入框边框：计划模式整框蓝色（失焦也蓝，跑轮次时仍能辨认）。
    * 否则失焦弱化；聚焦时 ask 品牌紫，auto 黄，yolo 红。
    */
-  private applyEditorBorder(): void {
+  public applyEditorBorder(): void {
     if (this.plan.active) {
       const plan = (text: string) => theme.fg('plan', text);
       this.editor.borderColor = plan;
@@ -3038,13 +1798,12 @@ class InteractiveMode implements ApprovalUi {
     this.editor.focusBorderColor = (text: string) => theme.fg(focus, text);
   }
 
+  // ------------------------------------------------------------------ 杂项
+
   private clearChat(): void {
     this.transcriptView?.setPinY(undefined);
     this.chatContainer.clear();
-    this.toolGroups.length = 0;
-    this.activeToolGroup = undefined;
-    this.pendingTools.clear();
-    this.streamingAssistant = undefined;
+    this.projection.clear();
     this.pendingRecap = undefined;
     this.chatContainer.addChild(new Spacer(1));
     this.chatContainer.addChild(new DynamicBorder());

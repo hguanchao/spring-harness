@@ -20,7 +20,7 @@ export function parseApiProtocol(value: unknown, where = 'api'): ApiProtocol {
   return value as ApiProtocol;
 }
 
-export function parseOptionalBoolean(value: unknown, key: string): boolean | undefined {
+function parseOptionalBoolean(value: unknown, key: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw new ConfigError(`${key} must be a boolean`);
   return value;

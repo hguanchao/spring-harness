@@ -35,6 +35,7 @@ const REGISTRY = {
       baseUrl: 'https://api.example.com/v1',
       api: 'responses',
       apiKey: '$MAIN_KEY',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: 刻意写 ${VAR} 字面量，测 models.json 的插值语法
       headers: { 'User-Agent': 'sph/${SPH_SUFFIX}' },
       compat: { prompt_cache_key: true },
       models: [
@@ -56,6 +57,7 @@ describe('parseRegistry', () => {
     assert.equal(resolveModel(main, 'claude').api, 'anthropic-messages');
   });
 
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 测试名引用的是插值语法的字面形式
   it('$VAR 与 ${VAR} 插值进 apiKey 与 headers', () => {
     const main = parseRegistry(REGISTRY, env).providers[0]!;
     assert.equal(main.apiKey, 'sk-main');

@@ -203,7 +203,7 @@ function parseWarningStatus(raw: string): number | undefined {
   return undefined;
 }
 
-export class StatusIndicator extends Loader {
+class StatusIndicator extends Loader {
   readonly kind: StatusIndicatorKind;
 
   constructor(

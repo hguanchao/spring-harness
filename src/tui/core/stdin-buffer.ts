@@ -17,7 +17,7 @@
  * MIT License - Copyright (c) 2025 opentui
  */
 
-import { EventEmitter } from "events";
+import { EventEmitter } from "node:events";
 
 const ESC = "\x1b";
 const DEFAULT_SEQUENCE_TIMEOUT_MS = 50;

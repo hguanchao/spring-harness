@@ -25,7 +25,7 @@ const PREVIEW_TAIL = 1000;
 
 let spillSeq = 0;
 
-export function sanitizeToolName(name: string): string {
+function sanitizeToolName(name: string): string {
   return sanitizeIdent(name, 40, 'tool');
 }
 

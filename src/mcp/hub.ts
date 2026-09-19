@@ -240,7 +240,7 @@ export class McpHub {
       const conn = this.connections.get(spec.name);
       // connected = 握手完成（含 tools/list）且进程还活着。spawn 成功但仍在握手的算
       // connecting——「进程活着但工具还没就绪」对使用者就是还没连上。
-      const connected = conn !== undefined && conn.ready && conn.child.exitCode === null;
+      const connected = conn?.ready === true && conn.child.exitCode === null;
       const problem = spawnable
         ? (connected ? undefined : this.problems.get(spec.name) ?? 'not connected')
         : blocked;
@@ -499,7 +499,7 @@ function targetOf(spec: McpServerSpec): string {
       // 只看**以 `-` 开头的旗帜**：`GITHUB_TOKEN=x` 这种赋值本身就是敏感项，但它不该
       // 顺带把它后面那个普通参数也打成星号。
       const afterFlag =
-        previous !== undefined && previous.startsWith('-') && SECRET_NAME.test(previous);
+        previous?.startsWith('-') === true && SECRET_NAME.test(previous);
       return quoteArg(afterFlag || hasSecretAssignment(part) ? redactArg(part) : part);
     })
     .filter((part) => part !== '')
@@ -565,7 +565,7 @@ function spawnableSignature(spec: McpServerSpec): string {
  * 段变更（见 agent/prefix-tracker.ts）会作废其后全部缓存。存储前规范化一次，序列化
  * 从此与 server 的任意抖动解耦。语义等价：JSON 对象本就是无序集合，排序只改呈现。
  */
-export function deepSortKeys(value: unknown): unknown {
+function deepSortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(deepSortKeys);
   if (value === null || typeof value !== 'object') return value;
   const out: Record<string, unknown> = {};
