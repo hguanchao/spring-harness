@@ -14,7 +14,7 @@ export const SUBAGENT_APPROVAL_POLICIES = ['inherit', 'strict'] as const;
 export type SubagentApprovalPolicy = (typeof SUBAGENT_APPROVAL_POLICIES)[number];
 
 /** 需要审查的工具：ask 模式问人，auto 模式过分类器，yolo 直接放行。 */
-export const REVIEWED_TOOLS = new Set(['bash', 'web_search', 'web_fetch', 'mcp', 'enter_plan_mode']);
+export const REVIEWED_TOOLS = new Set(['bash', 'pwsh', 'web_search', 'web_fetch', 'mcp', 'enter_plan_mode']);
 
 export interface ApprovalRequest {
   tool: string;
@@ -98,7 +98,7 @@ export function evaluateRules(
  * 包括 `rm -rf`。用户以为自己只批准了眼前这一条，实际签出的是整个工具——审批机制最容易
  * 漏的就是这个洞。所以按每个工具真正的危险维度取键：
  *
- * - `bash`：归一化后的命令原文。换一个参数就是另一个动作，必须重新问。
+ * - `bash` / `pwsh`：归一化后的命令原文。换一个参数就是另一个动作，必须重新问。
  * - `escalate`：具体路径，它每次请求的本来就是一个确定的写操作。
  * - `mcp`：`server.tool`。工具名本身已经足够具体，不需要再细分。
  * - `enter_plan_mode`：不带参数，工具名就是动作本身。
@@ -109,9 +109,10 @@ export function evaluateRules(
  */
 export function approvalScopeKey(request: ApprovalRequest): string {
   switch (request.tool) {
-    case 'bash': {
+    case 'bash':
+    case 'pwsh': {
       const command = (request.command ?? '').trim().replace(/\s+/g, ' ');
-      return command === '' ? 'bash' : `bash ${command}`;
+      return command === '' ? request.tool : `${request.tool} ${command}`;
     }
     case 'escalate':
       return request.path ? `escalate ${request.path}` : 'escalate';

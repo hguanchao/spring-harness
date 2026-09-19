@@ -452,6 +452,11 @@ export interface TUI extends Component {
 	requestRender(force?: boolean): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
+	/**
+	 * 鼠标移动观察者（仅实现方支持鼠标时触发；move/drag 每事件一次，先于组件分发）。
+	 * 供悬停类 UI 做「移出即隐藏」：观察者先清态，同帧内命中自己的 move 再重新点亮。
+	 */
+	onMouseMotion?: (x: number, y: number) => void;
 }
 
 export const VIEWPORT_TUI = Symbol.for("@earendil-works/pi-tui/viewport");

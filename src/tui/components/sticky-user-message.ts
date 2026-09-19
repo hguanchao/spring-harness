@@ -127,14 +127,43 @@ export function computeStickyLayout(
 }
 
 export function compositeStickyUserMessages(screen: string[], frame: LayoutFrame, width: number): string[] {
+  const placement = stickyPlacement(frame);
+  if (!placement) return screen;
+  const result = [...screen];
+  const last = Math.min(placement.y + placement.lines.length, result.length);
+  for (let row = placement.y; row < last; row++) {
+    const line = placement.lines[row - placement.y];
+    if (line === undefined) continue;
+    result[row] = compositeTuiLine(result[row] ?? '', line, placement.x, placement.width, width);
+  }
+  return result;
+}
+
+export interface StickyOverlayRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 当前帧吸顶气泡占据的屏幕矩形。合成（画上去）与鼠标命中（别点穿）必须共用同一份
+ * 计算：气泡是画在屏幕缓冲上的合成层，不在布局树里，命中判定若各自为政就会漂移。
+ */
+export function stickyOverlayRects(frame: LayoutFrame): StickyOverlayRect[] {
+  const placement = stickyPlacement(frame);
+  return placement ? [{ x: placement.x, y: placement.y, width: placement.width, height: placement.lines.length }] : [];
+}
+
+function stickyPlacement(frame: LayoutFrame): { x: number; y: number; width: number; lines: string[] } | undefined {
   const scrollView = frame.primaryScrollView;
-  if (!scrollView) return screen;
+  if (!scrollView) return undefined;
   const scrollBox = getScrollViewBox(frame, scrollView);
-  if (!scrollBox || scrollBox.clip.width <= 0 || scrollBox.clip.height <= 0) return screen;
+  if (!scrollBox || scrollBox.clip.width <= 0 || scrollBox.clip.height <= 0) return undefined;
 
   const messages: LayoutBox[] = [];
   for (const child of scrollBox.children) collectStickyBoxes(child, messages);
-  if (messages.length === 0) return screen;
+  if (messages.length === 0) return undefined;
 
   const viewportTop = scrollBox.clip.y;
   const viewportHeight = scrollBox.clip.height;
@@ -158,28 +187,20 @@ export function compositeStickyUserMessages(screen: string[], frame: LayoutFrame
 
   const layout = computeStickyLayout(scrollOffset, viewportHeight, prompts);
   const rendered = layout.pinned ?? layout.pushed;
-  if (!rendered) return screen;
+  if (!rendered) return undefined;
 
   const sticky = messages[rendered.index];
-  if (!sticky || !isStickyUserMessage(sticky.component)) return screen;
+  if (!sticky || !isStickyUserMessage(sticky.component)) return undefined;
 
   const overlayWidth = Math.max(1, sticky.rect.width);
   const overlay = sticky.component.renderSticky(overlayWidth, rendered.renderHeight);
-  if (overlay.length === 0) return screen;
+  if (overlay.length === 0) return undefined;
   const visible = overlay.slice(rendered.clipTop);
-  if (visible.length === 0) return screen;
+  if (visible.length === 0) return undefined;
 
   // 与正文气泡同宽：auto 滚动条是叠在最后一列上的，为它让列会让吸顶比下面的气泡短一截。
   // 滑块由 doRender 在装饰层之后重画，盖回最后一列。
   const clipRight = scrollBox.clip.x + scrollBox.clip.width;
   const paintWidth = Math.max(1, Math.min(overlayWidth, clipRight - sticky.rect.x));
-  const viewportBottom = viewportTop + viewportHeight;
-  const result = [...screen];
-  const last = Math.min(viewportTop + visible.length, viewportBottom, result.length);
-  for (let row = viewportTop; row < last; row++) {
-    const line = visible[row - viewportTop];
-    if (line === undefined) continue;
-    result[row] = compositeTuiLine(result[row] ?? '', line, sticky.rect.x, paintWidth, width);
-  }
-  return result;
+  return { x: sticky.rect.x, y: viewportTop, width: paintWidth, lines: visible };
 }

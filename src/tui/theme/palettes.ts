@@ -41,6 +41,8 @@ export const PALETTE = {
   toolPendingBg: MUTED,
   toolTitle: MUTED,
   toolOutput: MUTED,
+  /** 挂起条悬停底：比画布（#141414）只亮一档的极浅带，hover 反馈不抢正文。 */
+  steerHoverBg: '#202020',
 
   mdText: TEXT,
   mdH1: PRIMARY,

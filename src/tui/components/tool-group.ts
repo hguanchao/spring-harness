@@ -33,6 +33,7 @@ import {
 import { formatDuration } from '../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
+import { armHoverHighlight } from './hover-highlight.js';
 import { asSelectableRow, handleSelectablePress } from './selectable-row.js';
 import {
   TOOL_DETAIL_INDENT,
@@ -41,6 +42,9 @@ import {
   TOOL_MEMBER_INDENT,
   ToolExecutionComponent,
 } from './tool-execution.js';
+
+/** 扫光心跳周期：与状态行 Loader / 子代理行的转圈帧同拍（80ms）。 */
+const SHIMMER_TICK_MS = 80;
 
 /** 汇总行用的动词/名词词表（对齐 grok-build 的 VerbGroupKind）。 */
 type VerbKind =
@@ -95,6 +99,7 @@ const TOOL_VERB_KINDS: Record<string, VerbKind> = {
   web_fetch: 'webSearch',
   subagent: 'subagent',
   bash: 'command',
+  pwsh: 'command',
   write: 'edit',
   edit: 'edit',
   mcp: 'mcp',
@@ -229,11 +234,38 @@ export class ToolGroupComponent extends VStack {
   private dirty = true;
   /** 上次重建用的宽度：汇总行按宽度截断，宽度变了要重算。 */
   private lastWidth = -1;
+  /** 扫光心跳：仅组内存活成员期间运转，见 pumpAnimation。 */
+  private animTimer?: ReturnType<typeof setInterval>;
 
   constructor(ui: TUI) {
     super();
     this.ui = ui;
     this.headerRegion = asSelectableRow(new MouseRegion(this.headerText, (event) => this.handleHeaderMouse(event)));
+  }
+
+  /**
+   * 扫光心跳的驱动。转录行活在 ScrollView 的内容缓存后面：转圈/子代理 dock 行的
+   * 心跳走视口通道（不 bump contentGeneration），刷得到 dock 却刷不到这里——表现为
+   * 扫光冻结，只有双击这类完整渲染才走一帧。存活期间自走完整渲染通道，组收尾自停。
+   */
+  private pumpAnimation(live: boolean): void {
+    if (live && this.animTimer === undefined) {
+      this.animTimer = setInterval(() => {
+        // tick 里复查 isLive：组收尾即自停，不让定时器空转挂进程。
+        if (this.isLive()) this.ui.requestRender();
+        else this.stopAnimation();
+      }, SHIMMER_TICK_MS);
+      this.animTimer.unref?.();
+    } else if (!live) {
+      this.stopAnimation();
+    }
+  }
+
+  private stopAnimation(): void {
+    if (this.animTimer !== undefined) {
+      clearInterval(this.animTimer);
+      this.animTimer = undefined;
+    }
   }
 
   /** 追加一个工具调用；调用方负责先 setCompact(true)。 */
@@ -322,7 +354,22 @@ export class ToolGroupComponent extends VStack {
     this.dirty = true;
   }
 
+  private headerHovered = false;
+
+  /** 悬停高亮：汇总行整行铺浅底。返回是否有变化。 */
+  private setHeaderHovered(on: boolean): boolean {
+    if (this.headerHovered === on) return false;
+    this.headerHovered = on;
+    this.headerText.setCustomBgFn(on ? (text) => theme.bg('toolPendingBg', text) : undefined);
+    return true;
+  }
+
   private handleHeaderMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // 悬停高亮：汇总行铺浅底。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
+    if (event.type === 'move' && this.setHeaderHovered(true)) {
+      armHoverHighlight(() => this.setHeaderHovered(false));
+      this.ui.requestRender();
+    }
     if (event.button !== 'left') return undefined;
     const press = handleSelectablePress(this.headerRegion, event);
     if (press) return press;
@@ -364,7 +411,8 @@ export class ToolGroupComponent extends VStack {
     const suffix = summary.failed > 0 ? ` · ${summary.failed} failed` : '';
     const budget = Math.max(1, width - TOOL_GROUP_INDENT - 2 - visibleWidth(suffix));
     const label = truncateToWidth(summary.text, budget, '…');
-    let text = `${' '.repeat(TOOL_GROUP_INDENT)}${theme.fg(glyphColor, mark)} ${theme.fg('toolTitle', label)}`;
+    const painted = summary.running ? theme.shimmer(label, Date.now()) : theme.fg('toolTitle', label);
+    let text = `${' '.repeat(TOOL_GROUP_INDENT)}${theme.fg(glyphColor, mark)} ${painted}`;
     if (suffix !== '') text += theme.fg('error', suffix);
     this.headerText.setText(text);
   }
@@ -385,8 +433,9 @@ export class ToolGroupComponent extends VStack {
     // 组里有汇总行时，思考永远是成员：缩进一级，避免和汇总行并排读成两件并列的事。
     // 纯思考组没有汇总行，思考行就是组头，仍停在组级。
     const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
+    const painted = member.running ? theme.shimmer(label, Date.now()) : theme.fg(labelColor, label);
     member.row.setText(
-      `${' '.repeat(rowIndent)}${theme.fg('primary', caret)} ${theme.fg(labelColor, label)}`,
+      `${' '.repeat(rowIndent)}${theme.fg('primary', caret)} ${painted}`,
     );
 
     member.body.clear();
@@ -444,12 +493,22 @@ export class ToolGroupComponent extends VStack {
   }
 
   override render(width: number): string[] {
-    // 同一帧内累积的多次增量在这里合并成一次重建；汇总行的截断依赖宽度，宽度变了也要重算。
-    if (this.dirty || this.lastWidth !== width) {
+    // 进行中的组每帧重画标签扫光；其余仍合并脏标记，避免空闲时拆树。
+    const live = this.isLive();
+    this.pumpAnimation(live);
+    if (live || this.dirty || this.lastWidth !== width) {
       this.dirty = false;
       this.lastWidth = width;
       this.rebuild(width);
     }
     return super.render(width);
+  }
+
+  private isLive(): boolean {
+    if (this.tools.some((tool) => {
+      const status = tool.status();
+      return status === 'pending' || status === 'running';
+    })) return true;
+    return this.members.some((entry) => entry.kind === 'thinking' && entry.thinking.running);
   }
 }

@@ -44,4 +44,39 @@ describe('createSteeringInbox', () => {
     assert.equal(inbox.full(), true);
     assert.equal(inbox.peek().length, STEERING_QUEUE_LIMIT);
   });
+
+  it('move 与相邻项交换：越界不动并返回 false', () => {
+    const inbox = createSteeringInbox();
+    inbox.push('a');
+    inbox.push('b');
+    inbox.push('c');
+    assert.equal(inbox.move(2, 1), false, '尾部不能再下移');
+    assert.equal(inbox.move(0, -1), false, '顶部不能再上移');
+    assert.equal(inbox.move(1, -1), true);
+    assert.deepEqual(inbox.peek(), ['b', 'a', 'c']);
+    assert.equal(inbox.move(0, 1), true);
+    assert.deepEqual(inbox.peek(), ['a', 'b', 'c']);
+  });
+
+  it('removeAt 取走指定位置；越界返回 undefined', () => {
+    const inbox = createSteeringInbox();
+    assert.equal(inbox.removeAt(0), undefined);
+    inbox.push('a');
+    inbox.push('b');
+    inbox.push('c');
+    assert.equal(inbox.removeAt(1), 'b');
+    assert.deepEqual(inbox.peek(), ['a', 'c']);
+  });
+
+  it('insertAt 回填原排序位：越界收敛为尾部追加', () => {
+    const inbox = createSteeringInbox();
+    inbox.push('a');
+    inbox.push('c');
+    inbox.insertAt(1, 'b');
+    assert.deepEqual(inbox.peek(), ['a', 'b', 'c']);
+    inbox.insertAt(99, 'd');
+    assert.deepEqual(inbox.peek(), ['a', 'b', 'c', 'd'], '位置已失效时收敛为追加');
+    inbox.insertAt(-1, 'head');
+    assert.deepEqual(inbox.peek(), ['head', 'a', 'b', 'c', 'd'], '负下标收敛为插到队首');
+  });
 });

@@ -40,7 +40,7 @@ describe('主系统提示词的结构', () => {
     const p = base();
     assert.ok(p.includes('Workspace root: E:\\ws'));
     // 必须点名具体 shell：Windows 上是 pwsh 而非 bash，bash-only 语法会静默失败。
-    assert.ok(/Shell: .*(pwsh|sh)/.test(p), 'shell 必须说清是 pwsh 还是 sh');
+    assert.ok(/Shell: .*bash and pwsh/.test(p), '身份段必须同时点名 bash 与 pwsh');
     assert.ok(p.includes('Sandbox: workspace'));
     assert.match(p, /Today: \d{4}-\d{2}-\d{2} \([^)]+\)/, '身份段必须带本地日期，否则模型会用训练截止日当今天');
     assert.ok(p.includes(`OS: ${process.platform}`));

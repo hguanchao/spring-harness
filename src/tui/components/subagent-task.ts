@@ -12,6 +12,8 @@ import { theme } from '../theme/theme.js';
 import { formatDuration } from '../../util.js';
 
 const DOCK_ROW_INDENT = 5;
+/** 右缘预留：1 列滚动条 █ + 空两格——stats 贴到行宽末列会被滚动条盖住（与 Loader 同款约定）。 */
+const DOCK_RIGHT_PAD = 4;
 const STATS_GAP = 2;
 /** 与状态行 Loader 同一套 braille 帧；用户指定运行中用 ⠏，转起来才像在跑。 */
 const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -114,8 +116,8 @@ export class SubagentTaskComponent extends Container {
     const meta =
       this.activity === '' ? '' : theme.fg(this.activityError ? 'error' : 'muted', ` · ${this.activity}`);
     const frame = SPIN_FRAMES[Math.floor(Date.now() / SPIN_MS) % SPIN_FRAMES.length]!;
-    const left = `${theme.fg('primary', frame)} ${theme.bold(theme.fg('thinkingText', this.head))}${meta}`;
-    const inner = Math.max(1, width - DOCK_ROW_INDENT);
+    const left = `${theme.fg('primary', frame)} ${theme.bold(theme.shimmer(this.head, Date.now()))}${meta}`;
+    const inner = Math.max(1, width - DOCK_ROW_INDENT - DOCK_RIGHT_PAD);
     const leftMax = Math.max(1, inner - statsWidth - STATS_GAP);
     const clipped = truncateToWidth(left, leftMax, '…');
     const pad = Math.max(STATS_GAP, inner - visibleWidth(clipped) - statsWidth);

@@ -16,22 +16,40 @@ function lookOnPath(name: string): string | undefined {
   return undefined;
 }
 
+export type ShellKind = 'bash' | 'pwsh';
+
+export function resolveBashBinary(): { command: string; prefixArgs: string[] } {
+  if (process.platform === 'win32') {
+    const found = lookOnPath('bash');
+    if (!found) throw new Error('bash not found on PATH');
+    return { command: found, prefixArgs: ['-c'] };
+  }
+  const found = lookOnPath('bash');
+  if (found) return { command: found, prefixArgs: ['-c'] };
+  if (existsSync('/bin/bash')) return { command: '/bin/bash', prefixArgs: ['-c'] };
+  if (existsSync('/bin/sh')) return { command: '/bin/sh', prefixArgs: ['-c'] };
+  throw new Error('bash not found on PATH');
+}
+
+export function resolvePwshBinary(): { command: string; prefixArgs: string[] } {
+  const found = lookOnPath('pwsh') ?? (process.platform === 'win32' ? lookOnPath('powershell') : undefined);
+  if (!found) throw new Error('pwsh not found on PATH');
+  const prefixArgs = process.platform === 'win32'
+    ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command']
+    : ['-NoProfile', '-NonInteractive', '-Command'];
+  return { command: found, prefixArgs };
+}
+
 /** CreateProcessAsUserW 需要绝对路径；PATH 搜索只发生在 CreateProcessW。 */
 export function resolveShellBinary(): { command: string; prefixArgs: string[] } {
-  if (process.platform !== 'win32') {
-    return { command: '/bin/sh', prefixArgs: ['-c'] };
-  }
-  const found = lookOnPath('pwsh') ?? lookOnPath('powershell');
-  if (!found) throw new Error('pwsh/powershell not found on PATH');
-  // Bypass：机器 ExecutionPolicy 常拦 npm.ps1 / npx.ps1，那是宿主策略，不是命令写错。
-  return {
-    command: found,
-    prefixArgs: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'],
-  };
+  return resolvePwshBinary();
 }
 
 /** 一次性命令的 argv：shell 二进制 + 前缀 + 脚本。loop 与 shell 工具共用，避免两处各拼一遍。 */
-export function shellArgv(script: string): { command: string; args: string[] } {
-  const shell = resolveShellBinary();
+export function shellArgv(script: string, kind: ShellKind = process.platform === 'win32' ? 'pwsh' : 'bash'): {
+  command: string;
+  args: string[];
+} {
+  const shell = kind === 'pwsh' ? resolvePwshBinary() : resolveBashBinary();
   return { command: shell.command, args: [...shell.prefixArgs, script] };
 }

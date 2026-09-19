@@ -80,6 +80,7 @@ import {
   Container,
   type Component,
   isKeyRelease,
+  matchesKey,
   isViewportTUI,
   type SelectItem,
   type SlashCommand,
@@ -89,6 +90,8 @@ import {
   TuiAltScreen,
   ProcessTerminal,
   type Terminal,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
   VStack,
   ScrollView,
 } from './core/index.js';
@@ -110,6 +113,8 @@ import {
   keyHint,
   workingWarningKey,
 } from './components/interaction.js';
+import { handleSelectablePress } from './components/selectable-row.js';
+import { clearHoverHighlight } from './components/hover-highlight.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent, summarizeArgs, toolDisplayName } from './components/tool-execution.js';
 import { SubagentTaskComponent } from './components/subagent-task.js';
 import { ToolGroupComponent } from './components/tool-group.js';
@@ -246,6 +251,18 @@ function message(error: unknown): string {
 
 /** 输入框上方子代理栏最多显示几行，多出来的折成 `… N more`。 */
 const MAX_DOCK_SUBAGENT_ROWS = 5;
+/** 挂起条行右缘预留（4 列 = 1 列滚动条 + 空两格，与状态行 Loader 同款，右缘同列）。 */
+const STEER_RIGHT_PAD = 4;
+/** 挂起条首行上方的空行间距；鼠标 y 换算行下标时要扣掉它。 */
+const STEER_TOP_GAP = 1;
+/** 悬停/焦点行动作按钮链（从右往左紧贴无缝，宽不够整颗放弃）。 */
+const STEER_BUTTONS: Array<{ action: SteerAction; label: string }> = [
+  { action: 'cancel', label: '[cancel]' },
+  { action: 'edit', label: '[edit]' },
+  { action: 'send', label: '[Send now]' },
+];
+
+type SteerAction = 'cancel' | 'edit' | 'send';
 /** `/provider` 拉上游目录的超时。刻意短：不少中转站根本没有 /models 目录端点（返回 502 或干脆挂住），走代理时 CONNECT 隧道也会拖很久。目录只是发现手段，降级路径（已声明 + 手动输入）才是兜底。 */
 const PROVIDER_FETCH_TIMEOUT_MS = 10_000;
 
@@ -300,6 +317,8 @@ class InteractiveMode implements ApprovalUi {
   private readonly chatContainer = new VStack();
   private readonly documentContainer = new VStack();
   private readonly pendingContainer = new Container();
+  /** 挂起条专属容器：工作状态行之下、输入框之上——排队的话紧贴着要发送的位置。 */
+  private readonly steersContainer = new Container();
   private readonly subagentContainer = new Container();
   private readonly subagentHeader = new Text('', 0, 0);
   private readonly statusContainer = new Container();
@@ -315,14 +334,31 @@ class InteractiveMode implements ApprovalUi {
   private readonly turnInbox: SteeringInbox = createSteeringInbox();
   /**
    * 运行中输入的挂起条：每帧从 turnInbox 动态渲染，队列空即零占用。
-   * 渲染进 pendingContainer（与工具调用行同区）——不新增布局段，工作状态条的位置
-   * 与可见性不受影响；容器本身 shrink 弹性，行数多时先压它。
+   * 渲染进 steersContainer（工作状态行之下、输入框之上）；容器 shrink 弹性，
+   * 行数多时先压它。行内交互（悬停按钮/双击取回）见 onSteersMouse，键盘见 onQueueNav。
    */
   private readonly steersBar: Component = {
     invalidate: () => {},
-    render: () => this.renderPendingSteers(),
+    render: (width: number) => this.renderPendingSteers(width),
+    handleMouse: (event) => this.onSteersMouse(event),
   };
   private followUps: string[] = [];
+  /** 挂起队列的选中项下标：↑↓/J/K 与悬停的作用对象；文字加粗亮色标识。 */
+  private steerCursor?: number;
+  /** 队列焦点态：编辑器按 ↑ 进入后，↑↓/⇧J/⇧K/Enter/e/x/Delete/Esc 归队列面板（grok-build 同款）。 */
+  private steerFocus = false;
+  /** 鼠标悬停的挂起消息下标：该行铺极浅底并亮出动作按钮，移出即隐藏。 */
+  private steerHover?: number;
+  /** 悬停中的动作按钮：按钮文字按动作变色（cancel 红、edit/send 亮）。 */
+  private steerButtonHover?: { row: number; action: SteerAction };
+  /** 本帧渲染出的按钮命中区（组件局部坐标，x 为半开区间 [x0, x1)，y = row + STEER_TOP_GAP）。 */
+  private steerButtons: Array<{ row: number; action: SteerAction; x0: number; x1: number }> = [];
+  /**
+   * 双击编辑占位：既是取回消息的原排序位（提交后插回，而不是排到队尾），也是投递
+   * 冻结标志——非空期间轮末自动发送与立即发送全部让路，其余挂起消息等编辑提交后
+   * 按序消化。
+   */
+  private steerEditIndex?: number;
   private readonly approver: InteractiveApprover;
   /** `subagent_approval = "strict"` 时的子代理审批器；inherit 时 undefined（复用 approver）。 */
   private readonly subagentApprover?: Approver;
@@ -438,8 +474,8 @@ class InteractiveMode implements ApprovalUi {
     this.maxTokens = deps.maxTokens;
     this.approval = deps.approvalMode;
     this.contextWindow = deps.contextWindow;
-    // 挂起条先于任何工具行入容器：排在工具行之后渲染（贴近状态条），且构造即占位。
-    this.pendingContainer.addChild(this.steersBar);
+    // 挂起条构造即入容器占位：队列空时零占用，不影响布局。
+    this.steersContainer.addChild(this.steersBar);
 
     this.client = this.buildClient();
     // 辅助 client 必须在这里建好：下面构造审批器时要用 reviewClient，runTurn 时要用 compactClient。
@@ -523,6 +559,7 @@ class InteractiveMode implements ApprovalUi {
       { component: this.pendingContainer, shrink: 1, minSize: 0 },
       { component: this.subagentContainer, shrink: 1, minSize: 0 },
       { component: this.statusContainer, shrink: 1, minSize: 0 },
+      { component: this.steersContainer, shrink: 1, minSize: 0 },
       { component: this.editorContainer, shrink: 1, minSize: 3 },
       { component: this.footerContainer, shrink: 1, minSize: 1 },
     ]);
@@ -539,6 +576,7 @@ class InteractiveMode implements ApprovalUi {
     this.ui.addChild(this.pendingContainer);
     this.ui.addChild(this.subagentContainer);
     this.ui.addChild(this.statusContainer);
+    this.ui.addChild(this.steersContainer);
     this.ui.addChild(this.editorContainer);
     this.ui.addChild(this.footerContainer);
     if (isViewportTUI(this.ui)) this.ui.setLayoutRoot(root);
@@ -555,14 +593,32 @@ class InteractiveMode implements ApprovalUi {
     };
     // 挂起队列非空时 ↑ 把队列全部搬回编辑器（pi 的 dequeue 语义）：删掉不要的行即取消，
     // Enter 重新挂起。全量搬回而不是逐条——一条规则讲清楚，没有歧义中间态。
+    // grok-build 语义：有队列时 ↑ 进入队列焦点态（选中最后一行），不再整队搬回——
+    // 编辑能力由焦点态里 Enter/e 逐条编辑（原位保存）承担。
     this.editor.onQueueEditUp = () => {
-      const queued = this.turnInbox.drain();
-      if (queued.length === 0) return false;
-      const current = this.editor.getText().trim();
-      const merged = queued.join('\n\n');
-      this.editor.setText(current === '' ? merged : `${current}\n\n${merged}`);
+      const items = this.turnInbox.peek();
+      if (items.length === 0) return false;
+      this.steerFocus = true;
+      this.steerCursor = items.length - 1;
+      this.steerHover = undefined;
       this.ui.requestRender();
       return true;
+    };
+    // 队列焦点态的前置拦截：按键归队列面板，未匹配的落回编辑器（打字等）。
+    this.editor.onQueueNav = (data) => this.handleQueueNavKey(data);
+    // 悬停离开检测：任何鼠标移动先清各类悬停高亮（挂起条浅底/提示/按钮、工具行/汇总行浅底）；
+    // 若光标仍悬在原目标上，同帧的组件分发会重新点亮——监听器先于分发执行，一清一亮。
+    this.ui.onMouseMotion = () => {
+      let changed = clearHoverHighlight();
+      if (this.steerHover !== undefined) {
+        this.steerHover = undefined;
+        changed = true;
+      }
+      if (this.steerButtonHover !== undefined) {
+        this.steerButtonHover = undefined;
+        changed = true;
+      }
+      if (changed) this.ui.requestRender();
     };
     this.editor.onAction('app.followUp', () => {
       const text = this.editor.getText().trim();
@@ -759,7 +815,13 @@ class InteractiveMode implements ApprovalUi {
 
   private async handleSubmit(rawText: string): Promise<void> {
     const text = rawText.trim();
-    if (text === '') return;
+    // 空草稿 + 运行中队列非空：Enter 的意思是「现在就发」——中断当前轮，把挂起队列合并
+    // 成一次投递立即开新一轮（对齐 claude code 的 Enter to send them immediately）。
+    // 必须在空文本早退之前判定，编辑器对空草稿同样会触发 onSubmit，否则此路永远不通。
+    if (text === '') {
+      if (this.running && this.turnInbox.peek().length > 0) this.sendQueuedNow();
+      return;
+    }
     this.editor.setText('');
     this.history.push(text);
 
@@ -768,12 +830,6 @@ class InteractiveMode implements ApprovalUi {
       return;
     }
     if (this.running) {
-      // 空草稿 + 队列非空：Enter 的意思是「现在就发」——中断当前步，把挂起队列合并
-      // 成一次投递立即开新一轮（对齐 claude code 的 Enter to send them immediately）。
-      if (text === '' && this.turnInbox.peek().length > 0) {
-        this.sendQueuedNow();
-        return;
-      }
       // 队列满时拒绝而不是挤掉最旧：静默丢用户的输入是最差的失败模式。
       if (this.turnInbox.full()) {
         this.addNotice(
@@ -782,7 +838,26 @@ class InteractiveMode implements ApprovalUi {
         );
         return;
       }
-      this.turnInbox.push(text);
+      if (this.steerEditIndex !== undefined) {
+        // 双击取回后重新挂起：插回原排序位而不是队尾（队列已被 drain 时越界收敛为追加）。
+        // 提交即解冻：编辑期间轮次若已收尾，这里补开新轮，让编辑后的消息第一个发出。
+        this.turnInbox.insertAt(this.steerEditIndex, text);
+        this.steerCursor = Math.min(this.steerEditIndex, this.turnInbox.peek().length - 1);
+        this.steerEditIndex = undefined;
+        this.ui.requestRender();
+        if (!this.running) {
+          const head = this.turnInbox.peek()[0];
+          if (head !== undefined) {
+            this.turnInbox.removeAt(0);
+            this.resetSteerState();
+            void this.executeTurn(head, true);
+          }
+        }
+        return;
+      } else {
+        this.turnInbox.push(text);
+        this.steerCursor = this.turnInbox.peek().length - 1;
+      }
       // 挂起条随下一帧自动更新（steersBar 每帧动态渲染），不再弹 dim 通知。
       this.ui.requestRender();
       return;
@@ -845,7 +920,6 @@ class InteractiveMode implements ApprovalUi {
         jobs: this.deps.jobs,
         memory: new TouchMemory(this.deps.workspaceRoot),
         worktrees: this.deps.worktrees,
-        steering: this.turnInbox,
         goal: this.goal,
         lastFailure: this.lastFailure,
         planMode: this.plan,
@@ -873,13 +947,21 @@ class InteractiveMode implements ApprovalUi {
         // 响应时整个轮次作废重来，未投递的挂起消息连同原 prompt 一起回到编辑器。
         // 模型已响应的普通中断不在此列：队列继续挂起，下一轮照常自动投递。
         const stranded = this.turnInbox.drain();
+        this.resetSteerState();
         const restored = stranded.length > 0
           ? `${rewind}\n\n${stranded.join('\n\n')}`
           : rewind;
         this.editor.setText(restored);
         this.pinLatestUserMessage();
       }
-      const follow = !controller.signal.aborted && rewind === undefined ? this.followUps.shift() : undefined;
+      // 轮次正常收尾后挂起队列若还有存货——运行中入队的消息不打断当前任务、一律等
+      // 到现在——第一条自动开新轮消化（对齐 claude code：队列在轮次结束后按序接管）。
+      // 其余留在条上，由后续轮次收尾继续逐条消化。挂起消息
+      // 优先于 followUps：前者是用户当场打的字。双击编辑冻结中与后台任务唤醒刚开过
+      // 新轮时都让路：前者等编辑提交，后者避免并发双轮。
+      const normalEnd = !controller.signal.aborted && rewind === undefined;
+      const steerNext = normalEnd && this.steerEditIndex === undefined ? this.turnInbox.peek()[0] : undefined;
+      const follow = normalEnd && steerNext === undefined ? this.followUps.shift() : undefined;
       // 空闲计时从轮次收尾算起：一轮跑两分钟不该把那两分钟算成「用户离开」。
       this.lastActivityAt = Date.now();
       this.setStatusIndicator(undefined);
@@ -905,7 +987,13 @@ class InteractiveMode implements ApprovalUi {
         void this.executeTurn(prompt, true);
         return;
       }
-      if (follow) void this.executeTurn(follow, true);
+      if (!this.running && steerNext !== undefined) {
+        this.turnInbox.removeAt(0);
+        this.resetSteerState();
+        void this.executeTurn(steerNext, true);
+        return;
+      }
+      if (!this.running && follow) void this.executeTurn(follow, true);
     }
   }
 
@@ -931,8 +1019,11 @@ class InteractiveMode implements ApprovalUi {
    */
   private sendQueuedNow(): void {
     if (!this.abort) return;
+    // 双击编辑冻结中：立即发送会把其余挂起消息越过正在编辑的那条送出去，不做。
+    if (this.steerEditIndex !== undefined) return;
     const queued = this.turnInbox.drain();
     if (queued.length === 0) return;
+    this.resetSteerState();
     this.sendAfterInterrupt = queued.join('\n\n');
     this.setActivity(WorkingLabel.cancelling);
     this.abort.abort();
@@ -1292,22 +1383,240 @@ class InteractiveMode implements ApprovalUi {
     return this.thinkingStartedAt === undefined ? undefined : Date.now() - this.thinkingStartedAt;
   }
 
-  /** 待办区显示一行「正在跑的工具」；按 toolCallId 记账，tool_end 时精确移除。 */
   /**
-   * 挂起条：运行中输入队列的可视化，替代原先那条一闪而过的 dim 通知。
+   * 挂起条：运行中输入队列的可视化（grok-build queue pane 同款）。
    *
-   * 每帧从 turnInbox 动态取数——loop 在安全点 drain 后下一帧自动清空，不需要显式同步。
-   * 行样式与工具行一致（muted、截断）；最多展开 3 条，其余折叠为一行计数。
+   * 每帧从 turnInbox 动态取数——消息只在轮次收尾后逐条投递，投递一条下一帧自动少一条。
+   * 首行上方留一行间距（与状态行脱开）；一格缩进与状态行左缘（leftPad=1）对齐。前缀是
+   * 投递顺序序号（`1.` `2.`…，重排后按新位置重新编号）。鼠标悬停的行或队列焦点态的
+   * 选中行：整行铺浅底（悬停 steerHoverBg 极浅、焦点选中 selectedBg 更强），右侧亮出
+   * 动作按钮 `[Send now] [edit] [cancel]`（右对齐紧贴无缝、右缘与状态行耗时/token 同
+   * 列，宽不够整颗放弃），按钮自身悬停变色。
    */
-  private renderPendingSteers(): string[] {
+  private renderPendingSteers(width: number): string[] {
     const items = this.turnInbox.peek();
-    if (items.length === 0) return [];
-    const lines = [`  ⏎ ${items.length} queued — Enter to send now · ↑ to edit`];
-    if (items.length > 3) lines.push(`  ⏎ +${items.length - 3} more`);
-    for (const text of items.slice(-3)) {
-      lines.push(`  ⏎ ${flattenWhitespace(text).slice(0, 96)}`);
+    if (items.length === 0) {
+      this.steerButtons = [];
+      return [];
     }
-    return lines.map((line) => theme.fg('muted', line));
+    const cursor = Math.min(this.steerCursor ?? items.length - 1, items.length - 1);
+    const hover = this.steerHover !== undefined && this.steerHover < items.length ? this.steerHover : undefined;
+    // 动作按钮只挂一行：悬停行优先，其次焦点态的选中行（grok 同款——悬停无需先选中即可操作）。
+    const actionRow = hover ?? (this.steerFocus ? cursor : undefined);
+    const buttons = actionRow === undefined ? [] : this.layoutSteerButtons(width);
+    const btnStart = buttons[0]?.x0 ?? width - STEER_RIGHT_PAD;
+    this.steerButtons = buttons.map((button, i) => {
+      const x0 = btnStart + buttons.slice(0, i).reduce((sum, b) => sum + b.label.length, 0);
+      return { row: actionRow!, action: button.action, x0, x1: x0 + button.label.length };
+    });
+    const lines = items.map((text, index) => {
+      const hovered = index === hover;
+      const selected = this.steerFocus && index === cursor;
+      const num = theme.fg('primary', `${index + 1}.`);
+      // 带按钮的行：行文按按钮起点截断让位（至少留 1 列间隙）。
+      const avail = index === actionRow ? Math.max(0, btnStart - 4 - 1) : 96;
+      const clipped = flattenWhitespace(text).slice(0, avail);
+      const styled = index === cursor ? theme.bold(clipped) : theme.fg('muted', clipped);
+      let line = ` ${num} ${styled}`;
+      if (index === actionRow) {
+        const pad = Math.max(1, btnStart - visibleWidth(line));
+        line += ' '.repeat(pad);
+        for (const button of buttons) line += this.steerButtonLabel(button.action, index);
+      }
+      // 悬停行铺极浅底；焦点选中行铺更强的选中底（选中优先，grok 同款）。
+      const fill = Math.max(0, width - visibleWidth(line));
+      if (selected) return theme.bg('selectedBg', line + ' '.repeat(fill));
+      if (hovered) return theme.bg('steerHoverBg', line + ' '.repeat(fill));
+      return line;
+    });
+    lines.unshift('');
+    return lines;
+  }
+
+  /** 布局动作按钮链：从右往左紧贴排布，放不下整颗放弃。空数组 = 宽度不足以放任何按钮。 */
+  private layoutSteerButtons(width: number): Array<{ action: SteerAction; label: string; x0: number }> {
+    let right = width - STEER_RIGHT_PAD;
+    const placed: Array<{ action: SteerAction; label: string; x0: number }> = [];
+    for (const { action, label } of STEER_BUTTONS) {
+      const x0 = right - label.length;
+      if (x0 < 5) break; // 行文至少保留一格缩进 + 序号 + 一格空隙
+      placed.unshift({ action, label, x0 });
+      right = x0;
+    }
+    return placed;
+  }
+
+  /** 动作按钮文案：默认 muted，悬停变色（cancel 红、edit/send 亮文字）。 */
+  private steerButtonLabel(action: SteerAction, row: number): string {
+    const label = STEER_BUTTONS.find((button) => button.action === action)!.label;
+    const hoveredButton = this.steerButtonHover?.row === row && this.steerButtonHover.action === action;
+    if (!hoveredButton) return theme.fg('muted', label);
+    return theme.fg(action === 'cancel' ? 'error' : 'text', label);
+  }
+
+  /**
+   * 挂起条行内鼠标交互（grok-build queue pane 同款）：按钮命中优先
+   * （[Send now]/[edit]/[cancel] 直接执行动作）；单击行 = 选中并聚焦队列面板。
+   * 双击无特殊语义（grok 的队列行双击是 ListPane 划词，这里没有对应物）。
+   * 左键按下先用 handleSelectablePress 钉行吃掉（与工具行同款）：否则全屏划词路径
+   * 接手，会把消息文本选中。
+   * click 事件必须返回 handled 挡住冒泡，避免同一次点击沿布局链多次送达。
+   */
+  private onSteersMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const items = this.turnInbox.peek();
+    if (event.type === 'move') {
+      // 悬停：该行铺浅底并亮出动作按钮，同时成为队列焦点态的选中行。移出的隐藏由
+      // onMouseMotion 先清、这里的命中分发再点亮（同帧内一清一亮，不需要绝对坐标）。
+      // 首行是上间距空行：y 换算行下标要扣掉。
+      const row = event.y - STEER_TOP_GAP;
+      if (row >= 0 && row < items.length) {
+        const button = this.steerButtons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);
+        const nextButton = button ? { row, action: button.action } : undefined;
+        if (
+          this.steerHover !== row ||
+          this.steerCursor !== row ||
+          this.steerButtonHover?.row !== nextButton?.row ||
+          this.steerButtonHover?.action !== nextButton?.action
+        ) {
+          this.steerHover = row;
+          this.steerCursor = row;
+          this.steerButtonHover = nextButton;
+          this.ui.requestRender();
+        }
+      }
+      return undefined;
+    }
+    if (event.type === 'press' && event.button === 'left') {
+      const press = handleSelectablePress(this.steersBar, event);
+      if (press) return press;
+    }
+    if (event.type !== 'click' || event.button !== 'left') return undefined;
+    const row = event.y - STEER_TOP_GAP;
+    if (row < 0 || row >= items.length) return undefined;
+    // 按钮命中优先：直接执行动作，不再走行选中。
+    const button = this.steerButtons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);
+    if (button) {
+      if (button.action === 'cancel') this.cancelSteerRow(row);
+      else if (button.action === 'edit') this.editSteerRow(row);
+      else this.sendSteerRowNow(row);
+      return { handled: true };
+    }
+    // 单击行 = 选中并聚焦队列面板（grok：set_active_pane(Queue)）。
+    this.steerCursor = row;
+    this.steerFocus = true;
+    this.ui.requestRender();
+    return { handled: true };
+  }
+
+  /** 队列焦点态按键（grok-build queue pane 同款）：未匹配的返回 false 落回编辑器。 */
+  private handleQueueNavKey(data: string): boolean {
+    if (!this.steerFocus) return false;
+    const items = this.turnInbox.peek();
+    if (items.length === 0) {
+      this.exitSteerFocus();
+      return false;
+    }
+    const cursor = Math.min(this.steerCursor ?? items.length - 1, items.length - 1);
+    const repaint = (): void => this.ui.requestRender();
+    if (matchesKey(data, 'escape')) {
+      this.exitSteerFocus();
+      return true;
+    }
+    if (matchesKey(data, 'up')) {
+      // 首行再 ↑ 保持夹住：越界会误开输入历史并改写草稿（grok 同理）。
+      this.steerCursor = Math.max(0, cursor - 1);
+      repaint();
+      return true;
+    }
+    if (matchesKey(data, 'down')) {
+      // ↓ 越过最后一行回编辑器。
+      if (cursor >= items.length - 1) {
+        this.exitSteerFocus();
+        return true;
+      }
+      this.steerCursor = cursor + 1;
+      repaint();
+      return true;
+    }
+    // 面板内 j/k 导航（grok ListPane 同款）：到边界夹住，不触发退出。
+    if (data === 'j' && cursor < items.length - 1) {
+      this.steerCursor = cursor + 1;
+      repaint();
+      return true;
+    }
+    if (data === 'k' && cursor > 0) {
+      this.steerCursor = cursor - 1;
+      repaint();
+      return true;
+    }
+    // ⇧J 下移 / ⇧K 上移（重排的是选中条，序号随新位置重编）。
+    if (data === 'J' && cursor < items.length - 1) {
+      this.turnInbox.move(cursor, 1);
+      this.steerCursor = cursor + 1;
+      repaint();
+      return true;
+    }
+    if (data === 'K' && cursor > 0) {
+      this.turnInbox.move(cursor, -1);
+      this.steerCursor = cursor - 1;
+      repaint();
+      return true;
+    }
+    if (data === '\r' || data === 'e') {
+      this.editSteerRow(cursor);
+      return true;
+    }
+    if (data === 'x' || matchesKey(data, 'delete') || matchesKey(data, 'backspace')) {
+      this.cancelSteerRow(cursor);
+      return true;
+    }
+    return false;
+  }
+
+  /** 取回选中条到输入框编辑：队列里删掉、记住原位置并冻结投递（提交后原位回插）。 */
+  private editSteerRow(index: number): void {
+    const text = this.turnInbox.removeAt(index);
+    if (text === undefined) return;
+    this.exitSteerFocus();
+    this.steerEditIndex = index;
+    const current = this.editor.getText().trim();
+    this.editor.setText(current === '' ? text : `${current}\n\n${text}`);
+    this.steerCursor = Math.min(index, this.turnInbox.peek().length - 1);
+    this.ui.setFocus(this.editor);
+    this.ui.requestRender();
+  }
+
+  /** 删除选中条（不回填编辑器）：队列空则顺手退出焦点态。 */
+  private cancelSteerRow(index: number): void {
+    if (this.turnInbox.removeAt(index) === undefined) return;
+    if (this.turnInbox.peek().length === 0) this.exitSteerFocus();
+    this.steerCursor = Math.min(index, this.turnInbox.peek().length - 1);
+    this.ui.requestRender();
+  }
+
+  /** 强制立即发送选中条：中断当前轮，该条作为下一轮 prompt，其余消息保持原队列。 */
+  private sendSteerRowNow(index: number): void {
+    const text = this.turnInbox.removeAt(index);
+    if (text === undefined || !this.abort) return;
+    this.exitSteerFocus();
+    this.sendAfterInterrupt = text;
+    this.setActivity(WorkingLabel.cancelling);
+    this.abort.abort();
+  }
+
+  private exitSteerFocus(): void {
+    if (!this.steerFocus) return;
+    this.steerFocus = false;
+    this.ui.requestRender();
+  }
+
+  /** 队列被整队搬走（立即发送 / 轮次作废）后，选中、编辑占位与焦点态一并失效。 */
+  private resetSteerState(): void {
+    this.steerCursor = undefined;
+    this.steerEditIndex = undefined;
+    this.steerHover = undefined;
+    this.steerFocus = false;
+    this.steerButtonHover = undefined;
   }
 
   private addPendingToolLine(id: string, name: string, args: Record<string, unknown>): void {
@@ -1402,6 +1711,7 @@ class InteractiveMode implements ApprovalUi {
     if (this.activityLabel === message) return;
     this.activityLabel = message;
     this.currentIndicator?.setMessageColor((text) => theme.fg('muted', text));
+    this.currentIndicator?.setShimmer(true);
     this.currentIndicator?.setMessage(message);
   }
 
@@ -1428,6 +1738,7 @@ class InteractiveMode implements ApprovalUi {
     }
     const label = formatWorkingWarning(text, this.workingWarningCount);
     this.activityLabel = label;
+    this.currentIndicator.setShimmer(false);
     this.currentIndicator.setMessageColor((content) => theme.fg('warning', content));
     this.currentIndicator.setMessage(label);
     return true;
@@ -1559,6 +1870,7 @@ class InteractiveMode implements ApprovalUi {
   private approvalScopeLabel(request: ApprovalRequest): string {
     switch (request.tool) {
       case 'bash':
+      case 'pwsh':
         return 'this exact command';
       case 'mcp':
         return request.command ?? 'this tool';

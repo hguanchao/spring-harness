@@ -24,7 +24,11 @@ export interface ToolContext {
   todos: TodoList;
   jobs: JobBoard;
   mcp: McpHub;
-  runShell(command: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number | null }>;
+  runShell(
+    command: string,
+    timeoutMs: number,
+    kind: 'bash' | 'pwsh',
+  ): Promise<{ stdout: string; stderr: string; exitCode: number | null }>;
   approve(tool: string, detail: string): Promise<boolean>;
   askUser(prompt: string): Promise<string>;
   escalateReadOnlyWrite?(path: string): Promise<boolean>;

@@ -1,7 +1,7 @@
 import { AltScreenFlashContainer } from "../components/alt-screen-flash.js";
 import { ScrollView } from "../components/scroll-view.js";
 import { compositeRowSelection, selectRow } from "../components/selectable-row.js";
-import { compositeStickyUserMessages } from "../components/sticky-user-message.js";
+import { compositeStickyUserMessages, stickyOverlayRects } from "../components/sticky-user-message.js";
 import { getKeybindings } from "./keybindings.js";
 import { isKeyRelease } from "./keys.js";
 import {
@@ -203,6 +203,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onCopyFeedback?: (message: string) => void;
 	/** 转录内容世代：滚动不递增，避免每帧重排整份对话。 */
 	private contentGeneration = 0;
+	/** 鼠标移动观察者：每个 move/drag 事件在组件分发前触发一次（见 TUI 接口说明）。 */
+	onMouseMotion?: (x: number, y: number) => void;
 
 	constructor(
 		terminal: Terminal,
@@ -494,6 +496,19 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private dispatchMouseToLayout(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
 		if (!this.currentLayout) return undefined;
+		// 吸顶用户气泡是合成层（直接画在屏幕缓冲上），不在布局树里、命中判定天然看不见它。
+		// 放行的话点它会点穿到气泡底下的转录行——双击吸顶气泡会误触底下工具行的开合。
+		// 按下/点击/拖拽在气泡占据的矩形内一律不下发；滚轮与纯移动放行，滚动与划选不受影响。
+		if (event.type === "press" || event.type === "click" || event.type === "drag") {
+			const insideSticky = stickyOverlayRects(this.currentLayout).some(
+				(rect) =>
+					event.screenX >= rect.x &&
+					event.screenX < rect.x + rect.width &&
+					event.screenY >= rect.y &&
+					event.screenY < rect.y + rect.height,
+			);
+			if (insideSticky) return undefined;
+		}
 		const visited = new Set<Component>();
 		const boxes = getLayoutBoxesAt(this.currentLayout, event.screenX, event.screenY);
 		for (const box of boxes) {
@@ -575,6 +590,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					: "drag"
 				: "press";
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
+		if ((type === "move" || type === "drag") && this.onMouseMotion) {
+			this.onMouseMotion(event.screenX, event.screenY);
+		}
 
 		if (this.mouseCapture || this.mousePressTarget) {
 			const target = this.mouseCapture ?? this.mousePressTarget!;

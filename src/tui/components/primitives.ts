@@ -18,6 +18,7 @@ import {
 } from "../core/tui.js";
 import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../core/utils.js";
 import { formatStatusElapsed, formatStatusTokens } from "../../util.js";
+import { theme } from "../theme/theme.js";
 
 
 type RenderCache = {
@@ -476,6 +477,8 @@ export class Loader extends Text {
 	/** 时钟单独着色：警告把文案染成 warning 时，耗时仍保持 muted。 */
 	private timerColorFn: (str: string) => string;
 	private message: string = "Loading...";
+	/** 状态文案从左到右扫光；警告色时关掉，避免黄字再叠高光。 */
+	private shimmerMessage = false;
 	private readonly startedAt = Date.now();
 	private phaseStartedAt = Date.now();
 	private tokens?: number;
@@ -542,9 +545,10 @@ export class Loader extends Text {
 		const shownPhaseW = showPhase ? phaseW : 0;
 		const bodyBudget = Math.max(0, leftBudget - leadW - suffixW - shownPhaseW);
 		const clippedBody = truncateToWidth(body, bodyBudget, "…");
+		const paintedBody = this.shimmerMessage ? theme.shimmer(clippedBody, now) : this.messageColorFn(clippedBody);
 		const left =
 			lead
-			+ this.messageColorFn(clippedBody)
+			+ paintedBody
 			+ (suffix === "" ? "" : this.messageColorFn(suffix))
 			+ (showPhase ? this.timerColorFn(phaseStr) : "");
 		const rightStyled =
@@ -615,6 +619,12 @@ export class Loader extends Text {
 
 	setMessageColor(colorFn: (str: string) => string): void {
 		this.messageColorFn = colorFn;
+		this.updateDisplay();
+	}
+
+	setShimmer(on: boolean): void {
+		if (this.shimmerMessage === on) return;
+		this.shimmerMessage = on;
 		this.updateDisplay();
 	}
 

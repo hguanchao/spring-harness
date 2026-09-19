@@ -381,9 +381,15 @@ export class Editor implements Component, Focusable {
 	public onChange?: (text: string) => void;
 	/**
 	 * 挂起队列的编辑接管：光标在第一行且宿主返回 true 时 ↑ 被消费。
-	 * 宿主把运行中输入队列搬回编辑器（pi 的 dequeue 语义），用户删改后重新提交。
+	 * 宿主把运行中输入队列带进「队列焦点态」（grok-build 的 queue pane 语义），
+	 * 用户在焦点态里选行/重排/编辑。
 	 */
 	public onQueueEditUp?: () => boolean;
+	/**
+	 * 队列焦点态的前置拦截：宿主消费 ↑↓/⇧J/⇧K/Enter/e/x/Delete/Esc 时返回 true 吞键，
+	 * 未匹配返回 false 落回编辑器正常处理。挂在全部按键处理之前（Ctrl+C 仍直通父层）。
+	 */
+	public onQueueNav?: (data: string) => boolean;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -761,6 +767,11 @@ export class Editor implements Component, Focusable {
 
 		// Ctrl+C - let parent handle (exit/clear)
 		if (kb.matches(data, "tui.input.copy")) {
+			return;
+		}
+
+		// 队列焦点态的前置拦截：↑↓/⇧J/⇧K/Enter/e/x/Delete/Esc 归队列，其余键落回编辑器。
+		if (this.onQueueNav?.(data) === true) {
 			return;
 		}
 

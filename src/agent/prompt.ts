@@ -32,7 +32,7 @@ function sandboxLine(mode: SandboxMode): string {
 }
 
 function shellName(): string {
-  return process.platform === 'win32' ? 'PowerShell (pwsh)' : 'sh';
+  return 'bash and pwsh (one-shot, workspace root)';
 }
 
 /** 本地日历日 + IANA 时区。模型没有墙钟，不写就会用训练截止日当「今天」。 */
@@ -85,7 +85,12 @@ const TOOL_SECTIONS: ReadonlyArray<{ tool: string; text: string }> = [
   {
     tool: 'bash',
     text:
-      `Use bash for work that genuinely needs a shell — builds, tests, package managers, git, and other real system commands. Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result and investigate a non-zero exit before moving on. On Windows a killed process often settles as exit 1 with no signal — treat a bare 1 after an interruption as termination, not a command bug. Prefer npm.cmd / npx.cmd / node over bare npm / npx: PowerShell will otherwise resolve the .ps1 shims.`,
+      'Use bash for POSIX shell commands via bash (Git Bash on Windows if it is on PATH). Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result and investigate a non-zero exit before moving on.',
+  },
+  {
+    tool: 'pwsh',
+    text:
+      'Use pwsh for PowerShell. Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result and investigate a non-zero exit before moving on. Prefer npm.cmd / npx.cmd / node over bare npm / npx so PowerShell does not resolve .ps1 shims.',
   },
   {
     tool: 'subagent',
@@ -208,7 +213,7 @@ ${identityFacts}
 </boundaries>`,
 
     `<tool_calling>
-Prefer a specialized tool over a shell command whenever one fits: read rather than cat/head/tail, glob rather than find, list_dir rather than ls, grep rather than shell grep/rg, edit rather than sed/awk. Reserve bash for work that genuinely needs a shell.
+Prefer a specialized tool over a shell command whenever one fits: read rather than cat/head/tail, glob rather than find, list_dir rather than ls, grep rather than shell grep/rg, edit rather than sed/awk. Reserve bash or pwsh for work that genuinely needs a shell.
 
 ${toolText}
 

@@ -50,6 +50,30 @@ function readHead(abs: string, maxBytes: number): Buffer {
 /** 分块扫描的块大小。64KB 在系统调用次数与单次分配之间取平衡。 */
 const SCAN_CHUNK = 64 * 1024;
 
+function utf8LeadWidth(byte: number): number {
+  if ((byte & 0x80) === 0) return 1;
+  if ((byte & 0xe0) === 0xc0) return 2;
+  if ((byte & 0xf0) === 0xe0) return 3;
+  if ((byte & 0xf8) === 0xf0) return 4;
+  return 1;
+}
+
+/**
+ * 切开缓冲区末尾未完成的 UTF-8 序列。
+ * 块边界若落在多字节字符中间，直接 toString('utf8') 会写成 U+FFFD，下一块的续字节再解码成拉丁乱码。
+ */
+export function splitCompleteUtf8(buf: Buffer): { complete: Buffer; rest: Buffer } {
+  if (buf.length === 0) return { complete: buf, rest: buf };
+  let i = buf.length;
+  while (i > 0 && (buf[i - 1]! & 0xc0) === 0x80) i -= 1;
+  if (i === 0) return { complete: buf, rest: Buffer.alloc(0) };
+  const start = i - 1;
+  const need = utf8LeadWidth(buf[start]!);
+  const have = buf.length - start;
+  if (need > have) return { complete: buf.subarray(0, start), rest: buf.subarray(start) };
+  return { complete: buf, rest: Buffer.alloc(0) };
+}
+
 /**
  * 从第 offset 行（1-based）开始读取最多 limit 行 / maxBytes 字节。
  *
@@ -70,12 +94,15 @@ function readLineWindow(
     let collectedBytes = 0;
     let line = 1;
     let carry = '';
+    let pending: Buffer = Buffer.alloc(0);
     let truncated = false;
     let done = false;
     for (;;) {
       const read = readSync(fd, chunk, 0, SCAN_CHUNK, null);
       if (read === 0) break;
-      const parts = (carry + chunk.subarray(0, read).toString('utf8')).split('\n');
+      const { complete, rest } = splitCompleteUtf8(Buffer.concat([pending, chunk.subarray(0, read)]));
+      pending = rest;
+      const parts = (carry + complete.toString('utf8')).split('\n');
       // 最后一段可能被块边界劈开，留给下一轮；只有 EOF 时它才是真正的一行。
       carry = parts.pop() ?? '';
       for (const part of parts) {
@@ -96,6 +123,10 @@ function readLineWindow(
         line++;
       }
       if (done) break;
+    }
+    if (!done && pending.length > 0) {
+      carry += pending.toString('utf8');
+      pending = Buffer.alloc(0);
     }
     // 文件不以换行结尾时，carry 里还留着最后一行。
     if (!done && carry !== '' && line >= offset && (limit === undefined || collected.length < limit)) {

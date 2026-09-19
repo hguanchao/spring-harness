@@ -234,6 +234,7 @@ export class WorkingStatusIndicator extends StatusIndicator {
       indicator,
     );
     this.setTimerColor((text) => theme.fg('muted', text));
+    this.setShimmer(true);
   }
 }
 

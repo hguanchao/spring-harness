@@ -216,3 +216,11 @@ describe('终端默认配色（ansi 模式）', () => {
     assert.equal(ansi.fg('syntaxKeyword', 'x'), '\x1b[39mx\x1b[39m');
   });
 });
+
+describe('状态行扫光', () => {
+  it('剥掉 SGR 后仍是原文', () => {
+    const t = new Theme(PALETTE, 'truecolor');
+    const painted = t.shimmer('Thinking…', 0);
+    assert.equal(painted.replace(STRIP, ''), 'Thinking…');
+  });
+});

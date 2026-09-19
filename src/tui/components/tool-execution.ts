@@ -13,6 +13,7 @@ import { Container, MouseRegion, Text, truncateToWidth, type TUI, visibleWidth, 
 import { flattenWhitespace } from '../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
+import { armHoverHighlight } from './hover-highlight.js';
 import { handleSelectablePress, SELECTABLE_ROW } from './selectable-row.js';
 import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.js';
 
@@ -46,6 +47,7 @@ function previewWindow(toolName: string): { first: number; last: number } {
     case 'grep':
       return { first: 8, last: 4 };
     case 'bash':
+    case 'pwsh':
       return { first: 2, last: 3 };
     case 'subagent':
       return { first: 12, last: 8 };
@@ -84,6 +86,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   glob: 'Glob',
   list_dir: 'List',
   bash: 'Bash',
+  pwsh: 'Pwsh',
   web_search: 'Search',
   web_fetch: 'Fetch',
   subagent: 'Subagent',
@@ -115,6 +118,7 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
 
   switch (toolName) {
     case 'bash':
+    case 'pwsh':
       return oneLine(pick('command', 'cmd'));
     case 'read':
     case 'write':
@@ -203,6 +207,11 @@ export class ToolExecutionComponent extends Container {
     this.content.addChild(this.titleText);
     this.content.addChild(this.bodyText);
     this.region = new MouseRegion(this.content, (event) => {
+      // 悬停高亮：标题行铺浅底。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
+      if (event.type === 'move' && this.setHovered(true)) {
+        armHoverHighlight(() => this.setHovered(false));
+        this.ui.requestRender();
+      }
       if (event.button !== 'left') return undefined;
       // press 钉住整行并挡住全屏选词；click 仍走双击展开。
       const press = handleSelectablePress(this, event);
@@ -213,6 +222,17 @@ export class ToolExecutionComponent extends Container {
     });
     this.addChild(this.region);
     this.updateDisplay();
+  }
+
+  private hovered = false;
+
+  /** 悬停高亮只画标题行（正文展开后大面积铺底反而喧宾）。返回是否有变化。 */
+  private setHovered(on: boolean): boolean {
+    if (this.hovered === on) return false;
+    this.hovered = on;
+    this.titleText.setCustomBgFn(on ? (text) => theme.bg('toolPendingBg', text) : undefined);
+    this.titleDirty = true;
+    return true;
   }
 
   get id(): string {
@@ -271,7 +291,7 @@ export class ToolExecutionComponent extends Container {
     if (!this.expanded) {
       this.expanded = true;
       this.fullDetail = false;
-    } else if ((this.toolName === 'bash' || this.subagentMeta !== undefined) && !this.fullDetail) {
+    } else if ((this.toolName === 'bash' || this.toolName === 'pwsh' || this.subagentMeta !== undefined) && !this.fullDetail) {
       this.fullDetail = true;
     } else {
       this.expanded = false;
@@ -373,7 +393,9 @@ export class ToolExecutionComponent extends Container {
       : '';
     const mark = toolMark(status);
     const titleColor: ThemeColor = status === 'error' ? 'error' : 'muted';
-    this.titleLine = `${theme.fg(this.glyphColor(status), mark)} ${theme.fg(titleColor, title)}`;
+    const live = status === 'pending' || status === 'running';
+    const painted = live ? theme.shimmer(title, Date.now()) : theme.fg(titleColor, title);
+    this.titleLine = `${theme.fg(this.glyphColor(status), mark)} ${painted}`;
     this.countsLine = this.counts ? theme.fg('muted', ` · ${this.counts.text}`) : '';
     this.activityLine = activitySuffix;
     this.hintLine = '';
@@ -431,14 +453,16 @@ export class ToolExecutionComponent extends Container {
     const pad = ' '.repeat(TOOL_DETAIL_INDENT);
     const head = visual.slice(0, first).map((line) => `${pad}${paint(line)}`);
     const tail = visual.slice(-last).map((line) => `${pad}${paint(line)}`);
-    const ellipsis = `${pad}${theme.fg('muted', this.toolName === 'bash' && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
+    const ellipsis = `${pad}${theme.fg('muted', (this.toolName === 'bash' || this.toolName === 'pwsh') && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
     this.bodyText.setText([...head, ellipsis, ...tail].join('\n'));
   }
 
   override render(width: number): string[] {
-    if (this.titleDirty || this.titleWidth !== width) {
-      this.titleDirty = false;
+    const live = this.status() === 'pending' || this.status() === 'running';
+    if (live || this.titleDirty || this.titleWidth !== width) {
+      if (!live) this.titleDirty = false;
       this.titleWidth = width;
+      if (live) this.updateDisplay();
       this.updateTitle(width);
     }
     if (this.bodyDirty || this.bodyWidth !== width) {

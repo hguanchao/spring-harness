@@ -40,6 +40,12 @@ export interface SteeringInbox extends SubagentInbox {
   removeLast(): string | undefined;
   /** 队列是否已达上限（拒绝继续挂起，而不是挤掉最旧）。 */
   full(): boolean;
+  /** 把 index 处的消息与相邻项交换（delta -1 上移 / +1 下移）；越界返回 false。 */
+  move(index: number, delta: -1 | 1): boolean;
+  /** 取走指定位置的消息（双击取回编辑用）；越界返回 undefined。 */
+  removeAt(index: number): string | undefined;
+  /** 插到指定位置（编辑重发后回填原排序位）；越界收敛为尾部追加。 */
+  insertAt(index: number, text: string): void;
 }
 
 /** 主会话运行中输入队列的上限。超过即拒绝：挂起是补充方向，不是批量投喂。 */
@@ -65,6 +71,21 @@ export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox
     },
     full() {
       return queue.length >= limit;
+    },
+    move(index: number, delta: -1 | 1) {
+      const to = index + delta;
+      if (index < 0 || index >= queue.length || to < 0 || to >= queue.length) return false;
+      const moved = queue[index]!;
+      queue[index] = queue[to]!;
+      queue[to] = moved;
+      return true;
+    },
+    removeAt(index: number) {
+      if (index < 0 || index >= queue.length) return undefined;
+      return queue.splice(index, 1)[0];
+    },
+    insertAt(index: number, text: string) {
+      queue.splice(Math.max(0, Math.min(index, queue.length)), 0, text);
     },
   };
 }

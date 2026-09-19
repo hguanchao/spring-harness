@@ -38,6 +38,18 @@ function detectColorMode(): ColorMode {
   return '256color';
 }
 
+function shimmerWeight(delta: number, band: number): number {
+  const dist = Math.abs(delta);
+  if (dist >= band) return 0;
+  const t = 1 - dist / band;
+  return t * t;
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const clamp = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
+  return `#${clamp(r)}${clamp(g)}${clamp(b)}`;
+}
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const cleaned = hex.replace('#', '');
   if (cleaned.length !== 6) throw new Error(`Invalid hex color: ${hex}`);
@@ -134,6 +146,8 @@ const ANSI_FG: Record<string, string> = {
 const ANSI_BG: Record<string, string> = {
   bg: '49',
   selectedBg: '100', userMessageBg: '100', toolPendingBg: '100',
+  // 挂起条悬停底用 256 色深灰：16 色档位里没有「只亮一档」的中间带。
+  steerHoverBg: '48;5;236',
 };
 
 function fgAnsi(color: string, mode: ColorMode): string {
@@ -155,6 +169,8 @@ function bgAnsi(color: string, mode: ColorMode): string {
 export class Theme {
   private readonly fgColors = new Map<string, string>();
   private readonly bgColors = new Map<string, string>();
+  private palette: Record<string, string> = PALETTE;
+  private mode: ColorMode = detectColorMode();
 
   constructor(palette: Record<string, string>, mode: ColorMode = detectColorMode()) {
     this.recompile(palette, mode);
@@ -162,6 +178,8 @@ export class Theme {
 
   /** 读完 ~/.sph/theme.json 后重编译，不必重建单例。 */
   recompile(palette: Record<string, string>, mode: ColorMode = detectColorMode()): void {
+    this.palette = palette;
+    this.mode = mode;
     this.fgColors.clear();
     this.bgColors.clear();
     if (mode === 'ansi') {
@@ -182,6 +200,43 @@ export class Theme {
     const ansi = this.fgColors.get(color);
     if (!ansi) throw new Error(`Unknown theme color: ${color}`);
     return `${ansi}${text}\x1b[39m`;
+  }
+
+  /**
+   * 从左到右扫一道高光。暗底灰字上有一束更亮的带，周期跟状态行转圈同一量级。
+   * 无色终端原样返回。
+   */
+  shimmer(text: string, nowMs: number, dim: ThemeColor = 'muted', bright: ThemeColor = 'text'): string {
+    if (text === '' || !colorEnabled) return text;
+    const chars = [...text];
+    const n = chars.length;
+    const band = 3.5;
+    const period = n + band + 8;
+    const head = ((nowMs / 90) % period) - band;
+    const dimHex = this.palette[dim];
+    const brightHex = this.palette[bright];
+    if (dimHex === undefined || brightHex === undefined) return this.fg(dim, text);
+    if (this.mode === 'ansi') {
+      let out = '';
+      for (let i = 0; i < n; i++) {
+        const t = shimmerWeight(i - head, band);
+        out += t > 0.45 ? this.fg(bright, chars[i]!) : this.fg(dim, chars[i]!);
+      }
+      return out;
+    }
+    const a = hexToRgb(dimHex);
+    const b = hexToRgb(brightHex);
+    let out = '';
+    for (let i = 0; i < n; i++) {
+      const t = shimmerWeight(i - head, band);
+      const hex = rgbToHex(
+        Math.round(a.r + (b.r - a.r) * t),
+        Math.round(a.g + (b.g - a.g) * t),
+        Math.round(a.b + (b.b - a.b) * t),
+      );
+      out += `${fgAnsi(hex, this.mode)}${chars[i]!}`;
+    }
+    return `${out}\x1b[39m`;
   }
 
   bg(color: ThemeColor, text: string): string {

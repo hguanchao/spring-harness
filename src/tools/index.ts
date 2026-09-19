@@ -2,7 +2,7 @@ import { grepTool } from './grep.js';
 import { listDirTool } from './list-dir.js';
 import { readFileTool } from './read-file.js';
 import { searchReplaceTool } from './search-replace.js';
-import { shellTool } from './shell.js';
+import { bashTool, pwshTool } from './shell.js';
 import { skillTool } from './skill.js';
 import { todoTool } from './todo.js';
 import { askUserTool } from './ask-user.js';
@@ -35,7 +35,8 @@ export const tools: ToolSpec[] = [
   tagged(grepTool, { concurrencySafe: true, explore: true }),
   tagged(globTool, { concurrencySafe: true, explore: true }),
   tagged(listDirTool, { concurrencySafe: true, explore: true }),
-  shellTool,
+  bashTool,
+  pwshTool,
   tagged(skillTool, { concurrencySafe: true, explore: true }),
   tagged(todoTool, { explore: true }),
   tagged(askUserTool, { explore: true }),
