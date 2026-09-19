@@ -511,9 +511,11 @@ class InteractiveMode implements ApprovalUi {
       : undefined;
 
     // 复制反馈落输入框右上角（状态行右侧），不走全屏 flash；未注入 deps.ui 的测试路径保持默认。
+    // 划词高亮用主题选中底：缺省反显会把彩色文字的前景色变成背景色。
     this.ui =
       deps.ui ??
       new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot, {
+        selectionBg: theme.bgSeq('selectedBg'),
         onCopyFeedback: (message) => this.showCopyHint(message),
       });
     this.editor = new CustomEditor(this.ui, getEditorTheme(), {
@@ -599,11 +601,7 @@ class InteractiveMode implements ApprovalUi {
     // 退回主屏幕后递一条会话恢复命令：想接着聊时不用去翻 sessions 目录。
     // 空会话（打开即退）不打印，避免噪音；headless 路径不加（一次性任务）。
     if (this.session.readAll().length > 0) {
-      process.stdout.write(`
-session saved. resume with:
-  sph --resume ${this.session.id}
-  sph -c
-`);
+      process.stdout.write(`sph --resume ${this.session.id}\n`);
     }
   }
 
@@ -984,6 +982,9 @@ session saved. resume with:
     // 指示器已带初始文案，这里只是把 activityLabel 记上，后续 setActivity 才知道该不该重设。
     this.setActivity(WorkingLabel.working);
 
+    // 失败标记：非中断的异常收尾。模型零输出就失败的轮次不算「正常收尾」——否则端点
+    // 挂掉（如 403 区域限制）时轮次秒败，收尾自动投递会把挂起队列一条条烧成同一个错误。
+    let turnFailed = false;
     try {
       await (this.deps.driver ?? runTurn)({
         prompt,
@@ -1019,7 +1020,10 @@ session saved. resume with:
       });
     } catch (error) {
       // 中断提示已由 handleInterrupt 即时给出，这里不再重复一条。
-      if (!controller.signal.aborted) this.addNotice(message(error), 'error');
+      if (!controller.signal.aborted) {
+        this.addNotice(message(error), 'error');
+        turnFailed = true;
+      }
     } finally {
       this.finalizeStreaming();
       this.running = false;
@@ -1045,8 +1049,20 @@ session saved. resume with:
       // 其余留在条上，由后续轮次收尾继续逐条消化。挂起消息
       // 优先于 followUps：前者是用户当场打的字。双击编辑冻结中与后台任务唤醒刚开过
       // 新轮时都让路：前者等编辑提交，后者避免并发双轮。
-      const normalEnd = !controller.signal.aborted && rewind === undefined;
+      // 扣住条件：失败且模型零输出。有部分输出说明任务推进过，挂起消息作为下一步
+      // 指令照常接管；零输出意味着这一轮什么都没发生，投递只是把队列烧进同一个错误。
+      const holdQueue = turnFailed && !this.modelResponded;
+      const normalEnd = !controller.signal.aborted && rewind === undefined && !holdQueue;
       const steerNext = normalEnd && this.steerEditIndex === undefined ? this.turnInbox.peek()[0] : undefined;
+      if (holdQueue) {
+        const held = this.turnInbox.peek().length;
+        if (held > 0) {
+          this.addNotice(
+            `Turn failed — ${held} queued message${held === 1 ? '' : 's'} kept. Enter sends ${held === 1 ? 'it' : 'them'} now.`,
+            'warn',
+          );
+        }
+      }
       const follow = normalEnd && steerNext === undefined ? this.followUps.shift() : undefined;
       // 空闲计时从轮次收尾算起：一轮跑两分钟不该把那两分钟算成「用户离开」。
       this.lastActivityAt = Date.now();

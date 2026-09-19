@@ -154,6 +154,37 @@ export interface TuiAltScreenOptions {
 	 * 不再走全屏 flash；未设置保持原行为。
 	 */
 	onCopyFeedback?: (message: string) => void;
+	/**
+	 * 划词高亮的固定底色（裸背景 SGR 序列，如 `\x1b[100m`；高亮结束统一以 49m 复位）。
+	 * 缺省用反显（SGR 7）：反显拿前景色当背景色，彩色文字划选时底色就是文字色本身，
+	 * 既刺眼又难读。接了主题的应用传 `theme.bgSeq('selectedBg')` 之类的固定底。
+	 */
+	selectionBg?: string;
+}
+
+/**
+ * 划词高亮：给选中片段叠一层选中底色，文字自己的前景色原样保留。
+ *
+ * 反显（SGR 7）与固定底色生命周期同构：开头开启，之后每个 SGR 码都可能是 0（全重置）
+ * 或自带前景/背景色，会把高亮冲掉，所以每个 SGR 码之后重申一次；OSC 8 等非 SGR 序列
+ * 不改属性，不重申。结尾复位（27m / 49m），防止高亮渗给选区之后的行文。
+ */
+export function applySelectionHighlight(text: string, selectionBg?: string): string {
+	const [on, off] = selectionBg === undefined ? ["\x1b[7m", "\x1b[27m"] : [selectionBg, "\x1b[49m"];
+	let result = on;
+	let index = 0;
+	while (index < text.length) {
+		const ansi = extractAnsiCode(text, index);
+		if (!ansi) {
+			result += text[index];
+			index += 1;
+			continue;
+		}
+		result += ansi.code;
+		if (ansi.code.endsWith("m")) result += on;
+		index += ansi.length;
+	}
+	return `${result}${off}`;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -201,6 +232,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly openUrl?: (url: string) => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
 	private readonly onCopyFeedback?: (message: string) => void;
+	private readonly selectionBg?: string;
 	/** 转录内容世代：滚动不递增，避免每帧重排整份对话。 */
 	private contentGeneration = 0;
 	/** 鼠标移动观察者：每个 move/drag 事件在组件分发前触发一次（见 TUI 接口说明）。 */
@@ -228,6 +260,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.openUrl = options.openUrl;
 		this.copySelection = options.copySelection;
 		this.onCopyFeedback = options.onCopyFeedback;
+		this.selectionBg = options.selectionBg;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -1202,23 +1235,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flash(message);
 	}
 
-	private applySelectionHighlight(text: string): string {
-		let result = "\x1b[7m";
-		let index = 0;
-		while (index < text.length) {
-			const ansi = extractAnsiCode(text, index);
-			if (!ansi) {
-				result += text[index];
-				index += 1;
-				continue;
-			}
-			result += ansi.code;
-			if (ansi.code.endsWith("m")) result += "\x1b[7m";
-			index += ansi.length;
-		}
-		return `${result}\x1b[27m`;
-	}
-
 	private applySelection(screen: string[], layout = this.currentLayout): string[] {
 		const selection = this.getSelectionBounds();
 		if (!selection) return screen;
@@ -1263,7 +1279,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const before = sliceByColumn(line, 0, columns.start, true);
 			const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
 			const after = sliceByColumn(line, columns.end, Math.max(0, lineWidth - columns.end), true);
-			return `${before}${this.applySelectionHighlight(selected)}${after}`;
+			return `${before}${applySelectionHighlight(selected, this.selectionBg)}${after}`;
 		});
 	}
 
