@@ -183,7 +183,7 @@ npm run sph -- -p "hi"   # run from source
 
 Notes for contributors:
 
-- **Tests are type-checked.** `tsconfig.json` excludes `*.test.ts` from the build, so `tsconfig.test.json` exists purely to check them; `pretest` runs it. An untyped test file fails only at runtime otherwise.
+- **Tests live in `tests/`, mirroring `src/`.** `tsconfig.json` excludes `*.test.ts` from the build (and never sees `tests/`), so `tsconfig.test.json` exists purely to check tests together with sources; `pretest` runs it. An untyped test file fails only at runtime otherwise.
 - Tests use `node:test` and the built-in assert module. No test framework.
 - Comments record *why* — the constraint, the failure that motivated it, what was tried — rather than restating the code.
 - New behaviour that a user can depend on should come with a test that fails when the behaviour is removed.

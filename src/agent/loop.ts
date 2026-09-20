@@ -201,6 +201,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       sandbox: options.sandbox.status.mode,
       skills: skills.catalog,
       mcpTools: mcp.listTools(),
+      // 清单只随配置变化、不随连接状态变化（见 prompt.ts 的 lazyMcpServers 注释）。
+      lazyMcpServers: mcp.listServers().filter((server) => server.lazy).map((server) => server.name),
       // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
       // 整段消失，而不是留下一句指向不存在工具的指令。
       allowedTools: options.allowedTools,

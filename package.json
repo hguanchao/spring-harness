@@ -21,7 +21,7 @@
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.test.json",
     "pretest": "npm run typecheck",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "lint": "biome lint src",
     "format": "biome format --write src",
     "sph": "tsx src/cli/index.ts"

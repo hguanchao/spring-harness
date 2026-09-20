@@ -59,6 +59,8 @@ export interface DiscoveredMcpServer {
   sourceEnabled: boolean;
   /** 叠加本地偏好之后最终生效的启用态。 */
   enabled: boolean;
+  /** 来自 `[mcp] lazy_servers` 偏好：首次使用才连接。 */
+  lazy: boolean;
   kind: McpSourceKind;
   /** 项目级来源落地的工作区根；用户级为 undefined。 */
   projectRoot?: string;
@@ -89,6 +91,8 @@ export interface McpDiscovery {
 export interface McpPreferences {
   disabledServers: string[];
   enabledServers: string[];
+  /** 首次使用才连接的 server（如重型的 npx server）；对任意来源生效，默认全部立即连。 */
+  lazyServers: string[];
 }
 
 export interface DiscoverOptions {
@@ -114,7 +118,7 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
   const home = options.home ?? homedir();
   const env = options.env ?? process.env;
   const trusted = options.trusted ?? isWorkspaceTrusted(options.workspaceRoot);
-  const preferences = options.preferences ?? { disabledServers: [], enabledServers: [] };
+  const preferences = options.preferences ?? { disabledServers: [], enabledServers: [], lazyServers: [] };
 
   const reports: McpSourceReport[] = [];
   const warnings: string[] = [];
@@ -263,10 +267,13 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
   // 两个字段都要留下：`sourceEnabled` 是来源自己声明的，`enabled` 是最终生效的。
   // 弹窗里切换开关时要知道「关掉它」是写进 disabled_servers 还是 enabled_servers——
   // 只留一个最终值就只能猜，猜错就会在另一个列表里留下一条过期的强制项。
+  // lazy 同理来自本地偏好：外部来源没有这个概念，只能由 sph 自己记。
   const disabled = new Set(preferences.disabledServers);
   const enabled = new Set(preferences.enabledServers);
+  const lazy = new Set(preferences.lazyServers);
   const servers = Array.from(merged.values(), (spec) => ({
     ...spec,
+    lazy: lazy.has(spec.name),
     sourceEnabled: spec.enabled,
     enabled: enabled.has(spec.name) ? true : disabled.has(spec.name) ? false : spec.enabled,
   }));
@@ -320,8 +327,8 @@ function originOf(label: string, path: string, editable: boolean): McpOrigin {
   return { label, path, editable };
 }
 
-/** 合并过程中的形态：`sourceEnabled` 与最终 `enabled` 要等偏好叠加后才分化。 */
-type MergedServer = Omit<DiscoveredMcpServer, 'sourceEnabled'>;
+/** 合并过程中的形态：`sourceEnabled` / `enabled` 分化与 `lazy` 要等偏好叠加后才补上。 */
+type MergedServer = Omit<DiscoveredMcpServer, 'sourceEnabled' | 'lazy'>;
 
 /** 一条从某个文件读条目的通道。同一份文件可能被读两次（如 `.claude.json` 的两节）。 */
 function readLayer(input: {
@@ -379,7 +386,10 @@ function readLayer(input: {
   }
 }
 
-type RawEntry = Omit<DiscoveredMcpServer, 'name' | 'kind' | 'origin' | 'projectRoot' | 'sourceEnabled'>;
+type RawEntry = Omit<
+  DiscoveredMcpServer,
+  'name' | 'kind' | 'origin' | 'projectRoot' | 'sourceEnabled' | 'lazy'
+>;
 
 /** sph 自己的 `[[mcp_servers]]` 数组表。坏条目跳过并告警，不炸启动。 */
 function sphMcpServers(text: string, path: string, warnings: string[]): Map<string, RawEntry> {

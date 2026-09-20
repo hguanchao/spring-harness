@@ -106,6 +106,7 @@ export function renderMcpReport(input: {
       lines.push(`  ${code(server.target)}`);
       const notes = [`from ${code(server.origin.label)}`];
       if (server.transport === 'http') notes.push('http transport, not started');
+      if (server.lazy) notes.push('lazy — connects on first use');
       if (!server.origin.editable) notes.push('read-only source');
       // 不整串过 plain()：那会把 code() 刚包好的反引号又换成单引号，路径就不再是等宽字体了。
       lines.push(`  ${notes.join(' · ')}`);
@@ -176,6 +177,8 @@ export function mcpStateLabel(server: McpServerStatus): string {
   if (server.connected) return `connected, ${server.tools.length} tool${server.tools.length === 1 ? '' : 's'}`;
   // 启动不阻塞在握手上，弹窗打开时 server 可能还在后台连。
   if (server.connecting) return 'connecting…';
+  // 懒而未连接是设计好的状态，不是故障——措辞上要和「连不上」一眼可分。
+  if (server.lazy) return 'lazy — connects on first use';
   return `not connected${server.problem === undefined ? '' : ` — ${plain(server.problem)}`}`;
 }
 

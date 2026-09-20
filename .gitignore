@@ -9,11 +9,8 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# 调试/联调时的一次性抓包与临时文件（含请求体样本），不进仓库
-.tmp-*
-
-# 本地智能体会话数据：每日工作日志与交付报告，不进仓库
+.codex/
+.claude/
+.zcode/
 .workbuddy/
-
-# 本地智能体记忆数据(与 .workbuddy/ 同族),不进仓库
 .workbuddy-ai/

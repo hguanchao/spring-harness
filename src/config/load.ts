@@ -343,13 +343,13 @@ function asString(value: unknown, key: string): string | undefined {
 }
 
 /**
- * `[mcp]` 表：只认两个名字列表，缺省即空。
+ * `[mcp]` 表：三个名字列表，缺省即空。
  *
  * 名字列表里出现不存在的 server 不算错误：配置可能来自别的机器或还没导入，静默忽略比
  * 拒绝启动合理。写成非数组才是真的写错了，那时候报错更省事。
  */
 function parseMcpPreferences(value: unknown): McpPreferences {
-  if (value === undefined) return { disabledServers: [], enabledServers: [] };
+  if (value === undefined) return { disabledServers: [], enabledServers: [], lazyServers: [] };
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ConfigError('mcp must be a table');
   }
@@ -357,6 +357,7 @@ function parseMcpPreferences(value: unknown): McpPreferences {
   return {
     disabledServers: parseServerNameList(row.disabled_servers, 'mcp.disabled_servers'),
     enabledServers: parseServerNameList(row.enabled_servers, 'mcp.enabled_servers'),
+    lazyServers: parseServerNameList(row.lazy_servers, 'mcp.lazy_servers'),
   };
 }
 
@@ -381,7 +382,7 @@ function parseServerNameList(value: unknown, key: string): string[] {
  * 覆盖只会让用户刚做的开关凭空消失。
  */
 export function readMcpPreferences(path: string): McpPreferences | undefined {
-  if (!existsSync(path)) return { disabledServers: [], enabledServers: [] };
+  if (!existsSync(path)) return { disabledServers: [], enabledServers: [], lazyServers: [] };
   try {
     const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;

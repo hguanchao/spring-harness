@@ -408,6 +408,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       if (fresh === undefined) return;
       preferences.disabledServers = fresh.disabledServers;
       preferences.enabledServers = fresh.enabledServers;
+      preferences.lazyServers = fresh.lazyServers;
     },
     get mcpSources() {
       return mcpReports;

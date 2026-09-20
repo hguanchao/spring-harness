@@ -5,7 +5,7 @@
  * 通知行——这一域不触碰会话与轮次状态，是命令里最独立的一块。
  */
 
-import { removeSphMcpServer, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
+import { removeSphMcpServer, setSphMcpLazy, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
 import type { TUI } from './core/index.js';
 import type { TuiDeps } from './deps.js';
 import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
@@ -141,6 +141,12 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
         ? `edit ${server.origin.path}`
         : `recorded in ${deps.configPath} as a local preference`,
     },
+    {
+      value: 'lazy',
+      label: server.lazy ? 'Connect eagerly' : 'Make lazy',
+      // lazy 与启停同源：都写在 [mcp] 本地偏好里，外部来源文件没有这个概念。
+      description: `recorded in ${deps.configPath} as [mcp] lazy_servers`,
+    },
   ];
   if (server.connected) {
     items.push({ value: 'tools', label: 'Show tools', description: `${server.tools.length} available` });
@@ -161,6 +167,12 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
       enabled,
       sourceEnabled: server.sourceEnabled ?? server.enabled,
     });
+    deps.refreshMcpPreferences();
+    await reloadMcpWithNotice(host);
+    return;
+  }
+  if (action === 'lazy') {
+    setSphMcpLazy(deps.configPath, server.name, !server.lazy);
     deps.refreshMcpPreferences();
     await reloadMcpWithNotice(host);
     return;

@@ -157,6 +157,14 @@ export interface SystemPromptInput {
   skills: SkillEntry[];
   mcpTools?: McpTool[];
   /**
+   * 标记为 lazy 的 MCP server 名（无论此刻是否已连接）。
+   *
+   * 单独列出而不是等连接后混进 mcpTools：这条清单只随配置变化，连接与否不动它——
+   * 懒 server 连上后 mcpTools 会增长（那是一次性的 cache miss），但这一行保持逐字节
+   * 稳定，不再追加第二次抖动。
+   */
+  lazyMcpServers?: string[];
+  /**
    * 本次会话可用的工具集合；省略表示全部可用。
    * 传入时，不可用工具的段落整段消失——不留指向不存在工具的指令。
    */
@@ -174,6 +182,17 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
   const mcp = !input.mcpTools || input.mcpTools.length === 0
     ? '(none)'
     : input.mcpTools.map((tool) => `- ${tool.server}/${tool.name}: ${tool.description}`).join('\n');
+  // lazy 行不进 mcpTools 清单：它的价值是「告诉模型还有哪些按需可连的 server」，且必须
+  // 逐字节稳定（见 lazyMcpServers 注释）。
+  const lazyMcp = !input.lazyMcpServers || input.lazyMcpServers.length === 0
+    ? ''
+    : [
+        '',
+        'Lazy MCP servers (tools start on first use):',
+        ...input.lazyMcpServers.map((name) =>
+          `- ${name}: call mcp with action "list" and server "${name}" to connect and see its tools`,
+        ),
+      ].join('\n');
 
   const toolText = TOOL_SECTIONS.filter(
     (section) => input.allowedTools === undefined || input.allowedTools.has(section.tool),
@@ -236,7 +255,7 @@ Your text is rendered as GitHub-flavored markdown. Use it when it helps: bullets
 </formatting>`,
 
     `Skill catalog:\n${catalog}`,
-    `MCP tools:\n${mcp}`,
+    `MCP tools:\n${mcp}${lazyMcp}`,
     memory ? `<project_instructions>\n${memory}\n</project_instructions>` : 'No AGENTS.md at workspace root.',
   ].filter(Boolean).join('\n\n');
 }

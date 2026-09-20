@@ -327,6 +327,16 @@ export function setSphMcpPreference(
   writeArrayIn(path, refreshedDoc, 'enabled_servers', [...nextEnabled], refreshed);
 }
 
+/** lazy 偏好：`[mcp] lazy_servers` 只含**当前标记为懒**的 server，开/关即增/删一条。 */
+export function setSphMcpLazy(path: string, name: string, lazy: boolean): void {
+  const doc = open(path);
+  const table = tableRange(doc.lines, scanHeaders(doc.lines), 'mcp');
+  const next = new Set(readArrayIn(doc.lines, table, 'lazy_servers'));
+  if (lazy) next.add(name);
+  else next.delete(name);
+  writeArrayIn(path, doc, 'lazy_servers', [...next], table);
+}
+
 /** `[mcp]` 表的行区间；不存在时给一个「从文件末尾追加」的空区间。 */
 function tableRange(
   lines: readonly string[],

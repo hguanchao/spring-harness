@@ -46,6 +46,8 @@ export interface McpServerSpec extends McpServerConfig {
    * 留下一条过期的强制项，日后来源改了自己的默认值就会被它悄悄盖住。
    */
   sourceEnabled?: boolean;
+  /** true = 不随 reload 拉起，首次 call / list(server) 才连接。省略即立即连。 */
+  lazy?: boolean;
   /** 省略时用中性标签。 */
   origin?: McpOrigin;
 }
@@ -66,6 +68,8 @@ export interface McpServerStatus {
   enabled: boolean;
   /** 来源声明的启用态；`enabled` 与它不同就说明本地偏好正在覆盖来源。 */
   sourceEnabled?: boolean;
+  /** 首次使用才连接；与「连不上」区别在 problem——懒而未连的没有 problem。 */
+  lazy: boolean;
   /** 子进程还活着。崩溃、从未连上、被禁用、不支持的传输都是 false。 */
   connected: boolean;
   /** 握手还在后台进行。启动不为此阻塞——这也是它存在的意义。 */
@@ -186,6 +190,9 @@ export class McpHub {
 
       // 签名变了要先关掉旧进程，否则会留下一个再也没人调用、也不复用的孤儿。
       this.close(spec.name, 'reloading');
+      // lazy 且没有存活连接时不自动拉起：进程留给首次使用（call / 带 server 的 list）。
+      // 连接健康时绝不走 launch，否则热重载复用的连接会被多余 spawn 顶掉。
+      if (spec.lazy === true && !this.isAlive(spec.name)) continue;
       // 只 spawn 不等待：握手互不阻塞，结果经 problems / onProblem 反馈。
       void this.launch(spec);
     }
@@ -241,8 +248,11 @@ export class McpHub {
       // connected = 握手完成（含 tools/list）且进程还活着。spawn 成功但仍在握手的算
       // connecting——「进程活着但工具还没就绪」对使用者就是还没连上。
       const connected = conn?.ready === true && conn.child.exitCode === null;
+      const lazy = spec.lazy === true;
+      // 懒而未连接不是问题：它是设计好的状态，报成 problem 会在 /mcps 里看起来像故障。
+      // 失败仍会进 problems，所以 lazy 只掩盖「还没轮到它启动」这一种情形。
       const problem = spawnable
-        ? (connected ? undefined : this.problems.get(spec.name) ?? 'not connected')
+        ? (connected ? undefined : this.problems.get(spec.name) ?? (lazy ? undefined : 'not connected'))
         : blocked;
       const connecting = this.inFlight.has(spec.name);
       return {
@@ -252,6 +262,7 @@ export class McpHub {
         enabled: spec.enabled,
         // 没给来源态就退化成最终态：调用方（测试、内部构造）不必为此多填一个字段。
         sourceEnabled: spec.sourceEnabled ?? spec.enabled,
+        lazy,
         connected,
         ...(connecting ? { connecting: true } : {}),
         target: targetOf(spec),
@@ -289,6 +300,27 @@ export class McpHub {
     const entry = this.entries.get(server);
     if (entry === undefined) throw new Error(`MCP server not connected: ${server}`);
     if (!entry.spawnable) throw new Error(`MCP server unavailable (${entry.blocked}): ${server}`);
+    const conn = await this.ensureReady(server, entry);
+    const result = await this.request(conn, 'tools/call', { name, arguments: args });
+    return JSON.stringify(result ?? {});
+  }
+
+  /**
+   * 定向列表：保证该 server 已连接后返回它的工具清单。
+   *
+   * lazy server 的首连入口——模型需要参数 schema 才能调用工具，所以「看列表」必须连带
+   * 连接；而全局 `listTools()` 保持只读，模型遍历目录时不会把没碰过的 server 全拉起来。
+   */
+  async listToolsOf(server: string): Promise<McpTool[]> {
+    const entry = this.entries.get(server);
+    if (entry === undefined) throw new Error(`MCP server not configured: ${server}`);
+    if (!entry.spawnable) throw new Error(`MCP server unavailable (${entry.blocked}): ${server}`);
+    const conn = await this.ensureReady(server, entry);
+    return conn.tools.map((tool) => ({ ...tool, schema: { ...tool.schema } }));
+  }
+
+  /** 连接就绪保障：未就绪时拉起并等握手（按名字去重），仍不可用按原因抛。 */
+  private async ensureReady(server: string, entry: Entry): Promise<Connection> {
     let conn = this.connections.get(server);
     if (conn === undefined || !conn.ready || conn.child.exitCode !== null) {
       // 未就绪才拉起：launch 按名字去重——在途握手就等它，落定后仍不可用按原因抛。
@@ -299,8 +331,7 @@ export class McpHub {
         throw new Error(this.problems.get(server) ?? `MCP server not connected: ${server}`);
       }
     }
-    const result = await this.request(conn, 'tools/call', { name, arguments: args });
-    return JSON.stringify(result ?? {});
+    return conn;
   }
 
   dispose(): void {
