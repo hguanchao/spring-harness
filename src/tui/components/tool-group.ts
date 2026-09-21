@@ -400,7 +400,7 @@ export class ToolGroupComponent extends VStack {
 
   /**
    * 汇总行：字形颜色与行文同一套——有失败→错误色，否则随文字 toolTitle 灰。
-   * 箭头表达组开合（`›`/`⌄`）。汇总行和它下面的成员行是同一个视觉块，
+   * 箭头表达组开合（`▸`/`▾`）。汇总行和它下面的成员行是同一个视觉块，
    * 两边配色不一致会让「跑完」看起来像换了半屏颜色。
    */
   private updateHeader(summary: GroupSummary, width: number): void {
