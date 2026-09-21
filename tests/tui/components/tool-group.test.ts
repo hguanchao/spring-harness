@@ -278,3 +278,34 @@ describe('思考正文统一中性灰', () => {
     }
   });
 });
+
+describe('ToolGroupComponent 组收起复位下级', () => {
+  it('组收起时复位成员详情，重新展开是干净的折叠列表', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    // 第一行的工具展开到预览（详情行出现）
+    const tools = (
+      group as unknown as { members: Array<{ kind: string; tool?: ToolExecutionComponent }> }
+    ).members.filter((member) => member.kind === 'tool').map((member) => member.tool!);
+    tools[0]!.toggleDetail();
+    assert.ok(rowsOf(group).some((row) => row.includes('ok')), '展开后应能看到工具详情');
+
+    group.setExpanded(false, false);
+    group.setExpanded(true, false);
+    const after = rowsOf(group);
+    assert.equal(after.filter((row) => row.includes('ok')).length, 0, `重新展开后不应残留详情行，实际: ${after.join(' | ')}`);
+    // ▸ 行 = 3 工具 + 3 思考（展开态的汇总行是 ▾，不计入）
+    assert.equal(after.filter((row) => row.startsWith('▸')).length, 6, '成员行应全部折叠（▸ 标记）');
+  });
+
+  it('组收起时同样复位思考段详情', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    expandThinkings(group, [0, 1, 2]);
+    assert.equal(rowsOf(group).filter((row) => row.includes('第一轮')).length, 1, '思考详情应已上屏');
+
+    group.setExpanded(false, false);
+    group.setExpanded(true, false);
+    assert.equal(rowsOf(group).filter((row) => row.includes('第一轮')).length, 0, '重新展开后思考详情不应残留');
+  });
+});

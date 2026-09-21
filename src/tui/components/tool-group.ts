@@ -328,11 +328,22 @@ export class ToolGroupComponent extends VStack {
     return this.expanded;
   }
 
-  /** 切换分组展开。默认不打开成员详情——组展开只露一行摘要。 */
+  /**
+   * 切换分组展开。收起时把下级详情一并复位：工具正文与思考正文都收回，
+   * 重新展开组是干净的折叠列表，不会冒出上次留下的展开态。
+   * expandTools 仅用于展开侧（折叠时复位是本函数的本职，与该参数无关）。
+   */
   setExpanded(expanded: boolean, expandTools = false): void {
     this.expanded = expanded;
-    if (expandTools) {
-      for (const tool of this.tools) tool.setExpanded(expanded);
+    if (expanded) {
+      if (expandTools) {
+        for (const tool of this.tools) tool.setExpanded(true);
+      }
+    } else {
+      for (const tool of this.tools) tool.setExpanded(false);
+      for (const entry of this.members) {
+        if (entry.kind === 'thinking') entry.thinking.expanded = false;
+      }
     }
     this.markDirty();
     this.ui.requestRender();
