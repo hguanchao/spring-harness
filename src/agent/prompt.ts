@@ -80,12 +80,12 @@ const TOOL_SECTIONS: ReadonlyArray<{ tool: string; text: string }> = [
   {
     tool: 'list_dir',
     text:
-      'Use list_dir — not find or ls — to see what a directory contains. Hidden and git-ignored entries are omitted, so a file missing from the listing is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
+      'Use list_dir — not find or ls — to see what a directory contains. node_modules and .git are skipped, and a directory over the entry cap is truncated with an explicit count, so a file missing from the listing is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
   },
   {
     tool: 'bash',
     text:
-      'Use bash for POSIX shell commands via bash (Git Bash on Windows if it is on PATH). Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result and investigate a non-zero exit before moving on.',
+      'Use bash for POSIX shell commands via bash (on Windows that means Git Bash: on PATH or beside the git executable). Each call is one-shot: no cwd, variable, or function survives between calls, so pass an explicit path instead of relying on an earlier cd. Check the exit-code marker on every result and investigate a non-zero exit before moving on.',
   },
   {
     tool: 'pwsh',

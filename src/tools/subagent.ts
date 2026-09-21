@@ -23,10 +23,20 @@ export const subagentTool: ToolSpec = {
   },
   async execute(args, ctx: ToolContext, callId?: string): Promise<ToolResult> {
     const prompt = asString(args, 'prompt');
-    const type = args.type === 'explore' ? 'explore' : 'general';
+    // 取值白名单校验而不是 `=== 'explore' ? … : 'general'`：写错一个词就静默落到
+    // general（可写）或 none（不隔离），模型以为得到的隔离/只读其实没生效。
+    const rawType = args.type;
+    if (rawType !== undefined && rawType !== 'explore' && rawType !== 'general') {
+      return { ok: false, content: `type must be "explore" or "general" (got ${JSON.stringify(rawType)})` };
+    }
+    const rawIsolation = args.isolation;
+    if (rawIsolation !== undefined && rawIsolation !== 'none' && rawIsolation !== 'worktree') {
+      return { ok: false, content: `isolation must be "none" or "worktree" (got ${JSON.stringify(rawIsolation)})` };
+    }
+    const type = rawType === 'explore' ? 'explore' : 'general';
     const background = asOptionalBool(args, 'background');
     const description = typeof args.description === 'string' ? args.description.slice(0, 120) : undefined;
-    const isolation = args.isolation === 'worktree' ? 'worktree' as const : 'none' as const;
+    const isolation = rawIsolation === 'worktree' ? 'worktree' as const : 'none' as const;
     const resumeFrom = typeof args.resume_from === 'string' && args.resume_from.trim() !== '' ? args.resume_from.trim() : undefined;
     const text = await ctx.spawnSubagent({ prompt, type, background, description, isolation, resumeFrom, toolCallId: callId });
     return { ok: true, content: text };

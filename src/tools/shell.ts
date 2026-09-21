@@ -44,7 +44,7 @@ function makeShellTool(kind: 'bash' | 'pwsh', description: string): ToolSpec {
 
 export const bashTool: ToolSpec = makeShellTool(
   'bash',
-  'Run a POSIX shell command in the workspace root via bash (Git Bash on Windows if it is on PATH).'
+  'Run a POSIX shell command in the workspace root via bash (on Windows that means Git Bash: on PATH or beside the git executable).'
     + ' Each call is one-shot: no cwd, variable, or function survives between calls, so pass explicit paths'
     + ' instead of relying on an earlier cd. Check the exit-code marker on every result before moving on.'
     + ' A write denied by the workspace sandbox is policy, not a command bug: restate the path inside the'

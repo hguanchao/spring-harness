@@ -15,6 +15,10 @@ export const mcpTool: ToolSpec = {
   },
   async execute(args, ctx: ToolContext): Promise<ToolResult> {
     const action = asString(args, 'action');
+    // 未知 action 先拦下：直接落到 call 分支只会报 "server is required"，与真正的错因无关。
+    if (action !== 'list' && action !== 'call') {
+      return { ok: false, content: `unknown action: ${action} (expected "list" or "call")` };
+    }
     if (action === 'list') {
       // 定向列表 = 首连入口（lazy server 靠它拿到工具 schema）；不带 server 的全量
       // 列表保持只读，避免模型每轮扫一遍目录就把所有懒 server 拉起来。

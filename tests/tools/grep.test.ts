@@ -108,4 +108,25 @@ describe('grepTool 工作区边界', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('达到命中上限时明确说明被截断', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-grep-cap-'));
+    try {
+      writeFileSync(join(root, 'big.txt'), Array.from({ length: 260 }, () => `x ${NEEDLE}`).join('\n'));
+      const result = await grepTool.execute({ pattern: NEEDLE }, ctx(root));
+      assert.equal(result.ok, true);
+      assert.match(result.content, /reached the 200-match cap/);
+      // 未达上限时不该出现这句噪音
+      const small = mkdtempSync(join(tmpdir(), 'sph-grep-cap2-'));
+      try {
+        writeFileSync(join(small, 'a.txt'), `only ${NEEDLE}\n`);
+        const clean = await grepTool.execute({ pattern: NEEDLE }, ctx(small));
+        assert.equal(clean.content.includes('cap'), false);
+      } finally {
+        rmSync(small, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

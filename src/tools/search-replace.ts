@@ -74,8 +74,10 @@ export const searchReplaceTool: ToolSpec = {
       return { ok: false, content: `old_string matched ${hit.count} times; pass replace_all or make it unique` };
     }
     const replacement = applyNewline(newString, nl);
+    // 替换串走函数形式：字符串形式会把 new_string 里的 $& / $` / $' / $$ 当成替换模式
+    // 展开（如 $& 变成被匹配的原文、$$ 塌成一个 $），把写得没错的内容静默改写。
     const next = replaceAll
-      ? text.replaceAll(needle, replacement)
+      ? text.replaceAll(needle, () => replacement)
       : text.slice(0, hit.first) + replacement + text.slice(hit.first + needle.length);
     writeFileSync(abs, next, 'utf8');
     ctx.observation?.noteWritten(abs);

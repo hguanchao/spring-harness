@@ -215,15 +215,16 @@ export class ToolExecutionComponent extends Container {
       if (event.button !== 'left') return undefined;
       // 分行路由（y 为组件内行号，0 = 标题行）：
       // - 标题行按压：钉行（│ 标记）并接管，供合成 click——双击展开的触发面。
-      // - 正文行按压：放行给全屏划词——工具输出是拖动复制的主要内容，
-      //   划选后右键复制；正文上的双击由选区路径解释为「选词」而非展开。
+      // - 正文行按压：放行给全屏划词——工具输出是拖动复制的主要内容，划选后右键复制。
+      //   正文上的双击会经「原位松开合成 click」回到这里：双击详情同样计开合（展开态即收起），
+      //   划词路径顺带选中的那个词，会在 toggle 后的清选区里一并抹掉。
       if (event.type === 'press') {
         if (event.y !== 0) return undefined;
         const press = handleSelectablePress(this, event);
         if (press) return press;
       }
       if (event.type !== 'click') return undefined;
-      if (event.y === 0 && this.doubleClick.accept(event.x, event.y)) this.toggleDetail();
+      if (this.doubleClick.accept(event.x, event.y)) this.toggleDetail();
       return { handled: true };
     });
     this.addChild(this.region);

@@ -67,4 +67,15 @@ describe('writeTool 工作区边界', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('报告的是 UTF-8 字节数，不是字符数', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-write-bytes-'));
+    try {
+      const result = await writeTool.execute({ path: 'a.txt', content: '中文' }, ctx(root));
+      assert.equal(result.ok, true);
+      assert.match(result.content, /\(6 bytes\)/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

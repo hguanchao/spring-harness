@@ -72,4 +72,32 @@ describe('search_replace newline and prefix', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  /**
+   * new_string 会原样落盘，里面的 $ 序列不是替换模式。
+   * 走字符串形式的 replaceAll 时 $& / $' / $` / $$ 会被展开，静默写坏文件内容。
+   */
+  it('replace_all 下 new_string 的 $ 序列按字面写入', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-sr-dollar-'));
+    try {
+      for (const [label, replacement] of [
+        ['$&', 'x$&y'],
+        ["$'", "x$'y"],
+        ['$`', 'x$`y'],
+        ['$$', 'x$$y'],
+      ] as Array<[string, string]>) {
+        writeFileSync(join(root, 'a.txt'), 'AAA bbb AAA\n');
+        const result = await searchReplaceTool.execute({
+          path: 'a.txt',
+          old_string: 'bbb',
+          new_string: replacement,
+          replace_all: true,
+        }, ctx(root));
+        assert.equal(result.ok, true, label);
+        assert.equal(readFileSync(join(root, 'a.txt'), 'utf8'), `AAA ${replacement} AAA\n`, label);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,10 +1,9 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { isAbsolute, relative } from 'node:path';
 import {
   assertInsideWorkspace,
   canonicalize,
   fileExt,
-  fileSize,
   IMAGE_EXT,
   isStrictChildRel,
   looksLikeText,
@@ -174,7 +173,11 @@ export const readFileTool: ToolSpec = {
     const rel = asString(args, 'path');
     const abs = resolveReadTarget(ctx.workspaceRoot, rel, ctx.spillRoot);
     if (!existsSync(abs)) return { ok: false, content: `file not found: ${rel}` };
-    const size = fileSize(abs);
+    const stat = statSync(abs);
+    if (stat.isDirectory()) {
+      return { ok: false, content: `not a file: ${rel} (it is a directory — use list_dir)` };
+    }
+    const size = stat.size;
     const mime = imageMime(abs);
     if (mime) {
       if (size > IMAGE_BYTE_LIMIT) {

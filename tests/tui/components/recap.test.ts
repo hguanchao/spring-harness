@@ -17,27 +17,27 @@ describe('RecapMessageComponent', () => {
     const lines = plain(new RecapMessageComponent('We fixed the parser.').render(80));
     assert.equal(lines.length, BLOCK_GAP + 1);
     assert.equal(lines[0], '');
-    assert.equal(lines[1], '   ● Recap — We fixed the parser.');
+    assert.equal(lines[1], '   ◆ Recap — We fixed the parser.');
   });
 
   it('shows a pending line while a manual recap generates', () => {
     const component = new RecapMessageComponent('', true);
     assert.equal(component.isPending, true);
-    assert.equal(plain(component.render(80))[1], '   ○ Recap — summarizing…');
+    assert.equal(plain(component.render(80))[1], '   ◇ Recap — summarizing…');
   });
 
   it('replaces the pending line in place once the summary arrives', () => {
     const component = new RecapMessageComponent('', true);
     component.setSummary('You asked how the retry budget works.');
     assert.equal(component.isPending, false);
-    assert.equal(plain(component.render(80))[1], '   ● Recap — You asked how the retry budget works.');
+    assert.equal(plain(component.render(80))[1], '   ◆ Recap — You asked how the retry budget works.');
   });
 
   it('hangs continuation lines at the body column', () => {
     const body = 'word '.repeat(40).trim();
     const lines = plain(new RecapMessageComponent(body).render(40));
     assert.ok(lines.length > BLOCK_GAP + 1, 'a long body must wrap');
-    assert.ok(lines[BLOCK_GAP]?.startsWith('   ● Recap — '), `head line: ${lines[BLOCK_GAP]}`);
+    assert.ok(lines[BLOCK_GAP]?.startsWith('   ◆ Recap — '), `head line: ${lines[BLOCK_GAP]}`);
     for (const line of lines.slice(BLOCK_GAP + 1)) {
       assert.ok(line.startsWith('     '), `continuation must be indented: ${line}`);
     }

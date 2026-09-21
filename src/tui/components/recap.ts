@@ -13,12 +13,15 @@
  * 所以 pending 被撤掉时不会留下一道空行。
  */
 
-import { BLOCK_GAP, type Component, wrapTextWithAnsi } from '../core/index.js';
+import { BLOCK_GAP, type Component, type TuiMouseEvent, type TuiMouseEventResult, wrapTextWithAnsi } from '../core/index.js';
 import { theme } from '../theme/theme.js';
-import { TOOL_GROUP_INDENT, TOOL_MARK, TOOL_MEMBER_INDENT } from './tool-execution.js';
+import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT } from './tool-execution.js';
 
 /** pending 态占位文案；对齐底部状态行的措辞。 */
 const PENDING_BODY = 'summarizing…';
+
+/** Recap 专用前缀：菱形（完成实心 / pending 空心），与工具行的圆点区分开。 */
+const RECAP_MARK = { done: '◆', pending: '◇' } as const;
 
 export class RecapMessageComponent implements Component {
   private summary: string;
@@ -43,14 +46,27 @@ export class RecapMessageComponent implements Component {
     // 无缓存状态。
   }
 
+  /**
+   * Recap 是只读摘要：正文行吞掉左键按压/点击，全屏划词不再在它身上起锚——
+   * 双击它不会亮起选词高亮，也不能从它拖选（前导空行 y < BLOCK_GAP 放行，不挡块间距处的拖选）。
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.button !== 'left') return undefined;
+    if (event.type !== 'press' && event.type !== 'click') return undefined;
+    if (event.y < BLOCK_GAP) return undefined;
+    return { handled: true };
+  }
+
   render(width: number): string[] {
     const body = this.pending ? PENDING_BODY : this.summary;
     if (body === '') return [];
 
-    // 前缀 `  ● ` 的可见宽度恰好是 TOOL_MEMBER_INDENT，续行直接按它悬挂。
-    const mark = this.pending ? TOOL_MARK.running : TOOL_MARK.done;
+    // 前缀 `  ◆ ` 的可见宽度恰好是 TOOL_MEMBER_INDENT，续行直接按它悬挂。
+    const mark = this.pending ? RECAP_MARK.pending : RECAP_MARK.done;
     const head = `${theme.bold(theme.fg('text', 'Recap'))}${theme.fg('dim', ' — ')}`;
-    const painted = this.pending ? theme.fg('dim', body) : theme.fg('muted', body);
+    const painted = this.pending
+      ? theme.bold(theme.fg('dim', body))
+      : theme.bold(theme.fg('muted', body));
 
     const available = Math.max(1, width - TOOL_MEMBER_INDENT);
     const wrapped = wrapTextWithAnsi(`${head}${painted}`, available);

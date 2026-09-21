@@ -102,6 +102,8 @@ export const grepTool: ToolSpec = {
     if (startStat.isFile()) files.push(start);
     else walk(start, files);
     const hits: string[] = [];
+    // 多收一条：正好等于上限时无法区分「搜完了」和「被截断」，多看一眼才敢下结论。
+    let capped = false;
     for (const file of files) {
       if (!looksTextual(file)) continue;
       let text: string;
@@ -112,16 +114,24 @@ export const grepTool: ToolSpec = {
       }
       const rel = toWorkspaceRelative(ctx.workspaceRoot, file);
       scanLines(text, (line, lineNo) => {
-        if (regex.test(line)) {
-          hits.push(`${rel}:${lineNo}:${line}`);
-          // 单文件内也要封顶，否则一个巨型文件就能越过上限。
-          return hits.length < HIT_LIMIT;
+        if (!regex.test(line)) return true;
+        if (hits.length >= HIT_LIMIT) {
+          capped = true;
+          return false;
         }
+        hits.push(`${rel}:${lineNo}:${line}`);
         return true;
       });
-      if (hits.length >= HIT_LIMIT) break;
+      if (capped) break;
     }
     if (hits.length === 0) return { ok: true, content: 'no matches' };
-    return { ok: true, content: clip(hits.join('\n')) };
+    const body = hits.join('\n');
+    if (!capped) return { ok: true, content: clip(body) };
+    return {
+      ok: true,
+      content: clip(
+        `${body}\n\n(reached the ${HIT_LIMIT}-match cap — more matches may exist; narrow with a path or a more specific pattern)`,
+      ),
+    };
   },
 };

@@ -25,6 +25,6 @@ export const writeTool: ToolSpec = {
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, 'utf8');
     ctx.observation?.noteWritten(abs);
-    return { ok: true, content: `wrote ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${content.length} bytes)` };
+    return { ok: true, content: `wrote ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${Buffer.byteLength(content, 'utf8')} bytes)` };
   },
 };
