@@ -1,36 +1,31 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 /**
- * 在**临时目录**上跑完整的 ACL 生命周期（授权 → 撤销）。
+ * 过滤令牌后端的生命周期与行为。
  *
- * 刻意只用自己的临时目录：workspaceRoot / sphHomeDir / tempDir 全部指向 mkdtemp 出来的目录，
- * 绝不碰用户真实的工作区和 ~/.sph——这个后端会改 DACL，测试不该在别人机器上留痕。
+ * 不再改任何目录的 DACL（旧 ACL 方案的授权/撤销链路已随受限 SID 列表一起移除——
+ * 它与 msys/cygwin 的对象模型根本冲突，真 Git Bash 在受限令牌下活不过启动），
+ * 所以这里直接在 tmpdir 上跑，不担心留痕。
  *
- * 能覆盖到的是「三条授权都登记、退出时都被撤销」这条链路（此前只撤销 temp，工作区与 ~/.sph
- * 的 ACE 永远留在盘上）。撤销后 DACL 的实际内容不在此处断言：读回 DACL 需要再引一套 Win32
- * 绑定，收益不抵成本；但「转换 SID → 合并 ACL → 写回 DACL → 释放 SID」这条 FFI 序列跑通
- * 已经能挡住顺序写错这类会崩进程的问题。
+ * 「沙箱内跑真命令」的用例只在 Windows 上执行 bash：这曾是线上故障
+ * （couldn't create signal pipe, Win32 error 5）的直接表现，值得常驻回归。
  */
 describe(
-  'WindowsAclSandbox ACL 生命周期',
-  { skip: process.platform === 'win32' ? false : '只有 Windows 有 ACL 后端' },
+  'Windows 过滤令牌沙箱',
+  { skip: process.platform === 'win32' ? false : '只有 Windows 有过滤令牌后端' },
   () => {
-    it('init 授权后 dispose 撤销，且 dispose 可重复调用', async () => {
-      // 动态 import 放在用例体内：win32.ts 在模块加载时就 koffi.load('kernel32.dll')，
-      // 静态 import 会让这个文件在 Linux 上直接加载失败——即便用例本身被 skip 也救不回来。
+    it('init 后 status 正确，dispose 可重复调用', async () => {
       const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
-      const workspace = mkdtempSync(join(tmpdir(), 'sph-acl-ws-'));
-      const sphHome = mkdtempSync(join(tmpdir(), 'sph-acl-home-'));
-      const temp = mkdtempSync(join(tmpdir(), 'sph-acl-tmp-'));
+      const workspace = mkdtempSync(join(tmpdir(), 'sph-token-ws-'));
       const sandbox = new WindowsAclSandbox({
         mode: 'workspace',
         workspaceRoot: workspace,
-        sphHomeDir: sphHome,
-        tempDir: temp,
+        sphHomeDir: workspace,
+        tempDir: tmpdir(),
       });
       try {
         await sandbox.init();
@@ -39,9 +34,36 @@ describe(
       } finally {
         sandbox.dispose();
         sandbox.dispose();
-        for (const dir of [workspace, sphHome, temp]) rmSync(dir, { recursive: true, force: true });
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it('沙箱内跑真 Git Bash 不再撞 signal pipe 初始化失败', { timeout: 60_000 }, async () => {
+      const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
+      const { resolveBashBinary } = await import('../../../src/sandbox/shell-bin.js');
+      const workspace = mkdtempSync(join(tmpdir(), 'sph-token-bash-'));
+      writeFileSync(join(workspace, 'hello.txt'), 'hi');
+      const sandbox = new WindowsAclSandbox({
+        mode: 'workspace',
+        workspaceRoot: workspace,
+        sphHomeDir: workspace,
+        tempDir: tmpdir(),
+      });
+      try {
+        await sandbox.init();
+        const bash = resolveBashBinary();
+        const result = await sandbox.run({
+          command: bash.command,
+          args: [...bash.prefixArgs, 'cat hello.txt'],
+          cwd: workspace,
+          timeoutMs: 30_000,
+        });
+        assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+        assert.equal(result.stdout.trim(), 'hi');
+      } finally {
+        sandbox.dispose();
+        rmSync(workspace, { recursive: true, force: true });
       }
     });
   },
 );
-
