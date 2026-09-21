@@ -5,7 +5,7 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。
  *
- * 前缀按状态：折叠 `›`、展开 `⌄`、失败 `×`，箭头与行文同色（muted）；进行中的标题带 shimmer。
+ * 前缀按状态：折叠 `›`、展开 `˅`、失败 `×`，箭头与行文同色（muted）；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  */
 
@@ -19,11 +19,11 @@ import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
-/** 组 / 成员 / 思考 共用的状态前缀：`›` 折叠 / `⌄` 展开，随行文同色；失败仍用 `×`。 */
+/** 组 / 成员 / 思考 共用的状态前缀：`›` 折叠 / `˅` 展开（同一族细线箭头，旋转朝下），随行文同色；失败仍用 `×`。 */
 export const TOOL_MARK = {
   running: '›',
   done: '›',
-  expanded: '⌄',
+  expanded: '˅',
   fail: '×',
 } as const;
 
@@ -216,7 +216,7 @@ export class ToolExecutionComponent extends Container {
       }
       if (event.button !== 'left') return undefined;
       // 分行路由（y 为组件内行号，0 = 标题行）：
-      // - 标题行按压：钉行（│ 标记）并接管，供合成 click——双击展开的触发面。
+      // - 标题行按压：钉行（❙ 标记）并接管，供合成 click——双击展开的触发面。
       // - 正文行按压：放行给全屏划词——工具输出是拖动复制的主要内容，划选后右键复制。
       //   正文上的双击会经「原位松开合成 click」回到这里：双击详情同样计开合（展开态即收起），
       //   划词路径顺带选中的那个词，会在 toggle 后的清选区里一并抹掉。

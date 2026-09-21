@@ -64,13 +64,13 @@ export function compositeRowSelection(screen: string[], frame: LayoutFrame, widt
   const box = findComponentBox(frame.root, selected);
   if (!box || box.clip.width <= 0 || box.clip.height <= 0) return screen;
 
-  // 只钉标题/汇总那一行：成员展开后 box 会变高，整列铺 │ 会盖住正文与吸顶气泡。
+  // 只钉标题/汇总那一行：成员展开后 box 会变高，整列铺 ❙ 会盖住正文与吸顶气泡。
   const row = box.rect.y;
   if (row < box.clip.y || row >= box.clip.y + box.clip.height) return screen;
   const leftX = box.rect.x + Math.min(ROW_SELECTION_INSET, Math.max(0, box.rect.width - 1));
   if (leftX < box.clip.x || leftX >= box.clip.x + box.clip.width) return screen;
 
   const result = [...screen];
-  putGlyph(result, row, leftX, theme.fg('primary', '│'), width);
+  putGlyph(result, row, leftX, theme.fg('primary', '❙'), width);
   return result;
 }

@@ -32,7 +32,7 @@ function stubRow(): Component {
 }
 
 describe('compositeRowSelection', () => {
-  it('只在标题行画 │，不顺着展开后的正文往下铺', () => {
+  it('只在标题行画 ❙，不顺着展开后的正文往下铺', () => {
     const row = asSelectableRow(stubRow());
     selectRow(row);
     const screen = blank(8, 20);
@@ -41,8 +41,8 @@ describe('compositeRowSelection', () => {
       frame(box(row, { x: 0, y: 2, width: 20, height: 5 })),
       20,
     );
-    assert.match(out[2] ?? '', /│/);
-    assert.equal(out[3], screen[3], '正文行不应被 │ 盖住');
+    assert.match(out[2] ?? '', /❙/);
+    assert.equal(out[3], screen[3], '正文行不应被 ❙ 盖住');
     assert.equal(out[4], screen[4]);
     assert.equal(out[5], screen[5]);
     assert.equal(out[6], screen[6]);

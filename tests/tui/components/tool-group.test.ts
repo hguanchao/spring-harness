@@ -83,7 +83,7 @@ describe('ToolGroupComponent 思考段的保留与交错', () => {
     const group = buildThreeIterationGroup();
     group.setExpanded(true, false);
     const rows = rowsOf(group);
-    assert.ok(rows[0]?.startsWith('⌄ Listed'), `汇总行应在最前，实际: ${rows[0]}`);
+    assert.ok(rows[0]?.startsWith('˅ Listed'), `汇总行应在最前，实际: ${rows[0]}`);
     assert.deepEqual(
       rows.slice(1).map((row) => (row.includes('Thought for') ? 'T' : 'X')),
       ['T', 'X', 'T', 'X', 'T', 'X'],
