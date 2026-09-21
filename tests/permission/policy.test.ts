@@ -93,6 +93,74 @@ describe('evaluateRules', () => {
   });
 });
 
+describe('evaluateRules 复合命令逐段求值', () => {
+  const RULES: PermissionRules = {
+    allow: ['bash:npm test', 'bash:git add*'],
+    ask: [],
+    deny: ['bash:rm -rf*'],
+  };
+
+  it('deny 命中任一子命令即命中：藏在 && 后面的 rm 逃不掉', () => {
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test && rm -rf build' }), 'deny');
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test | tee log; rm -rf /' }), 'deny');
+  });
+
+  it('allow 必须覆盖全部子命令，漏一段就落回模式', () => {
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test && git add .' }), 'allow');
+    assert.equal(
+      evaluateRules(RULES, { tool: 'bash', command: 'npm test && git push' }),
+      undefined,
+      'git push 没有 allow 规则，整条不能放行',
+    );
+  });
+
+  it('子 shell 里的命令同样被 deny 看见、被 require 覆盖', () => {
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'echo $(rm -rf /)' }), 'deny');
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test && (git add -A)' }), 'allow');
+  });
+
+  it('引号内的分隔符不是切点', () => {
+    assert.equal(
+      evaluateRules(RULES, { tool: 'bash', command: 'git add -m "a && b" ; npm test' }),
+      'allow',
+    );
+    assert.equal(
+      evaluateRules({ allow: ['bash:echo "a && b"'], ask: [], deny: [] }, { tool: 'bash', command: 'echo "a && b"' }),
+      'allow',
+    );
+  });
+
+  it('2>&1 的 & 是文件描述符复制，不是分隔符', () => {
+    const rules: PermissionRules = { allow: ['bash:npm test*'], ask: [], deny: [] };
+    // 若把 & 当分隔符，会拆出裸的 '1' 段、无规则可覆盖；不切则整段命中前缀规则。
+    assert.equal(evaluateRules(rules, { tool: 'bash', command: 'npm test 2>&1' }), 'allow');
+  });
+
+  it('解析不了的命令不允许被 allow 放行，deny 仍按原文兜底', () => {
+    // 截断的操作符
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test &&' }), undefined);
+    // 未闭合引号
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: "npm test && echo 'oops" }), undefined);
+    // 连续分隔符
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test ;; git add .' }), undefined);
+    // 未闭合子 shell
+    assert.equal(evaluateRules(RULES, { tool: 'bash', command: 'npm test && (git add' }), undefined);
+    // deny 按原文匹配仍能拦
+    assert.equal(
+      evaluateRules({ allow: [], ask: [], deny: ['bash:npm test*'] }, { tool: 'bash', command: 'npm test &&' }),
+      'deny',
+    );
+  });
+
+  it('非 shell 工具（mcp/web_search）不按 shell 语义拆分', () => {
+    assert.equal(
+      evaluateRules({ allow: ['web_search:weather*'], ask: [], deny: [] }, { tool: 'web_search', command: 'weather | tokyo' }),
+      'allow',
+      '查询文本里的 | 是内容不是管道',
+    );
+  });
+});
+
 describe('HeadlessApprover 与规则', () => {
   it('deny 规则连 yolo 也绕不过', async () => {
     const approver = new HeadlessApprover('yolo', undefined, { allow: [], ask: [], deny: ['bash:rm -rf*'] });

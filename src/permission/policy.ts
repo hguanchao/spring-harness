@@ -60,34 +60,190 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 /**
+ * 按顶层分隔符把复合命令拆成子命令，规则逐段匹配（对齐 Claude Code 的语义）。
+ *
+ * 识别的分隔符：`&&`、`||`、`;`、`|`、`|&`、`&`、换行。引号内与反斜杠转义的
+ * 分隔符不是切点（`echo "a && b"` 是一条命令）；`2>&1` 里的 `&` 是文件描述符
+ * 复制（跟在 `>`/`<` 后），不切；`(`、`)` 是子 shell 边界，也作为切点——
+ * 里面的命令同样要被 deny 看见、被 allow 覆盖。
+ *
+ * 返回 undefined 表示解析不了：未闭合引号、截断的操作符（`npm test &&`）、
+ * 连续分隔符（`a ;; b`）。解析不了的命令绝不能被 allow 规则静默放行。
+ */
+export function splitShellCommands(command: string): string[] | undefined {
+  const parts: string[] = [];
+  let current = '';
+  /** 上一段以顶层分隔符收尾；其后紧跟分隔符（`a ;; b`、`a &&`）就是语法错误。 */
+  let afterSeparator = false;
+  /** 未闭合的子 shell：`a && (b` 解析不出完整命令，一律 fail-closed。 */
+  let parenDepth = 0;
+
+  const flush = (): void => {
+    const trimmed = current.trim().replace(/\s+/g, ' ');
+    if (trimmed !== '') parts.push(trimmed);
+    current = '';
+  };
+
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i]!;
+
+    // 反斜杠转义（引号外）：下一个字符并入字面量。
+    if (ch === '\\' && i + 1 < command.length) {
+      current += ch + command[i + 1]!;
+      afterSeparator = false;
+      i += 2;
+      continue;
+    }
+    // 单引号：到下一个单引号为止全是字面量。
+    if (ch === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end === -1) return undefined;
+      current += command.slice(i, end + 1);
+      afterSeparator = false;
+      i = end + 1;
+      continue;
+    }
+    // 双引号：内部允许反斜杠转义。
+    if (ch === '"') {
+      current += ch;
+      i += 1;
+      let closed = false;
+      while (i < command.length) {
+        const inner = command[i]!;
+        if (inner === '\\' && i + 1 < command.length) {
+          current += inner + command[i + 1]!;
+          i += 2;
+          continue;
+        }
+        current += inner;
+        i += 1;
+        if (inner === '"') {
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) return undefined;
+      afterSeparator = false;
+      continue;
+    }
+    // 子 shell / 分组边界：也作为切点——里面的命令各归各段，deny 看得见、allow 得覆盖。
+    // 括号本身不并入任何一段：'echo $(rm -rf x)' 拆出 'rm -rf x'，deny 的前缀 glob 才够得着。
+    if (ch === '(') {
+      flush();
+      afterSeparator = false;
+      parenDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ')') {
+      flush();
+      afterSeparator = false;
+      if (parenDepth > 0) parenDepth -= 1;
+      i += 1;
+      continue;
+    }
+    // 顶层分隔符。
+    const pair = command.slice(i, i + 2);
+    if (pair === '&&' || pair === '||' || pair === '|&') {
+      if (afterSeparator) return undefined;
+      flush();
+      afterSeparator = true;
+      i += 2;
+      continue;
+    }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '\n' || ch === '\r') {
+      // `2>&1` 的 & 是文件描述符复制：跟在 > / < 后不切。
+      const prev = i > 0 ? command[i - 1]! : '';
+      if (ch === '&' && (prev === '>' || prev === '<')) {
+        current += ch;
+        i += 1;
+        continue;
+      }
+      if (afterSeparator) return undefined;
+      flush();
+      afterSeparator = true;
+      i += 1;
+      continue;
+    }
+    if (ch !== ' ' && ch !== '\t') afterSeparator = false;
+    current += ch;
+    i += 1;
+  }
+  if (current.trim() === '') {
+    if (afterSeparator) return undefined; // 截断的操作符：`npm test &&`
+    if (parenDepth !== 0) return undefined; // 未闭合的子 shell：`a && (b`
+    if (parts.length === 0) return command.trim() === '' ? [] : undefined;
+    return parts;
+  }
+  flush();
+  if (parenDepth !== 0) return undefined;
+  return parts;
+}
+
+/** bash/pwsh 是复合命令工具；mcp/web_search 的 command 是名字或自由文本，不按 shell 语义拆。 */
+const COMPOUND_COMMAND_TOOLS = new Set(['bash', 'pwsh']);
+
+/**
  * 一条规则是否命中。
  *
  * 语法 `<tool>` 或 `<tool>:<pattern>`，**只按第一个冒号切分**：shell 命令里冒号很常见
  * （`git commit -m "fix: x"`），从右边切会把命令切碎。不写 pattern 就是「这个工具的全部」，
  * 写了就按通配匹配——不带通配符即精确匹配，精确是更安全的默认值。
  */
-function ruleMatches(entry: string, request: ApprovalRequest): boolean {
+function ruleMatches(entry: string, request: ApprovalRequest, detail = approvalDetail(request)): boolean {
   const sep = entry.indexOf(':');
   const tool = (sep === -1 ? entry : entry.slice(0, sep)).trim();
   if (tool === '' || tool !== request.tool) return false;
   const pattern = sep === -1 ? '' : entry.slice(sep + 1).trim();
   if (pattern === '') return true;
-  return globToRegExp(pattern).test(approvalDetail(request));
+  return globToRegExp(pattern).test(detail);
 }
 
 /**
  * 按 deny > ask > allow 的次序求值；无命中返回 undefined（交回模式与授权集合决定）。
  *
  * 顺序就是优先级，两个参考实现（grok-build、Claude Code）都是这个次序。
+ *
+ * 复合命令（bash/pwsh）逐段求值（对齐 Claude Code）：deny/ask 命中**任一**子命令
+ * 即命中——`npm test && rm -rf /` 里那段 rm 逃不掉；allow 必须覆盖**每一个**子命令，
+ * 漏一段就落回模式决定。解析不了的命令（未闭合引号、截断的操作符、未闭合的子 shell）
+ * 不允许被 allow 规则放行，fail-closed 交回模式；deny/ask 仍按原文兜底匹配，
+ * 能拦一条是一条。mcp/web_search 的 command 不是 shell 语义，保持整串匹配。
  */
 export function evaluateRules(
   rules: PermissionRules | undefined,
   request: ApprovalRequest,
 ): RuleAction | undefined {
   if (!rules) return undefined;
-  if (rules.deny.some((entry) => ruleMatches(entry, request))) return 'deny';
-  if (rules.ask.some((entry) => ruleMatches(entry, request))) return 'ask';
-  if (rules.allow.some((entry) => ruleMatches(entry, request))) return 'allow';
+  const denyOrAsk = (detail: string): RuleAction | undefined => {
+    if (rules.deny.some((entry) => ruleMatches(entry, request, detail))) return 'deny';
+    if (rules.ask.some((entry) => ruleMatches(entry, request, detail))) return 'ask';
+    return undefined;
+  };
+
+  if (!COMPOUND_COMMAND_TOOLS.has(request.tool) || request.command === undefined) {
+    const verdict = denyOrAsk(approvalDetail(request));
+    if (verdict) return verdict;
+    return rules.allow.some((entry) => ruleMatches(entry, request, approvalDetail(request)))
+      ? 'allow'
+      : undefined;
+  }
+
+  const parts = splitShellCommands(request.command);
+  if (parts === undefined) {
+    // 解析不了：allow 一律不放行；deny/ask 按原文匹配兜底。
+    return denyOrAsk(approvalDetail(request));
+  }
+  if (parts.length === 0) return undefined;
+  for (const part of parts) {
+    const verdict = denyOrAsk(part);
+    if (verdict) return verdict;
+  }
+  // allow：每一段都得有规则罩着，漏一段就不算通过。
+  if (parts.every((part) => rules.allow.some((entry) => ruleMatches(entry, request, part)))) {
+    return 'allow';
+  }
   return undefined;
 }
 

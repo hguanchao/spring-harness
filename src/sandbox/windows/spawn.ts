@@ -13,7 +13,7 @@ import {
 import koffi from 'koffi';
 
 import { quoteCommandLineArg } from './command-line.js';
-import { scrubbedParentEnv, windowsEnvBlock } from '../env.js';
+import { mergeChildEnv, windowsEnvBlock } from '../env.js';
 
 export interface Spawned {
   process: Handle;
@@ -37,7 +37,14 @@ function resolveExecutable(command: string): string {
   return command;
 }
 
-export function spawnAsUser(token: Handle, command: string, args: string[], cwd: string): Spawned {
+export function spawnAsUser(
+  token: Handle,
+  command: string,
+  args: string[],
+  cwd: string,
+  /** 擦除后的父环境之上再叠加的条目（如受限档把 TMP/TEMP 指到沙箱私有临时目录）。 */
+  envExtra?: Record<string, string>,
+): Spawned {
   const sa = inheritSa();
   const outRead: [Handle] = [null];
   const outWrite: [Handle] = [null];
@@ -54,7 +61,7 @@ export function spawnAsUser(token: Handle, command: string, args: string[], cwd:
   const exe = resolveExecutable(command);
   const cmd = [exe, ...args].map(quoteCommandLineArg).join(' ');
   const cmdBuf = Buffer.from(`${cmd}\0`, 'utf16le');
-  const envBuf = windowsEnvBlock(scrubbedParentEnv());
+  const envBuf = windowsEnvBlock(mergeChildEnv(envExtra));
   const created = api.createProcessAsUserW(
     token,
     null,
