@@ -399,8 +399,8 @@ export class ToolGroupComponent extends VStack {
   }
 
   /**
-   * 汇总行：字形颜色与成员行同一套——有失败→错误色，否则品牌紫（进行中 / 完成同色，
-   * 只靠空心 `○` 与实心 `●` 区分）。汇总行和它下面的成员行是同一个视觉块，
+   * 汇总行：字形颜色与成员行同一套——有失败→错误色，否则品牌紫（进行中 / 完成同形同色，
+   * 进行中靠 shimmer 区分）。汇总行和它下面的成员行是同一个视觉块，
    * 两边配色不一致会让「跑完」看起来像换了半屏颜色。
    */
   private updateHeader(summary: GroupSummary, width: number): void {
@@ -426,8 +426,8 @@ export class ToolGroupComponent extends VStack {
       : member.durationMs === undefined
         ? 'Thought'
         : `Thought for ${formatDuration(member.durationMs)}`;
-    // 圆点跟全组一套语言：永远品牌紫（error 红），只靠 ○/● 表状态——
-    // 成员行与汇总行都是「紫点灰字」，思考行连点一起转灰就断了这条惯例。
+    // 箭头跟全组一套语言：永远品牌紫（error 红）——
+    // 成员行与汇总行都是「紫箭头灰字」，思考行连箭头一起转灰就断了这条惯例。
     // 标签文字才是状态色：执行中紫、完成后灰。
     const labelColor: ThemeColor = member.running ? 'primary' : 'toolTitle';
     // 组里有汇总行时，思考永远是成员：缩进一级，避免和汇总行并排读成两件并列的事。

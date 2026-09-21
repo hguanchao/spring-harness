@@ -5,7 +5,7 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。
  *
- * 前缀按状态：完成 `●`、进行中 `○`、失败 `×`，进行与完成同色（品牌紫），只靠字形区分。
+ * 前缀按状态：完成与进行中 `›`、失败 `×`，同色（品牌紫）；进行中的标题带 shimmer，靠动效区分。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  */
 
@@ -19,10 +19,10 @@ import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
-/** 组 / 成员 / 思考 共用的状态前缀：完成实心、进行中空心。 */
+/** 组 / 成员 / 思考 共用的状态前缀：`›` 小箭头；失败仍用 `×`，进行中靠标题 shimmer 呈现。 */
 export const TOOL_MARK = {
-  running: '○',
-  done: '●',
+  running: '›',
+  done: '›',
   fail: '×',
 } as const;
 
@@ -364,8 +364,8 @@ export class ToolExecutionComponent extends Container {
   /**
    * 前缀颜色：失败红，其余（进行中 / 完成）都是品牌紫。
    *
-   * 进行与完成靠字形区分（空心 `○` / 实心 `●`），不靠色相——同一批工具行在跑完之后
-   * 只应该「填实」，而不是整行换色，否则一轮收尾会有半屏颜色跳变。
+   * 进行与完成同字形同色（`›`），靠标题 shimmer 区分——同一批工具行在跑完之后
+   * 只应该「静下来」，而不是整行换色，否则一轮收尾会有半屏颜色跳变。
    */
   private glyphColor(status: ToolStatus): ThemeColor {
     return status === 'error' ? 'error' : 'primary';
