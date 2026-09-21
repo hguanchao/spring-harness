@@ -398,8 +398,15 @@ export class ToolGroupComponent extends VStack {
     event: TuiMouseEvent,
   ): TuiMouseEventResult | undefined {
     if (event.button !== 'left') return undefined;
-    const press = handleSelectablePress(member.region, event);
-    if (press) return press;
+    // 分行路由（y 为成员块内行号，0 = 标题行），与工具行同一套约定：
+    // - 标题行按压：钉行（❙ 标记）并接管——双击开合的触发面。
+    // - 正文行按压：放行给全屏划词——推理正文才是要拖动复制的内容。
+    //   正文上的双击会经「原位松开合成 click」回到这里，同样计开合（收起）。
+    if (event.type === 'press') {
+      if (event.y !== 0) return undefined;
+      const press = handleSelectablePress(member.region, event);
+      if (press) return press;
+    }
     if (event.type !== 'click') return undefined;
     if (member.click.accept(event.x, event.y)) {
       member.expanded = !member.expanded;
@@ -455,7 +462,6 @@ export class ToolGroupComponent extends VStack {
     // 正文跟随自己的行：行缩进 +2（对齐标签列）。组开/合会改变档位，
     // Markdown 的 paddingX 建后不可变，档位变了就重建。
     const bodyIndent = rowIndent + 2;
-    member.body.addChild(new Spacer(1));
     if (member.markdown && member.bodyIndent !== bodyIndent) member.markdown = undefined;
     if (member.markdown) {
       member.markdown.setText(detail);

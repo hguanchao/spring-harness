@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import type { TUI, TuiMouseEvent } from '../../../src/tui/core/index.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from '../../../src/tui/components/tool-execution.js';
 import { ToolGroupComponent } from '../../../src/tui/components/tool-group.js';
+import { selectRow } from '../../../src/tui/components/selectable-row.js';
 
 let renderCount = 0;
 let viewportCount = 0;
@@ -307,5 +308,57 @@ describe('ToolGroupComponent 组收起复位下级', () => {
     group.setExpanded(false, false);
     group.setExpanded(true, false);
     assert.equal(rowsOf(group).filter((row) => row.includes('第一轮')).length, 0, '重新展开后思考详情不应残留');
+  });
+});
+
+describe('ToolGroupComponent 思考正文的交互', () => {
+  it('展开正文紧贴标题行，中间没有空行', () => {
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    group.setThinking('第一轮：先看目录结构。', false, 1000);
+    expandThinkings(group, [0]);
+    const lines = group.render(100).map((line) => line.replace(STRIP, ''));
+    const titleIndex = lines.findIndex((line) => line.includes('Thought for'));
+    const bodyIndex = lines.findIndex((line) => line.includes('第一轮'));
+    assert.ok(titleIndex >= 0, '应有思考标题行');
+    assert.ok(bodyIndex > titleIndex, '正文应在标题之后');
+    assert.deepEqual(lines.slice(titleIndex + 1, bodyIndex), [], '标题与正文之间不应有空行');
+  });
+
+  it('标题行按压钉行接管，正文行按压放行给全屏划词', () => {
+    const group = new ToolGroupComponent(ui);
+    group.beginThinking();
+    group.setThinking('第一轮：先看目录结构。', false, 1000);
+    expandThinkings(group, [0]);
+    const lines = group.render(100);
+    const titleY = lines.findIndex((line) => line.replace(STRIP, '').includes('Thought for'));
+    const bodyY = lines.findIndex((line) => line.replace(STRIP, '').includes('第一轮'));
+    assert.ok(titleY >= 0 && bodyY === titleY + 1, '正文应紧贴标题，正文按压才落在成员块 y≠0 处');
+
+    const press = (y: number): { handled?: boolean } | undefined => {
+      const event: TuiMouseEvent = {
+        type: 'press',
+        button: 'left',
+        x: 10,
+        y,
+        screenX: 10,
+        screenY: y,
+        width: 100,
+        height: lines.length,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      };
+      return group.handleMouse(event);
+    };
+
+    try {
+      // 标题行（成员块局部 y=0）：钉行（❙）并接管——双击开合的触发面。
+      assert.ok(press(titleY)?.handled, '标题行按压应被接管');
+      // 正文行（y≠0）：放行——TUI 层按划词语义接手（selectRow 兜底 + 全屏选词）。
+      assert.equal(press(bodyY), undefined, '正文行按压应放行给划词');
+    } finally {
+      selectRow(undefined);
+    }
   });
 });
