@@ -7,6 +7,7 @@ export {
 	type AutocompleteProvider,
 	type AutocompleteSuggestions,
 	CombinedAutocompleteProvider,
+	findFdBinary,
 	type SlashCommand,
 } from "./autocomplete.js";
 // Components

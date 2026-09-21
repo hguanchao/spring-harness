@@ -3,75 +3,19 @@ import { isAbsolute, relative } from 'node:path';
 import {
   assertInsideWorkspace,
   canonicalize,
-  fileExt,
-  IMAGE_EXT,
+  IMAGE_BYTE_LIMIT,
+  imageMime,
   isStrictChildRel,
   looksLikeText,
   READ_BYTE_LIMIT,
+  readHead,
+  splitCompleteUtf8,
   TEXT_SNIFF_BYTES,
   toWorkspaceRelative,
 } from '../workspace/boundary.js';
 import { asOptionalNumber, asString, clip, type ToolContext, type ToolResult, type ToolSpec } from './types.js';
 
-/** 单张图片上限。原图经 base64 后膨胀约 1/3，8MB 原图足以覆盖截图与设计稿。 */
-const IMAGE_BYTE_LIMIT = 8 * 1024 * 1024;
-
-const IMAGE_MIME: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-};
-
-function imageMime(path: string): string | undefined {
-  const ext = fileExt(path);
-  if (!IMAGE_EXT.has(ext)) return undefined;
-  return IMAGE_MIME[ext];
-}
-
-/**
- * 只读文件头部最多 maxBytes 字节。
- * 旧实现 readFileSync 整文件、再 subarray 截断，读一个 1GB 的日志就等于
- * 分配 1GB 内存；这里用 fd 直接限定读取长度，内存占用与文件大小解耦。
- */
-function readHead(abs: string, maxBytes: number): Buffer {
-  const fd = openSync(abs, 'r');
-  try {
-    const buffer = Buffer.allocUnsafe(maxBytes);
-    const read = readSync(fd, buffer, 0, maxBytes, 0);
-    return buffer.subarray(0, read);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** 分块扫描的块大小。64KB 在系统调用次数与单次分配之间取平衡。 */
 const SCAN_CHUNK = 64 * 1024;
-
-function utf8LeadWidth(byte: number): number {
-  if ((byte & 0x80) === 0) return 1;
-  if ((byte & 0xe0) === 0xc0) return 2;
-  if ((byte & 0xf0) === 0xe0) return 3;
-  if ((byte & 0xf8) === 0xf0) return 4;
-  return 1;
-}
-
-/**
- * 切开缓冲区末尾未完成的 UTF-8 序列。
- * 块边界若落在多字节字符中间，直接 toString('utf8') 会写成 U+FFFD，下一块的续字节再解码成拉丁乱码。
- */
-export function splitCompleteUtf8(buf: Buffer): { complete: Buffer; rest: Buffer } {
-  if (buf.length === 0) return { complete: buf, rest: buf };
-  let i = buf.length;
-  while (i > 0 && (buf[i - 1]! & 0xc0) === 0x80) i -= 1;
-  if (i === 0) return { complete: buf, rest: Buffer.alloc(0) };
-  const start = i - 1;
-  const need = utf8LeadWidth(buf[start]!);
-  const have = buf.length - start;
-  if (need > have) return { complete: buf.subarray(0, start), rest: buf.subarray(start) };
-  return { complete: buf, rest: Buffer.alloc(0) };
-}
 
 /**
  * 从第 offset 行（1-based）开始读取最多 limit 行 / maxBytes 字节。

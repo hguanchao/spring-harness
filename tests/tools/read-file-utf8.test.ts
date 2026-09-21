@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { splitCompleteUtf8 } from '../../src/tools/read-file.js';
+import { splitCompleteUtf8 } from '../../src/workspace/boundary.js';
 
 describe('splitCompleteUtf8', () => {
   it('完整 ASCII 与完整汉字都整段留下', () => {

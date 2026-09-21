@@ -16,6 +16,21 @@ export interface SessionEvent {
   parentId?: string | null;
 }
 
+/**
+ * 用户以 @路径 提及的文件附件。content 保持用户消息原文（`@路径` 原样留在正文里），
+ * 投影层负责把附件拼成模型可见的 `<attached-files>` 块——存储与展示都不受污染。
+ */
+export interface FileAttachment {
+  /** 用户引用的路径（@token 内容，保持输入原样）。 */
+  path: string;
+  /** 文件内容；缺席表示读取失败，见 error。 */
+  content?: string;
+  /** 内容超过单文件上限被截断时的原始总字节数。 */
+  totalBytes?: number;
+  /** content 缺席时的失败原因（not found / outside workspace / directory / binary …）。 */
+  error?: string;
+}
+
 export interface SessionMessage {
   type: 'message';
   ts: string;
@@ -26,6 +41,8 @@ export interface SessionMessage {
   toolCalls?: ToolCall[];
   /** data URL 形式的图片附件（用户输入的 @图片 或 read_file 读到的图片）。 */
   images?: string[];
+  /** 文本形式的 @ 文件附件（FileAttachment）；只出现在 user 消息上。 */
+  attachments?: FileAttachment[];
   /** Responses 推理项，下一轮原样回传；没有 encryptedContent 的项不要存。 */
   reasoning?: Array<{ id: string; encryptedContent?: string; summary?: string }>;
   /**

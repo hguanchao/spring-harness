@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from 'node:fs';
+import { closeSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 export const READ_BYTE_LIMIT = 100 * 1024;
@@ -97,4 +97,62 @@ export function looksLikeText(path: string, sample: Buffer): boolean {
 
 export function fileSize(path: string): number {
   return statSync(path).size;
+}
+
+/** 单张图片上限。原图经 base64 后膨胀约 1/3，8MB 原图足以覆盖截图与设计稿。 */
+export const IMAGE_BYTE_LIMIT = 8 * 1024 * 1024;
+
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+
+/** 按扩展名给图片定 MIME；不在 IMAGE_EXT 里的返回 undefined。 */
+export function imageMime(path: string): string | undefined {
+  const ext = fileExt(path);
+  if (!IMAGE_EXT.has(ext)) return undefined;
+  return IMAGE_MIME[ext];
+}
+
+/**
+ * 只读文件头部最多 maxBytes 字节。
+ * 旧实现 readFileSync 整文件、再 subarray 截断，读一个 1GB 的日志就等于
+ * 分配 1GB 内存；这里用 fd 直接限定读取长度，内存占用与文件大小解耦。
+ */
+export function readHead(abs: string, maxBytes: number): Buffer {
+  const fd = openSync(abs, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const read = readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function utf8LeadWidth(byte: number): number {
+  if ((byte & 0x80) === 0) return 1;
+  if ((byte & 0xe0) === 0xc0) return 2;
+  if ((byte & 0xf0) === 0xe0) return 3;
+  if ((byte & 0xf8) === 0xf0) return 4;
+  return 1;
+}
+
+/**
+ * 切开缓冲区末尾未完成的 UTF-8 序列。
+ * 块边界若落在多字节字符中间，直接 toString('utf8') 会写成 U+FFFD，下一块的续字节再解码成拉丁乱码。
+ */
+export function splitCompleteUtf8(buf: Buffer): { complete: Buffer; rest: Buffer } {
+  if (buf.length === 0) return { complete: buf, rest: buf };
+  let i = buf.length;
+  while (i > 0 && (buf[i - 1]! & 0xc0) === 0x80) i -= 1;
+  if (i === 0) return { complete: buf, rest: Buffer.alloc(0) };
+  const start = i - 1;
+  const need = utf8LeadWidth(buf[start]!);
+  const have = buf.length - start;
+  if (need > have) return { complete: buf.subarray(0, start), rest: buf.subarray(start) };
+  return { complete: buf, rest: Buffer.alloc(0) };
 }

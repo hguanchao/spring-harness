@@ -1,3 +1,4 @@
+import { attachmentWireSuffix } from './attachments.js';
 import type { LlmClient, ChatMessage, TokenUsage } from '../llm/openai.js';
 import type { SessionMessage, SessionPort } from '../session/types.js';
 
@@ -351,7 +352,13 @@ export function pushSessionMessage(state: WireState, row: SessionMessage): void 
     return;
   }
   if (row.role === 'system') return;
-  const message: ChatMessage = { role: row.role, content: row.content };
+  const message: ChatMessage = {
+    role: row.role,
+    // @ 附件只在发给模型时展开：存储与回放里 content 始终是用户原文。
+    content: row.role === 'user' && row.attachments?.length
+      ? row.content + attachmentWireSuffix(row.attachments)
+      : row.content,
+  };
   if (row.images && row.images.length > 0 && row.role === 'user') {
     message.parts = row.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }));
   }

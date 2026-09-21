@@ -1,11 +1,31 @@
 import { spawn } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fuzzyFilter } from "./fuzzy.js";
 import { escapeRegExp } from "./utils.js";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
+
+/**
+ * 在 PATH 上找 fd（或 Debian 系的 fdfind）。找不到返回 null——调用方走内置 fs 回退，
+ * 所以没有 fd 的机器上 @ 补全照样能用，只是大仓库上慢一点。
+ */
+export function findFdBinary(): string | null {
+	for (const name of ["fd", "fdfind"]) {
+		const path = process.env.PATH ?? "";
+		const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+		for (const dir of path.split(delimiter)) {
+			if (!dir) continue;
+			for (const ext of exts) {
+				const file = join(dir, `${name}${ext}`);
+				if (existsSync(file)) return file;
+			}
+		}
+	}
+	return null;
+}
 
 function toDisplayPath(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -115,6 +135,67 @@ function buildCompletionValue(
 	const openQuote = `${prefix}"`;
 	const closeQuote = '"';
 	return `${openQuote}${path}${closeQuote}`;
+}
+
+/** 无 fd 时的内置回退：BFS 遍历 + 简单剪枝。深度与访问条数封顶，扫不穿的目录宁可漏。 */
+const FS_WALK_SKIP_DIRS = new Set([
+	"node_modules",
+	".git",
+	"dist",
+	"build",
+	"out",
+	"target",
+	"coverage",
+	"__pycache__",
+	".next",
+	".venv",
+	"venv",
+]);
+const FS_WALK_MAX_ENTRIES = 3000;
+const FS_WALK_MAX_DEPTH = 6;
+
+async function walkDirectoryWithFs(
+	baseDir: string,
+	query: string,
+	signal: AbortSignal,
+): Promise<Array<{ path: string; isDirectory: boolean }>> {
+	const lowerQuery = query.toLowerCase();
+	const results: Array<{ path: string; isDirectory: boolean }> = [];
+	const queue: Array<{ dir: string; rel: string; depth: number }> = [{ dir: baseDir, rel: "", depth: 0 }];
+	let visited = 0;
+
+	while (queue.length > 0) {
+		if (signal.aborted) return results;
+		const { dir, rel, depth } = queue.shift()!;
+		let entries;
+		try {
+			// 异步逐层读：大仓库上每个目录间让出事件循环，UI 渲染与 abort 都有机会插进来。
+			entries = await readdir(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+			for (const entry of entries) {
+				if (visited >= FS_WALK_MAX_ENTRIES) return results;
+				visited += 1;
+				const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+				if (entry.isDirectory()) {
+					if (depth + 1 > FS_WALK_MAX_DEPTH) continue;
+					if (entry.name.startsWith(".") || FS_WALK_SKIP_DIRS.has(entry.name)) continue;
+					queue.push({ dir: join(dir, entry.name), rel: childRel, depth: depth + 1 });
+					// 与 fd 的输出约定一致：目录条目带尾随 /，下游靠它去斜杠。
+					if (matchesFuzzyQuery(childRel, lowerQuery)) results.push({ path: `${childRel}/`, isDirectory: true });
+				} else if (entry.isFile()) {
+					if (matchesFuzzyQuery(childRel, lowerQuery)) results.push({ path: childRel, isDirectory: false });
+				}
+			}
+	}
+	return results;
+}
+
+/** 回退遍历的预过滤：文件名或全路径含查询即保留；精排交给与 fd 路径共用的 scoreEntry。 */
+function matchesFuzzyQuery(relPath: string, lowerQuery: string): boolean {
+	if (!lowerQuery) return true;
+	return relPath.toLowerCase().includes(lowerQuery);
 }
 
 // Use fd to walk directory tree (fast, respects .gitignore)
@@ -734,12 +815,32 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return await walkDirectoryWithFd(baseDir, this.fdPath, query, 100, signal, 1);
 	}
 
-	// Fuzzy file search using fd (fast, respects .gitignore)
+	/** fd 双路候选：当前目录一层优先，再叠全递归，去重合并。 */
+	private async fuzzyEntriesWithFd(
+		baseDir: string,
+		query: string,
+		fdPath: string,
+		signal: AbortSignal,
+	): Promise<Array<{ path: string; isDirectory: boolean }>> {
+		const baseDirEntries = await this.getBaseDirSuggestions(baseDir, query, signal);
+		const recursiveEntries = await walkDirectoryWithFd(baseDir, fdPath, query, 100, signal);
+		const seenPaths = new Set(baseDirEntries.map((entry) => entry.path));
+		return [
+			...baseDirEntries,
+			...recursiveEntries.filter((entry) => {
+				if (seenPaths.has(entry.path)) return false;
+				seenPaths.add(entry.path);
+				return true;
+			}),
+		];
+	}
+
+	// Fuzzy file search: fd when available, built-in fs walk otherwise (fast, respects .gitignore / prunes deps)
 	private async getFuzzyFileSuggestions(
 		query: string,
 		options: { isQuotedPrefix: boolean; signal: AbortSignal },
 	): Promise<AutocompleteItem[]> {
-		if (!this.fdPath || options.signal.aborted) {
+		if (options.signal.aborted) {
 			return [];
 		}
 
@@ -747,18 +848,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const scopedQuery = this.resolveScopedFuzzyQuery(query);
 			const fdBaseDir = scopedQuery?.baseDir ?? this.basePath;
 			const fdQuery = scopedQuery?.query ?? query;
-			const baseDirEntries = await this.getBaseDirSuggestions(fdBaseDir, fdQuery, options.signal);
-			const recursiveEntries = await walkDirectoryWithFd(fdBaseDir, this.fdPath, fdQuery, 100, options.signal);
-			const seenPaths = new Set(baseDirEntries.map((entry) => entry.path));
-			const entries = [
-				...baseDirEntries,
-				...recursiveEntries.filter((entry) => {
-					if (seenPaths.has(entry.path)) return false;
-					seenPaths.add(entry.path);
-					return true;
-				}),
-			];
-			if (options.signal.aborted) {
+			// 没有 fd 时回退内置遍历：候选集略小（不做 .gitignore 过滤，靠剪枝表），功能不缺席。
+			const entries = this.fdPath
+				? await this.fuzzyEntriesWithFd(fdBaseDir, fdQuery, this.fdPath, options.signal)
+				: await walkDirectoryWithFs(fdBaseDir, fdQuery, options.signal);
+			if (options.signal.aborted || entries.length === 0) {
 				return [];
 			}
 

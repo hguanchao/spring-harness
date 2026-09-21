@@ -24,6 +24,7 @@
 
 import { basename, join } from 'node:path';
 import type { AgentListener } from '../agent/events.js';
+import { collectFileMentions } from '../agent/attachments.js';
 import { loadCompaction, projectContext } from '../agent/compact.js';
 import { loadUserTheme } from './theme/theme.js';
 import { sphModelsPath, sphThemePath } from '../home.js';
@@ -63,6 +64,7 @@ import {
   BLOCK_GAP,
   CombinedAutocompleteProvider,
   Container,
+  findFdBinary,
   isKeyRelease,
   isViewportTUI,
   type SelectItem,
@@ -392,7 +394,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       name: command.id,
       description: command.hint,
     }));
-    this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider(slashCommands, this.deps.workspaceRoot));
+    this.editor.setAutocompleteProvider(
+      new CombinedAutocompleteProvider(slashCommands, this.deps.workspaceRoot, findFdBinary()),
+    );
     this.editor.onSubmit = (text) => {
       void this.handleSubmit(text);
     };
@@ -615,6 +619,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       this.titlePrompt = prompt;
       this.titleDraft = '';
     }
+    // @ 提及在提交侧展开：上屏与标题都用原文；附件随轮次选项进 loop——存储保持原文，
+    // 投影层发给模型时才把文件内容拼进去。
+    const mentions = collectFileMentions(prompt, this.deps.workspaceRoot);
     this.inFlightPrompt = rewindable ? prompt : undefined;
     this.pendingRewind = undefined;
     // 发出去之后输入框失焦：否则边框一直是聚焦色，像还在打字。
@@ -656,6 +663,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         reviewPlan: (plan, title) => this.reviewPlan(plan, title),
         compactClient: this.compactClient,
         onAuxUsage: (usage, purpose) => this.recordAuxUsage(usage, purpose),
+        ...(mentions.attachments.length > 0 ? { attachments: mentions.attachments } : {}),
+        ...(mentions.images.length > 0 ? { userImages: mentions.images } : {}),
         ...(this.deps.spillRoot === undefined
           ? {}
           : { spill: new SpillStore(join(this.deps.spillRoot, this.session.id), this.deps.spillThreshold) }),

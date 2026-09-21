@@ -312,3 +312,35 @@ describe('assistant thinking 回放载荷透传', () => {
     assert.equal(message.thinkingSignature, 'sig-2');
   });
 });
+
+describe('user 附件投影', () => {
+  it('@ 附件拼进发给模型的文本，正文保持用户原文', () => {
+    const state = emptyWire();
+    pushSessionMessage(state, session({
+      role: 'user',
+      content: '看下这个',
+      attachments: [{ path: 'a.ts', content: 'X' }, { path: 'b.ts', error: 'file not found' }],
+    }));
+    assert.equal(
+      state.messages[0]!.content,
+      '看下这个\n\n<attached-files>\n<file path="a.ts">\nX\n</file>\n<file path="b.ts" error="file not found" />\n</attached-files>',
+    );
+  });
+
+  it('无附件的 user 行内容原样', () => {
+    const state = emptyWire();
+    pushSessionMessage(state, session({ role: 'user', content: 'plain' }));
+    assert.equal(state.messages[0]!.content, 'plain');
+  });
+
+  it('增量投影与全量重建一致（附件行）', () => {
+    const rows = [
+      session({ role: 'user', content: 'hi', attachments: [{ path: 'a.ts', content: 'X' }] }),
+      session({ role: 'assistant', content: 'ok' }),
+    ];
+    const full = toChatMessages(rows);
+    const state = emptyWire();
+    for (const row of rows) pushSessionMessage(state, row);
+    assert.deepEqual(state.messages, full);
+  });
+});

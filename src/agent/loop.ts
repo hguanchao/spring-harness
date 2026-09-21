@@ -29,7 +29,7 @@ import { jsonlSessionFactory } from '../session/store.js';
 import { foldSessionState, sessionEventData, type SessionFailure } from '../session/fold.js';
 import { lastAssistantMessage } from '../session/query.js';
 import { closeInterruptedTurn } from '../session/repair.js';
-import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../session/types.js';
+import type { FileAttachment, SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../session/types.js';
 import { scanSkills } from '../skills/scan.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { FileObservation } from '../tools/observe.js';
@@ -88,6 +88,8 @@ export interface RunTurnOptions {
   allowedTools?: ReadonlySet<string>;
   /** 用户随本条 prompt 提交的图片（data URL）。 */
   userImages?: string[];
+  /** 用户以 @路径 提及的文件附件；存储随 user 消息落盘，发给模型时由投影层展开。 */
+  attachments?: FileAttachment[];
   memory?: TouchMemory;
   /** 跨轮次任务目标（来自会话折叠）；注入系统提示词。 */
   goal?: string;
@@ -259,6 +261,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     role: 'user',
     content: options.prompt,
     images: options.userImages,
+    attachments: options.attachments,
   };
   mirror.push(pendingUser);
   // 跨轮次状态（goal / 最近失败 / 计划模式）以尾部 user 消息注入，紧跟本轮 prompt——
@@ -279,6 +282,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       role: 'user',
       content: options.prompt,
       images: options.userImages,
+      attachments: options.attachments,
     });
     options.session.appendMessage({ role: 'user', content: stateRow.content });
     options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
