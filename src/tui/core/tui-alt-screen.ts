@@ -1,6 +1,6 @@
 import { AltScreenFlashContainer } from "../components/alt-screen-flash.js";
 import { ScrollView } from "../components/scroll-view.js";
-import { compositeRowSelection, selectRow } from "../components/selectable-row.js";
+import { compositeRowSelection, isSelectableRow, selectRow } from "../components/selectable-row.js";
 import { compositeStickyUserMessages, stickyOverlayRects } from "../components/sticky-user-message.js";
 import { getKeybindings } from "./keybindings.js";
 import { isKeyRelease } from "./keys.js";
@@ -686,8 +686,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		if (this.handleRightClickCopy(raw)) return;
-		if (type === "press" && this.decodeMouseButton(raw.button) === "left" && selectRow(undefined)) {
-			this.requestRender();
+		if (type === "press" && this.decodeMouseButton(raw.button) === "left") {
+			// 未被组件接管的按压（工具/思考行的正文按划词语义放行）先做命中测试：
+			// 落点落在某个可选中行的 region 里，就选中/保留那一行——否则点正文
+			// 会把刚钉上的选中条 ❙ 误清掉；真点在空白处时 selectable 为 undefined，
+			// selectRow(undefined) 维持「点空白取消选中」的原语义。
+			const boxes = this.currentLayout ? getLayoutBoxesAt(this.currentLayout, raw.x, raw.y) : [];
+			const selectable = boxes.map((box) => box.component).find(isSelectableRow);
+			if (selectRow(selectable)) this.requestRender();
 		}
 		this.handleSelectionMouseEvent(raw);
 	}
