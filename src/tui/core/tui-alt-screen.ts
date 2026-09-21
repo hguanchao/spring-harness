@@ -202,6 +202,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly flashes: AltScreenFlashContainer;
 	private altScreenActive = false;
 	private selectionAnchor?: SelectionPoint;
+	/** 按下时的原始格（未做词吸附）：松开判定 isClick 用它，而不是被 range 起点顶掉的 anchor。 */
+	private selectionPressCell?: { scrollView?: ScrollView; row: number; col: number };
 	private selectionFocus?: SelectionPoint;
 	private selectionGranularity: SelectionGranularity = "character";
 	private selectionInitialRange?: SelectionRange;
@@ -600,6 +602,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	/** 清空拖选锚点/焦点（不动拖选手势与自动滚动状态）。 */
 	private clearSelectionState(): void {
 		this.selectionAnchor = undefined;
+		this.selectionPressCell = undefined;
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
 		this.selectionInitialRange = undefined;
@@ -629,7 +632,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		if (this.mouseCapture || this.mousePressTarget) {
 			const target = this.mouseCapture ?? this.mousePressTarget!;
-			if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
+			// ±1 格内的手抖不算移动：按得准松得偏一格是双击的常态，太严会把 click 吞掉，
+			// 工具行的双击展开/收起就会时好时坏。
+			if (
+				this.mousePressPoint
+				&& (Math.abs(raw.x - this.mousePressPoint.x) > 1 || Math.abs(raw.y - this.mousePressPoint.y) > 1)
+			) {
 				this.mousePressMoved = true;
 				this.lastComponentClick = undefined;
 			}
@@ -637,7 +645,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const targetResult = this.dispatchMouseToTarget(event, target);
 			if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
 			if (raw.release) {
-				if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
+				if (!this.mousePressMoved && this.mousePressPoint) {
 					const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
 						clickCount: this.getComponentClickCount(target, raw.x, raw.y),
 					});
@@ -1073,11 +1081,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.stopSelectionAutoScroll();
 			if (!this.selectionAnchor) return;
 			this.updateSelectionFocus(point);
+			// 与按下时的原始格比（±1 格容差），而不是被词吸附过的 anchor——
+			// 否则双击落点在词中间时 anchor 停在词首，永远判成拖选，click 不合成。
+			const pressCell = this.selectionPressCell;
 			const isClick =
 				!this.selectionDragged &&
-				this.selectionAnchor.scrollView === point.scrollView &&
-				this.selectionAnchor.row === point.row &&
-				this.selectionAnchor.col === point.col;
+				pressCell !== undefined &&
+				pressCell.scrollView === point.scrollView &&
+				Math.abs(pressCell.row - point.row) <= 1 &&
+				Math.abs(pressCell.col - point.col) <= 1;
 			const clickedUrl = isClick ? this.pressedUrl : undefined;
 			this.pressedUrl = undefined;
 			if (clickedUrl && this.openUrl) {
@@ -1109,6 +1121,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		if ((event.button & 32) !== 0) {
 			if (!this.selectionPressActive || !this.selectionAnchor) return;
+			// ±1 格内的手抖不算拖选：原样等松开合成 click，双击的第二击才不会掉链子。
+			const pressCell = this.selectionPressCell;
+			if (
+				pressCell !== undefined
+				&& pressCell.scrollView === point.scrollView
+				&& Math.abs(pressCell.row - point.row) <= 1
+				&& Math.abs(pressCell.col - point.col) <= 1
+			) {
+				return;
+			}
 			this.selectionDragged = true;
 			this.lastClick = undefined;
 			this.pressedUrl = undefined;
@@ -1130,6 +1152,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
 		this.selectionInitialRange = range;
 		this.selectionAnchor = range?.start ?? anchor;
+		// 记下按下的原始格：词吸附会把 anchor 顶到词首，松开时若仍拿 anchor 比，
+		// 点在词中间的双击会被误判成拖选，click 不合成——工具行双击收起时好时坏的根源。
+		this.selectionPressCell = { scrollView: anchor.scrollView, row: anchor.row, col: anchor.col };
 		this.selectionFocus = range?.end ?? anchor;
 		this.selectionDragged = false;
 		this.pressedUrl = range
