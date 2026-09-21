@@ -5,7 +5,7 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。
  *
- * 前缀按状态：完成与进行中 `›`、失败 `×`，同色（品牌紫）；进行中的标题带 shimmer，靠动效区分。
+ * 前缀按状态：折叠 `›`、展开 `⌄`、失败 `×`，箭头与行文同色（muted）；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  */
 
@@ -19,15 +19,17 @@ import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
-/** 组 / 成员 / 思考 共用的状态前缀：`›` 小箭头；失败仍用 `×`，进行中靠标题 shimmer 呈现。 */
+/** 组 / 成员 / 思考 共用的状态前缀：`›` 折叠 / `⌄` 展开，随行文同色；失败仍用 `×`。 */
 export const TOOL_MARK = {
   running: '›',
   done: '›',
+  expanded: '⌄',
   fail: '×',
 } as const;
 
-export function toolMark(status: ToolStatus): string {
+export function toolMark(status: ToolStatus, expanded = false): string {
   if (status === 'error') return TOOL_MARK.fail;
+  if (expanded) return TOOL_MARK.expanded;
   if (status === 'pending' || status === 'running') return TOOL_MARK.running;
   return TOOL_MARK.done;
 }
@@ -362,15 +364,11 @@ export class ToolExecutionComponent extends Container {
   }
 
   /**
-   * 前缀颜色：失败红，其余（进行中 / 完成）都是品牌紫。
+   * 前缀颜色跟随行文：非失败行都是 muted，与标题文字同色；箭头只表达「可展开/已展开」。
    *
    * 进行与完成同字形同色（`›`），靠标题 shimmer 区分——同一批工具行在跑完之后
    * 只应该「静下来」，而不是整行换色，否则一轮收尾会有半屏颜色跳变。
    */
-  private glyphColor(status: ToolStatus): ThemeColor {
-    return status === 'error' ? 'error' : 'primary';
-  }
-
   /** List 折叠行带 `(N entries)`，与 grok-build 的 List 标题同形。 */
   private listEntrySuffix(): string {
     if (this.toolName !== 'list_dir' || !this.result || this.result.isError) return '';
@@ -398,11 +396,13 @@ export class ToolExecutionComponent extends Container {
         ? theme.fg('error', ` · ${this.activity.text}`)
         : theme.fg('muted', ` · ${this.activity.text}`)
       : '';
-    const mark = toolMark(status);
+    const mark = toolMark(status, this.expanded || this.fullDetail);
     const titleColor: ThemeColor = status === 'error' ? 'error' : 'muted';
     const live = status === 'pending' || status === 'running';
     const painted = live ? theme.shimmer(title, Date.now()) : theme.fg(titleColor, title);
-    this.titleLine = `${theme.fg(this.glyphColor(status), mark)} ${painted}`;
+    // 箭头与行文同色（muted），不再表达状态——状态语义在文字动效与颜色里。
+    const markColor: ThemeColor = status === 'error' ? 'error' : titleColor;
+    this.titleLine = `${theme.fg(markColor, mark)} ${painted}`;
     this.countsLine = this.counts ? theme.fg('muted', ` · ${this.counts.text}`) : '';
     this.activityLine = activitySuffix;
     this.hintLine = '';

@@ -399,13 +399,14 @@ export class ToolGroupComponent extends VStack {
   }
 
   /**
-   * 汇总行：字形颜色与成员行同一套——有失败→错误色，否则品牌紫（进行中 / 完成同形同色，
-   * 进行中靠 shimmer 区分）。汇总行和它下面的成员行是同一个视觉块，
+   * 汇总行：字形颜色与行文同一套——有失败→错误色，否则随文字 toolTitle 灰。
+   * 箭头表达组开合（`›`/`⌄`）。汇总行和它下面的成员行是同一个视觉块，
    * 两边配色不一致会让「跑完」看起来像换了半屏颜色。
    */
   private updateHeader(summary: GroupSummary, width: number): void {
-    const mark = summary.failed > 0 ? TOOL_MARK.fail : summary.running ? TOOL_MARK.running : TOOL_MARK.done;
-    const glyphColor: ThemeColor = summary.failed > 0 ? 'error' : 'primary';
+    // 箭头只表达「可展开/已展开」，颜色跟汇总行文字（toolTitle）走；失败仍整行用 error 后缀示警。
+    const mark = summary.failed > 0 ? TOOL_MARK.fail : this.expanded ? TOOL_MARK.expanded : TOOL_MARK.done;
+    const glyphColor: ThemeColor = summary.failed > 0 ? 'error' : 'toolTitle';
     // 超宽时截断而不是折行：汇总行是「一行读一段」，折出来的续行没有字形前缀，读起来像另一条。
     // 失败后缀优先保留——它比多列一个 kind 重要。预算扣掉汇总行左缩进与前缀两列。
     const suffix = summary.failed > 0 ? ` · ${summary.failed} failed` : '';
@@ -419,15 +420,14 @@ export class ToolGroupComponent extends VStack {
 
   /** 重算一段思考的行文案；正文只在它自己展开时挂上。 */
   private updateThinking(member: ThinkingMember): void {
-    const caret = member.running ? TOOL_MARK.running : TOOL_MARK.done;
+    // 箭头只表达展开态；颜色跟标签文字，与成员行/汇总行同一套「灰箭头灰字」。
+    const caret = member.expanded ? TOOL_MARK.expanded : TOOL_MARK.done;
     // 收尾文案：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。空链不占行。
     const label = member.running
       ? 'Thinking…'
       : member.durationMs === undefined
         ? 'Thought'
         : `Thought for ${formatDuration(member.durationMs)}`;
-    // 箭头跟全组一套语言：永远品牌紫（error 红）——
-    // 成员行与汇总行都是「紫箭头灰字」，思考行连箭头一起转灰就断了这条惯例。
     // 标签文字才是状态色：执行中紫、完成后灰。
     const labelColor: ThemeColor = member.running ? 'primary' : 'toolTitle';
     // 组里有汇总行时，思考永远是成员：缩进一级，避免和汇总行并排读成两件并列的事。
@@ -435,7 +435,7 @@ export class ToolGroupComponent extends VStack {
     const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
     const painted = member.running ? theme.shimmer(label, Date.now()) : theme.fg(labelColor, label);
     member.row.setText(
-      `${' '.repeat(rowIndent)}${theme.fg('primary', caret)} ${painted}`,
+      `${' '.repeat(rowIndent)}${theme.fg(labelColor, caret)} ${painted}`,
     );
 
     member.body.clear();
