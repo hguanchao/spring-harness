@@ -44,7 +44,7 @@ function wheel(delta: number, y = 0): TuiMouseEvent {
 /** 选中行在渲染结果里带 selectedMark 前缀，据此反查当前选中项。 */
 function selectedValue(list: SelectList, width = 40): string | undefined {
 	for (const line of list.render(width)) {
-		if (line.startsWith('◉ ')) return line.slice(2).trim().split(/\s{2,}/)[0];
+		if (line.startsWith('❙ ')) return line.slice(2).trim().split(/\s{2,}/)[0];
 	}
 	return undefined;
 }

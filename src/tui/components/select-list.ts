@@ -19,7 +19,7 @@ export interface SelectListTheme {
 	description: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
-	/** 选中行左侧标记（`◉` 圆芯点），位置与工具行选中条对齐，但字形区分开。 */
+	/** 选中行左侧标记（`❙` 加重竖条），位置与工具行选中条对齐，但字形更粗更圆润。 */
 	selectedMark: (mark: string) => string;
 	/** 选中行主文案（纯文本，不含标记）。 */
 	selectedRow: (text: string) => string;
@@ -216,7 +216,7 @@ export class SelectList implements Component {
 		descriptionSingleLine: string | undefined,
 		primaryColumnWidth: number,
 	): string {
-		const prefix = isSelected ? `${this.theme.selectedMark('◉')} ` : '  ';
+		const prefix = isSelected ? `${this.theme.selectedMark('❙')} ` : '  ';
 		const prefixWidth = 2;
 
 		if (descriptionSingleLine && width > 40) {
