@@ -177,6 +177,7 @@ describe('跨轮次状态注入', () => {
       'fix the flaky test',
       { tool: 'bash', excerpt: 'exit 1' },
       true,
+      { promptSection: () => 'Do not implement. call exit_plan_mode with the full plan.', isBlocked: () => true, blockedReason: () => '', hasPlanHeading: () => true, planHeading: () => undefined, planFilePath: () => '' },
     );
     assert.ok(text.includes('Goal: fix the flaky test'));
     assert.ok(text.includes('bash: exit 1'));

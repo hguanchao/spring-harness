@@ -6,8 +6,14 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { hasPlanHeading, planFilePath, planHeading } from '../agent/plan.js';
-import { asString, type ToolContext, type ToolResult, type ToolSpec } from './types.js';
+import { hasPlanHeading, planFilePath, planHeading } from './plan-core.js';
+import type { PluginApi } from '../types.js';
+import { asString, type ToolContext, type ToolResult, type ToolSpec } from '../../tools/types.js';
+
+export function registerPlanTools(api: PluginApi): void {
+  api.registerTool(enterPlanModeTool);
+  api.registerTool(exitPlanModeTool);
+}
 
 export const enterPlanModeTool: ToolSpec = {
   name: 'enter_plan_mode',

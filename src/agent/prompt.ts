@@ -3,7 +3,7 @@ import type { SkillEntry } from '../skills/scan.js';
 import type { SandboxMode } from '../sandbox/types.js';
 import type { McpTool } from '../plugins/services.js';
 import { loadMemory, memoryToPrompt } from './memory.js';
-import { planModeSection } from './plan.js';
+import type { PlanModeSeam } from '../plugins/services.js';
 
 /**
  * 系统提示词装配。
@@ -283,11 +283,12 @@ export function sessionStateMessage(
   goal: string | undefined,
   lastFailure: { tool: string; excerpt: string } | undefined,
   planModeActive: boolean,
+  planSeam?: PlanModeSeam,
 ): string {
   return [
     `${SESSION_STATE_PREFIX}the latest of these messages is authoritative; earlier ones are snapshots]`,
     `Goal: ${goal ?? '(none)'}  (persisted across turns until the user clears it)`,
     `Most recent tool failure: ${lastFailure ? `${lastFailure.tool}: ${lastFailure.excerpt}` : '(none)'}`,
-    ...(planModeActive ? ['Plan mode is ON.', planModeSection()] : ['Plan mode: off.']),
+    ...(planModeActive && planSeam ? ['Plan mode is ON.', planSeam.promptSection()] : ['Plan mode: off.']),
   ].join('\n');
 }

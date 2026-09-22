@@ -6,6 +6,8 @@ import { describe, it } from 'node:test';
 import { runTurn } from '../../src/agent/loop.js';
 import { JsonlSession } from '../../src/session/store.js';
 import { defaultTools } from '../../src/tools/index.js';
+import { PluginHost } from '../../src/plugins/host.js';
+import { discoverPlugins } from '../../src/plugins/loader.js';
 import type { AgentEvent } from '../../src/agent/events.js';
 import type { ChatMessage, LlmClient, StreamDelta, TokenUsage } from '../../src/llm/openai.js';
 import type { SandboxHandle } from '../../src/sandbox/types.js';
@@ -349,17 +351,31 @@ describe('系统提示词一轮内冻结', () => {
     const { session, root, cleanup } = makeSession();
     const seen: string[] = [];
     try {
-      await runTurn({
-        prompt: 'design something',
+      // enter_plan_mode 工具现在是 plan 插件的：跑这个测试必须把插件装进来，
+      // 否则工具表里没有 enter_plan_mode，轮内「进入计划模式」根本不会发生。
+      const pluginHost = new PluginHost({
+        coreTools: defaultTools.list(),
         workspaceRoot: root,
-        client: planToggleClient(seen),
-        session,
-        tools: defaultTools,
-        sandbox,
-        approver,
-        contextWindow: 100_000,
-        planMode: { active: false },
+        configPath: join(root, 'config.toml'),
       });
+      const discovered = discoverPlugins({ workspaceRoot: root, userRoot: join(root, 'no-user') });
+      await pluginHost.load(discovered.candidates, discovered.shadowed);
+      try {
+        await runTurn({
+          prompt: 'design something',
+          workspaceRoot: root,
+          client: planToggleClient(seen),
+          session,
+          tools: pluginHost.tools(),
+          services: pluginHost,
+          sandbox,
+          approver,
+          contextWindow: 100_000,
+          planMode: { active: false },
+        });
+      } finally {
+        pluginHost.dispose();
+      }
       assert.equal(seen.length, 2);
       assert.equal(seen[0], seen[1], 'message 0 在轮内改写会把缓存前缀整个作废');
       assert.match(seen[0] ?? '', /plan mode/i, '轮开始时的计划模式状态应已反映');

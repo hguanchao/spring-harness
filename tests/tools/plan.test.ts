@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { planFilePath } from '../../src/agent/plan.js';
-import { enterPlanModeTool, exitPlanModeTool } from '../../src/tools/plan.js';
+import { planFilePath } from '../../src/plugins/plan/plan-core.js';
+import { enterPlanModeTool, exitPlanModeTool } from '../../src/plugins/plan/tool.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 

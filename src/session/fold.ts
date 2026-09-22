@@ -10,7 +10,7 @@
  * 第三方写入的无关事件都可能出现，任何一种都不该让恢复失败。
  */
 
-import type { TodoItem } from '../runtime/todos.js';
+import type { TodoItem } from '../plugins/services.js';
 import { isRecord } from '../util.js';
 import type { SessionRecord } from './types.js';
 
@@ -194,7 +194,9 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
 
 /** 折叠结果 → 事件数据。写事件与读事件共用同一套形状，避免两边漂移。 */
 export const sessionEventData = {
-  todo: (items: readonly TodoItem[]): Record<string, unknown> => ({ items: items.map((item) => ({ ...item })) }),
+  // todo 事件的**写入**由插件提供（todoEventData），这里只保留读取。
+  // 写入方变了而读取方不变，事件的 JSON 形状仍由 fold 的 case 'todo' 定义——
+  // 插件负责产出这个形状，核心负责把它读回 TodoItem[]。
   modelSelection: (input: { model: string; contextWindow?: number; maxTokens?: number }): Record<string, unknown> => ({
     model: input.model,
     contextWindow: input.contextWindow,

@@ -1,7 +1,7 @@
 import type { FileObservation } from './observe.js';
 import type { PluginServices } from '../plugins/types.js';
 import type { JobBoard } from '../runtime/jobs.js';
-import type { TodoList } from '../runtime/todos.js';
+import type { TodoService } from '../plugins/services.js';
 import { assertWriteAllowed } from '../sandbox/policy.js';
 import type { SandboxMode } from '../sandbox/types.js';
 import type { SkillEntry } from '../skills/scan.js';
@@ -21,7 +21,8 @@ export interface ToolContext {
   /** spill 落盘根目录；read_file 只允许在工作区之外额外读这个目录。 */
   spillRoot?: string;
   skills: SkillEntry[];
-  todos: TodoList;
+  /** todo 服务；todo 插件被禁用时不可用。核心工具只有 todo 工具用它。 */
+  todos: TodoService;
   jobs: JobBoard;
   /**
    * 插件提供的服务表。核心工具用不到它；插件工具靠它取兄弟插件的服务

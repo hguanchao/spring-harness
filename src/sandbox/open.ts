@@ -10,6 +10,7 @@ import {
   type SandboxStatus,
   type SpawnResult,
 } from './types.js';
+import type { SandboxBackendFactory } from '../plugins/services.js';
 
 export type { ConfinedSpawn, SandboxHandle, SpawnResult } from './types.js';
 
@@ -29,27 +30,29 @@ class OffSandbox implements SandboxHandle {
   dispose(): void {}
 }
 
-/** confine 档位 fail-closed：Windows ACL 或 Linux bwrap；macOS 直接拒绝。 */
-export async function openSandbox(mode: SandboxMode, workspaceRoot: string): Promise<SandboxHandle> {
+/**
+ * 打开沙箱。
+ *
+ * `off` 档位核心自理（无约束）。confine 档位（workspace / read-only）**必须由插件提供
+ * 后端**：核心只负责 fail-closed——插件缺席时拒绝启动，而不是放开约束。
+ *
+ * 后端是机制（Windows restricted-token / Linux bwrap 都是「怎么关」），策略是「关到什么
+ * 程度」（read-only 下拒绝 write/edit，见 policy.ts）。机制插件化，策略留在核心。
+ */
+export async function openSandbox(
+  mode: SandboxMode,
+  workspaceRoot: string,
+  backendFactory?: SandboxBackendFactory,
+): Promise<SandboxHandle> {
   const tempDir = mkdtempSync(join(tmpdir(), 'sph-'));
   mkdirSync(sphHome(), { recursive: true });
   if (mode === 'off') return new OffSandbox(tempDir);
-  if (process.platform === 'win32') {
-    const { WindowsAclSandbox } = await import('./windows/backend.js');
-    const backend = new WindowsAclSandbox({
-      mode,
-      workspaceRoot,
-      sphHomeDir: sphHome(),
-      tempDir,
-    });
-    await backend.init();
-    return backend;
+  if (!backendFactory) {
+    throw new SandboxError(
+      `sandbox ${mode} needs the sph-sandbox plugin; it is not loaded — add it back or pass --sandbox off`,
+    );
   }
-  if (process.platform === 'linux') {
-    const { LinuxBwrapSandbox } = await import('./linux.js');
-    const backend = new LinuxBwrapSandbox(mode, workspaceRoot, sphHome(), tempDir);
-    await backend.init();
-    return backend;
-  }
-  throw new SandboxError(`sandbox ${mode} is not supported on ${process.platform}; pass --sandbox off`);
+  const backend = await backendFactory(mode, workspaceRoot);
+  // 后端必须接受核心给的 tempDir（清理路径由核心统一收口）。
+  return backend;
 }

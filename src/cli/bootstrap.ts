@@ -19,13 +19,16 @@ import { createSseClient } from '../llm/stream-client.js';
 import { PluginHost } from '../plugins/host.js';
 import { discoverPlugins, userPluginsRoot } from '../plugins/loader.js';
 import {
+  EMPTY_TODO,
   MCP_SERVICE,
+  SANDBOX_SERVICE,
+  type SandboxBackendFactory,
   type McpPreferences,
   type McpReloadResult,
   type McpService,
 } from '../plugins/services.js';
 import { JobBoard } from '../runtime/jobs.js';
-import { TodoList } from '../runtime/todos.js';
+import { TODO_SERVICE, type TodoService } from '../plugins/services.js';
 import { WorktreeStore } from '../runtime/worktrees.js';
 import { openSandbox } from '../sandbox/open.js';
 import { SandboxError, type SandboxHandle, type SandboxMode } from '../sandbox/types.js';
@@ -158,7 +161,8 @@ export interface Runtime {
   refreshMcpPreferences(): void;
   /** 生效中的 MCP 启停偏好（写回后由 refreshMcpPreferences 更新）。 */
   readonly mcpPreferences: McpPreferences;
-  todos: TodoList;
+  /** todo 服务（todo 插件提供；缺席即不可用）。 */
+  todos: TodoService;
   jobs: JobBoard;
   /** 子代理 worktree 隔离的工作树仓库；cleanup 负责清退。 */
   worktrees: WorktreeStore;
@@ -255,9 +259,13 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   const sessionDir = sessionDirFor(options.workspaceRoot);
   mkdirSync(sessionDir, { recursive: true });
 
+  // 沙箱在**插件装载之后**打开：confine 档位的后端由 sph-sandbox 插件提供
+  // （Windows ACL / Linux bwrap 是机制，可插件化；策略与 fail-closed 留在核心）。
+  // 插件缺席 → 后端不存在 → 核心拒绝启动，而不是放开——安全约束不能有「缺席」状态。
+  const sandboxFactory = plugins.get<SandboxBackendFactory>(SANDBOX_SERVICE);
   let sandbox: SandboxHandle;
   try {
-    sandbox = await openSandbox(config.sandbox, options.workspaceRoot);
+    sandbox = await openSandbox(config.sandbox, options.workspaceRoot, sandboxFactory);
   } catch (error) {
     if (error instanceof SandboxError) throw new CliError(error.message, 1);
     throw error;
@@ -303,7 +311,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     process.stderr.write(`warning: plugin ${name} shadows the bundled one
 `);
   }
-  await plugins.load(discovered.candidates);
+  await plugins.load(discovered.candidates, discovered.shadowed);
   const pluginWarnings = plugins.warnings();
   for (const warning of pluginWarnings) process.stderr.write(`warning: ${warning}\n`);
 
@@ -328,7 +336,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   };
   await reloadMcp();
 
-  const todos = new TodoList();
+  const todos = plugins.get<TodoService>(TODO_SERVICE) ?? EMPTY_TODO;
   const jobs = new JobBoard();
   const worktrees = new WorktreeStore();
 

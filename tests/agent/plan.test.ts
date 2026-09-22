@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hasPlanHeading, planBlockedReason, planFilePath, planHeading, planModeSection } from '../../src/agent/plan.js';
+import { hasPlanHeading, planBlockedReason, planFilePath, planHeading, planModeSection } from '../../src/plugins/plan/plan-core.js';
 
 describe('plan heading', () => {
   it('requires an h1 at the start of the trimmed plan', () => {

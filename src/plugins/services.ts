@@ -159,3 +159,105 @@ export interface McpService {
 
 /** 该服务的注册名。插件与宿主都引这里，避免两处各写一个字符串。 */
 export const MCP_SERVICE = 'sph-mcp';
+
+// ---------------------------------------------------------------------------
+// todo 接缝
+//
+// 核心只保留类型，不引用 todo 插件的实现。折叠、TUI、runTurn 需要的是「清单长什么样、
+// 事件长什么样」，不是「清单怎么被模型修改」。
+
+/** 一条待办。 */
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+/** `todo` 会话事件的数据形状：整表快照（last-wins）。 */
+export interface TodoEventData {
+  items: TodoItem[];
+}
+
+/** `todo` 服务：会话内清单的读写。实现由 todo 插件提供。 */
+export interface TodoService {
+  replace(items: TodoItem[]): TodoItem[];
+  list(): TodoItem[];
+}
+
+/** `todo` 服务的注册名。插件与核心都引这里，避免两处各写一个字符串。 */
+export const TODO_SERVICE = 'todo';
+
+/** todo 服务缺席时的默认值：空清单、可安全调用。 */
+export const EMPTY_TODO: TodoService = {
+  replace: (items) => items.map((item) => ({ ...item })),
+  list: () => [],
+};
+
+/**
+ * `todo` 事件的序列化：整表快照。
+ *
+ * 放在接缝而不是 todo 插件里，是因为**写入方是核心**（loop 检测到清单变化后
+ * appendEvent），而核心不能 import 插件实现。纯数据形状函数不携带任何插件逻辑。
+ */
+export function todoEventData(items: readonly TodoItem[]): TodoEventData {
+  return { items: items.map((item) => ({ ...item })) };
+}
+
+// ---------------------------------------------------------------------------
+// plan mode 接缝
+//
+// plan mode 是「策略」而非「数据」：它拦截副作用工具、注入引导正文、走用户审批。
+// 核心保留 loop 的**执行点**（拒绝调用发生在 runTurn 里），但「拦哪些工具、引导词
+// 是什么、计划长什么样」都由 plan 插件声明——否则核心又要按名字猜插件工具。
+//
+// 分界线的检验：`[plugins] disabled = ["plan"]` 时，核心不引用 plan 插件的实现，
+// 但 loop 的拦截点仍在（它面对的是**空拦截表**——没有工具被拦，plan mode 也就
+// 无法被进入，因为 enter_plan_mode 工具本身不在工具表里）。
+
+/** 一个工具在 plan mode 下是否应被拦截。按能力声明，不按名字猜。 */
+export type PlanBlockedPredicate = (toolName: string, args: Record<string, unknown>) => boolean;
+
+/** plan mode 的宿主能力面：核心把执行点交给插件声明，插件把行为交给核心执行。 */
+export interface PlanModeSeam {
+  /** 是否拦截这个工具调用。explore 子代理等豁免在此判定。 */
+  isBlocked(toolName: string, args: Record<string, unknown>): boolean;
+  /** 拦截理由；isBlocked 为 true 时必有。 */
+  blockedReason(toolName: string): string;
+  /** 引导正文（随跨轮次状态注入为尾部 user 消息）。 */
+  promptSection(): string;
+  /** 计划正文必须能以一级标题开头（评审需要名字）。 */
+  hasPlanHeading(plan: string): boolean;
+  /** 取计划第一行标题，作评审弹窗标题。 */
+  planHeading(plan: string): string | undefined;
+  /** 计划落盘路径（`<sessionDir>/<sessionId>.plan.md`）。 */
+  planFilePath(sessionDir: string, sessionId: string): string;
+}
+
+/** plan mode 服务的注册名。核心与插件都引这里。 */
+export const PLAN_MODE_SERVICE = 'plan';
+
+// ---------------------------------------------------------------------------
+// sandbox 后端接缝
+//
+// 沙箱是四个能力里唯一**不能把策略交给插件**的：`assertWriteAllowed`（read-only 下拒绝
+// write/edit）由核心工具在每次执行时调用，插件缺席时 fail-open 等于放开写权限，fail-closed
+// 等于整个 sph 不能写文件——安全约束不能有「缺席」状态。
+//
+// 可插件化的是**引擎**：Windows restricted-token / Linux bwrap 是机制不是策略。核心保留
+// `SandboxHandle` 接口与 fail-closed 分派（`--sandbox off` 之外的模式必须有后端，否则拒绝
+// 启动），插件按注册名提供后端。dsh 也是这么切的：`dsh-sandbox` 是接缝，`dsh-sandbox-local`
+// / `dsh-sandbox-windows-acl` / `e2b` 是插件提供的后端。
+
+import type { SandboxHandle, SandboxMode } from '../sandbox/types.js';
+
+/**
+ * 沙箱后端工厂。核心在需要「真正 confine」的档位（workspace / read-only）时向插件取后端；
+ * 插件缺席 → 后端不存在 → 核心 fail-closed 拒绝启动，而不是放开。
+ */
+export type SandboxBackendFactory = (
+  mode: SandboxMode,
+  workspaceRoot: string,
+) => Promise<SandboxHandle>;
+
+/** `sandbox` 服务的注册名。核心与插件都引这里。 */
+export const SANDBOX_SERVICE = 'sandbox';

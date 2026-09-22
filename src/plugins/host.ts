@@ -57,6 +57,8 @@ export class PluginHost implements PluginServices {
   private readonly serviceMap = new Map<string, unknown>();
   private readonly serviceOwners = new Map<string, string>();
   private readonly failures: PluginLoadFailure[] = [];
+  /** 被第三方顶掉的内置插件名；由发现阶段给出（见 loader.ts 的 DiscoveredPlugins）。 */
+  private readonly shadowed: string[] = [];
   private readonly order: string[] = [];
   private disposed = false;
 
@@ -70,7 +72,8 @@ export class PluginHost implements PluginServices {
    * 传入的是 loader 给的候选（已按优先级去重、已剔除禁用项）；本方法不再做发现决策，
    * 只负责「装」与「记录」。
    */
-  async load(candidates: readonly PluginCandidate[]): Promise<void> {
+  async load(candidates: readonly PluginCandidate[], shadowed: readonly string[] = []): Promise<void> {
+    this.shadowed.push(...shadowed);
     const { loaded, failures } = await loadPluginModules([...candidates]);
     this.failures.push(...failures);
 
@@ -198,9 +201,10 @@ export class PluginHost implements PluginServices {
     return [...this.serviceMap.keys()];
   }
 
-  /** 已装载插件摘要 + 导入期失败，供 `sph plugins` 与启动警告。 */
-  report(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[] } {
+  /** 已装载插件摘要 + 导入期失败 + 被遮蔽的内置插件，供 `/plugins` 与启动警告。 */
+  report(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[]; shadowed: string[] } {
     return {
+      shadowed: [...this.shadowed],
       plugins: this.records.map((record) => ({
         name: record.candidate.name,
         entries: [...record.candidate.entries],

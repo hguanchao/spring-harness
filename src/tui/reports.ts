@@ -8,6 +8,8 @@
 
 import type { McpServerStatus } from '../plugins/services.js';
 import type { McpSourceReport } from '../plugins/services.js';
+import type { LoadedPlugin } from '../plugins/host.js';
+import type { PluginLoadFailure } from '../plugins/loader.js';
 import type { SkillEntry } from '../skills/scan.js';
 
 /**
@@ -204,4 +206,78 @@ function detailOf(report: McpSourceReport): string {
   if (report.status === 'found') return ` — ${report.count} server${report.count === 1 ? '' : 's'}`;
   if (report.detail === undefined) return '';
   return ` — ${plain(report.detail)}`;
+}
+
+/**
+ * `/plugins` 的上报文本：装了哪些插件、各自贡献了什么、谁没装起来。
+ *
+ * 这份文本的存在理由是**可诊断**：工具变成插件之后，「工具表里怎么没有 todo」的答案可能
+ * 是「插件被 `[plugins] disabled` 关了」、「插件加载失败」，或「插件在但没注册工具」。
+ * 三种原因的处置完全不同，所以三者都要能被看见——只列一份成功清单等于让用户去猜。
+ */
+export function renderPluginsReport(input: {
+  plugins: readonly LoadedPlugin[];
+  failures: readonly PluginLoadFailure[];
+  shadowed: readonly string[];
+}): string {
+  const { plugins, failures, shadowed } = input;
+  const lines: string[] = [`## Plugins (${plugins.length})`, ''];
+
+  if (plugins.length === 0) {
+    lines.push(
+      'No plugins loaded. Bundled plugins live in `src/plugins/` (compiled into `dist/`);',
+      'third-party ones go in `~/.sph/plugins/` or `<workspace>/.sph/plugins/`.',
+      '',
+      'A plugin disabled in config.toml is deliberately absent:',
+      '',
+      '```toml',
+      '[plugins]',
+      'disabled = ["sph-mcp"]',
+      '```',
+    );
+  }
+
+  const origin: Record<LoadedPlugin['root'], string> = {
+    bundled: 'bundled with sph',
+    user: '~/.sph/plugins',
+    project: '<workspace>/.sph/plugins',
+  };
+
+  for (const plugin of plugins) {
+    lines.push(`### ${plugin.name}`, '');
+    lines.push(`- from: ${origin[plugin.root]}`);
+    for (const entry of plugin.entries) lines.push(`  - ${plain(entry)}`);
+    lines.push(
+      plugin.tools.length === 0
+        ? '- tools: none'
+        : `- tools: ${plugin.tools.map((name) => `\`${name}\``).join(', ')}`,
+    );
+    lines.push(
+      plugin.services.length === 0
+        ? '- services: none'
+        : `- services: ${plugin.services.map((name) => `\`${name}\``).join(', ')}`,
+    );
+    lines.push(...plugin.warnings.map((warning) => `- warning: ${plain(warning)}`));
+  }
+
+  if (shadowed.length > 0) {
+    lines.push(
+      '',
+      '### Shadowing',
+      '',
+      'These bundled plugins were replaced by a same-named third-party plugin. Legitimate for',
+      'patching a built-in, but the bundled service and tools are gone, not merged:',
+      ...shadowed.map((name) => `- ${name}`),
+    );
+  }
+
+  if (failures.length > 0) {
+    lines.push('', '### Failed to load', '');
+    for (const failure of failures) {
+      lines.push(`- **${failure.name}** — ${plain(failure.reason)}`);
+      for (const entry of failure.entries) lines.push(`  - ${plain(entry)}`);
+    }
+  }
+
+  return lines.join('\n');
 }

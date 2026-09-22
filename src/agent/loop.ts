@@ -10,18 +10,17 @@ import {
 } from './compact.js';
 import type { AgentListener, SubagentEvent } from './events.js';
 import { TouchMemory, touchInstructionBlock } from './memory.js';
-import { PLAN_BLOCKED_TOOLS, planBlockedReason } from './plan.js';
+import { PLAN_MODE_SERVICE, type PlanModeSeam } from '../plugins/services.js';
 import { buildSystemPrompt, sessionStateMessage } from './prompt.js';
 import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from './prefix-tracker.js';
 import { runToolBatch } from './tool-run.js';
 import { CacheMissTracker, describeCacheMiss } from '../llm/cache-stats.js';
 import { ContextOverflowError } from '../llm/errors.js';
 import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
-import { MCP_SERVICE, type McpService } from '../plugins/services.js';
+import { EMPTY_TODO, MCP_SERVICE, TODO_SERVICE, todoEventData, type McpService, type TodoService } from '../plugins/services.js';
 import { EMPTY_PLUGIN_SERVICES, type PluginServices } from '../plugins/types.js';
 import { JobBoard, jobNotificationText, type JobRecord, type SubagentInbox } from '../runtime/jobs.js';
 import type { SpillStore } from '../runtime/spill.js';
-import { TodoList } from '../runtime/todos.js';
 import { WorktreeStore } from '../runtime/worktrees.js';
 import type { SandboxHandle } from '../sandbox/types.js';
 import { shellArgv } from '../sandbox/shell-bin.js';
@@ -87,7 +86,8 @@ export interface RunTurnOptions {
    * 插件没装时取到 undefined——相关段落随之消失，而不是留下指向不存在能力的指令。
    */
   services?: PluginServices;
-  todos?: TodoList;
+  /** todo 服务；省略时从插件服务表取（见 services 字段）。 */
+  todos?: TodoService;
   jobs?: JobBoard;
   depth?: number;
   allowedTools?: ReadonlySet<string>;
@@ -189,10 +189,12 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const sessions = options.sessions ?? jsonlSessionFactory;
   const skills = scanSkills(options.workspaceRoot);
   for (const warning of skills.warnings) options.listener?.({ type: 'status', text: warning });
-  const todos = options.todos ?? new TodoList();
   const jobs = options.jobs ?? new JobBoard();
   const services = options.services ?? EMPTY_PLUGIN_SERVICES;
   const mcp = services.get<McpService>(MCP_SERVICE);
+  // todo 与 mcp 同一套缺席语义：插件被禁用时清单不可用。工具表里也不会有 todo 工具，
+  // 所以这里缺省成「空清单 + 不写事件」不会让任何核心路径拿到 undefined 而崩。
+  const todos = options.todos ?? services.get<TodoService>(TODO_SERVICE) ?? EMPTY_TODO;
   const memory = options.memory ?? new TouchMemory(options.workspaceRoot);
   const worktrees = options.worktrees ?? new WorktreeStore();
 
@@ -279,7 +281,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     type: 'message',
     ts: new Date().toISOString(),
     role: 'user',
-    content: sessionStateMessage(options.goal, options.lastFailure, options.planMode?.active === true),
+    content: sessionStateMessage(options.goal, options.lastFailure, options.planMode?.active === true, services.get<PlanModeSeam>(PLAN_MODE_SERVICE)),
   };
   mirror.push(stateRow);
   let turnPersisted = false;
@@ -877,9 +879,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (allowed && !allowed.has(name)) return `tool not allowed in this agent: ${name}`;
       if (registry.isRootOnly(name) && depth > 0) return `tool only available to the root session: ${name}`;
       if (!registry.find(name)) return `unknown tool: ${name}`;
-      if (options.planMode?.active && PLAN_BLOCKED_TOOLS.has(name)) {
-        if (name === 'subagent' && args.type === 'explore') return undefined;
-        return planBlockedReason(name);
+      const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
+      if (options.planMode?.active && planSeam?.isBlocked(name, args)) {
+        return planSeam.blockedReason(name);
       }
       return undefined;
     };
@@ -927,7 +929,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     const nextTodos = JSON.stringify(todos.list());
     if (nextTodos !== todoSnapshot) {
       todoSnapshot = nextTodos;
-      options.session.appendEvent('todo', sessionEventData.todo(todos.list()));
+      options.session.appendEvent('todo', todoEventData(todos.list()) as unknown as Record<string, unknown>);
     }
   }
   throw new Error(`tool loop exceeded ${MAX_STEPS} steps`);

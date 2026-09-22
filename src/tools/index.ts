@@ -4,7 +4,6 @@ import { readFileTool } from './read-file.js';
 import { searchReplaceTool } from './search-replace.js';
 import { bashTool, pwshTool } from './shell.js';
 import { skillTool } from './skill.js';
-import { todoTool } from './todo.js';
 import { askUserTool } from './ask-user.js';
 import { globTool } from './glob.js';
 import { webFetchTool, webSearchTool } from './web-search.js';
@@ -12,7 +11,6 @@ import { jobsTool } from './jobs.js';
 import { subagentTool } from './subagent.js';
 import { sendSubagentMessageTool } from './send-subagent.js';
 import type { ToolSpec } from './types.js';
-import { enterPlanModeTool, exitPlanModeTool } from './plan.js';
 import { writeTool } from './write.js';
 import { ToolRegistry } from './registry.js';
 
@@ -37,14 +35,11 @@ export const tools: ToolSpec[] = [
   bashTool,
   pwshTool,
   tagged(skillTool, { concurrencySafe: true, explore: true }),
-  tagged(todoTool, { explore: true }),
   tagged(askUserTool, { explore: true }),
   tagged(webSearchTool, { concurrencySafe: true, explore: true }),
   tagged(jobsTool, { concurrencySafe: true }),
   tagged(subagentTool, { concurrencySafe: true }),
   tagged(sendSubagentMessageTool, { rootOnly: true }),
-  tagged(enterPlanModeTool, { rootOnly: true }),
-  tagged(exitPlanModeTool, { rootOnly: true }),
   tagged(webFetchTool, { concurrencySafe: true, explore: true }),
 ];
 

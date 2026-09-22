@@ -16,7 +16,7 @@ import type { PluginLoadFailure } from '../plugins/loader.js';
 import type { PluginServices } from '../plugins/types.js';
 import type { ApprovalMode, PermissionRules, SubagentApprovalPolicy } from '../permission/policy.js';
 import type { JobBoard } from '../runtime/jobs.js';
-import type { TodoList } from '../runtime/todos.js';
+import type { TodoService } from '../plugins/services.js';
 import type { WorktreeStore } from '../runtime/worktrees.js';
 import type { SandboxHandle } from '../sandbox/types.js';
 import type { JsonlSession } from '../session/store.js';
@@ -61,10 +61,11 @@ export interface TuiDeps {
   /** 生效中的 MCP 启停偏好，供弹窗显示当前状态。 */
   mcpPreferences: McpPreferences;
   /** 已装载插件与导入失败的摘要，供 `/plugins` 与诊断显示。 */
-  pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[] };
+  pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[]; shadowed: string[] };
   /** 插件服务表；loop 按接缝名取用（sph-mcp 的清单进提示词），插件工具也靠它取兄弟服务。 */
   pluginServices: PluginServices;
-  todos: TodoList;
+  /** todo 服务（todo 插件提供）。 */
+  todos: TodoService;
   jobs: JobBoard;
   approvalMode: ApprovalMode;
   /** `[permissions]` 规则；省略即无规则。 */

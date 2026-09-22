@@ -11,12 +11,14 @@ import { theme } from '../../src/tui/theme/theme.js';
 import { renderMcpReport, renderSkillsReport } from '../../src/tui/reports.js';
 import { runTui, type TuiDeps } from '../../src/tui/interactive-mode.js';
 import type { ProviderDeclaration } from '../../src/config/registry.js';
+import { PluginHost } from '../../src/plugins/host.js';
+import { discoverPlugins } from '../../src/plugins/loader.js';
 import { McpHub } from '../../src/plugins/sph-mcp/hub.js';
 import { testHostFacts } from '../plugins/host-fixture.js';
 import type { McpService } from '../../src/plugins/services.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import { JobBoard } from '../../src/runtime/jobs.js';
-import { TodoList } from '../../src/runtime/todos.js';
+import { EMPTY_TODO } from '../../src/plugins/services.js';
 import { JsonlSession } from '../../src/session/store.js';
 
 /**
@@ -232,9 +234,9 @@ function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
     reloadMcp: async () => ({ warnings: [], added: [], removed: [], restarted: [] }),
     refreshMcpPreferences: () => {},
     mcpPreferences: { disabledServers: [], enabledServers: [], lazyServers: [] },
-    pluginReport: () => ({ plugins: [], failures: [] }),
+    pluginReport: () => ({ plugins: [], failures: [], shadowed: [] }),
     pluginServices: EMPTY_PLUGIN_SERVICES,
-    todos: new TodoList(),
+    todos: EMPTY_TODO,
     jobs: new JobBoard(),
     approvalMode: 'ask',
     model: 'test-model',
@@ -297,6 +299,44 @@ describe('斜杠命令打通到弹窗', () => {
       assert.match(screen, /The model sees only the name and description/, '渲染的是有内容的分支而不是空分支');
       assert.match(screen, /Widget builder/, '工作区里的技能被扫到了');
       assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/plugins 打开弹窗，列出插件与它们提供的工具', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-plugins-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      // 真实装载：内置插件在 src/plugins/，sph-mcp 应当出现在报告里并带上它的 mcp 工具。
+      const plugins = new PluginHost({
+        coreTools: [],
+        workspaceRoot: root,
+        configPath: join(root, 'config.toml'),
+      });
+      const discovered = discoverPlugins({ workspaceRoot: root, userRoot: join(root, 'no-user') });
+      await plugins.load(discovered.candidates, discovered.shadowed);
+      try {
+        const screen = await driveCommand(
+          terminal,
+          root,
+          mcp,
+          { pluginReport: () => plugins.report() },
+          '/plugins',
+        );
+        // 弹窗按 markdown 渲染：反引号被吃掉，而行内码是**带颜色**的，所以
+        // "tools: " 与 "mcp" 之间夹着 SGR 序列。先剥色再断言，否则匹配的是转义序列。
+        const plain = screen.replace(/\[[0-9;]*m/g, '');
+        assert.match(plain, /Plugins \(\d+\)/, '弹窗里应当渲染出上报标题');
+        assert.match(plain, /sph-mcp/, '内置插件应当在列表里');
+        assert.match(plain, /tools: mcp/, '插件贡献的工具要写出来，否则「工具为什么不见了」查不出来');
+        assert.match(plain, /services: sph-mcp/);
+        assert.equal(screen.includes('Unknown command'), false);
+      } finally {
+        plugins.dispose();
+      }
     } finally {
       mcp.dispose();
       rmSync(root, { recursive: true, force: true });

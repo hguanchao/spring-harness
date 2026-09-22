@@ -79,7 +79,7 @@ import {
 import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
 import { showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
-import { renderSkillsReport } from './reports.js';
+import { renderPluginsReport, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
 import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from './components/interaction.js';
 import { clearHoverHighlight } from './components/hover-highlight.js';
@@ -1270,6 +1270,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       case 'skills':
         await this.commandSkills();
         break;
+      case 'plugins':
+        await this.commandPlugins();
+        break;
       case 'mcps':
         await commandMcps(this);
         break;
@@ -1346,6 +1349,21 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
    * 会话中途新建一个 skill 是正常用法，当场扫就能立刻看到；代价只是读几个 SKILL.md 的文件头。
    * 与当前轮次提示词有分歧时以本弹窗为准——下一轮的提示词就会跟上。
    */
+  /**
+   * `/plugins`：装了哪些插件、各自贡献了什么、谁没装起来。
+   *
+   * 只读且每次重新取：插件不会在会话中途装载或卸载，但「我的工具怎么不见了」这类问题
+   * 恰恰是在改了配置、下次启动之后才被注意到的，状态必须来自当下这份报告而不是快照。
+   */
+  private async commandPlugins(): Promise<void> {
+    const report = this.deps.pluginReport();
+    await showMessageDialog(this.ui, {
+      title: 'Plugins',
+      text: renderPluginsReport(report),
+      hint: 'Esc close · plugin state is fixed for this process',
+    });
+  }
+
   private async commandSkills(): Promise<void> {
     const { catalog, warnings } = scanSkills(this.deps.workspaceRoot);
     await showMessageDialog(this.ui, {

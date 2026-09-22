@@ -6,9 +6,11 @@
  * 状态只记一条 last-wins 的 `plan_mode` 事件，resume 从日志折叠。
  */
 import { join } from 'node:path';
+import type { PluginApi } from '../types.js';
+import { PLAN_MODE_SERVICE, type PlanModeSeam } from '../services.js';
 
 /** 计划模式里禁止的副作用工具。explore 子代理除外，由调用方单独放行。 */
-export const PLAN_BLOCKED_TOOLS = new Set([
+const BLOCKED_TOOLS = new Set([
   'write',
   'edit',
   'bash',
@@ -56,4 +58,29 @@ export function planModeSection(): string {
 
 export function planBlockedReason(name: string): string {
   return `blocked in plan mode: ${name}. Explore and present a plan via exit_plan_mode; implementation waits for approval.`;
+}
+
+/**
+ * 接缝实现：核心面对 PlanModeSeam 接口，不引用本文件。
+ *
+ * 拦截表按「名字 + 参数豁免」声明，而不是留在核心按名字猜——todo 的教训是核心
+ * 不能硬编码插件工具名（曾把 `mcp` 写死在 PLAN_BLOCKED_TOOLS 里）。
+ */
+const seam: PlanModeSeam = {
+  isBlocked: (toolName, args) => {
+    if (!BLOCKED_TOOLS.has(toolName)) return false;
+    // explore 子代理是只读的，允许在 plan mode 下派发。
+    if (toolName === 'subagent' && args.type === 'explore') return false;
+    return true;
+  },
+  blockedReason: (toolName) => planBlockedReason(toolName),
+  promptSection: () => planModeSection(),
+  hasPlanHeading,
+  planHeading,
+  planFilePath,
+};
+
+/** 插件入口。宿主按 `src/plugins/plan/` 装载，插件名取目录名。 */
+export default function setup(api: PluginApi): void {
+  api.provide(PLAN_MODE_SERVICE, seam);
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { renderMcpReport, renderSkillsReport } from '../../src/tui/reports.js';
+import { renderMcpReport, renderPluginsReport, renderSkillsReport } from '../../src/tui/reports.js';
+import type { LoadedPlugin } from '../../src/plugins/host.js';
 import type { McpServerStatus } from '../../src/plugins/services.js';
 import type { McpSourceReport } from '../../src/plugins/services.js';
 import type { SkillEntry } from '../../src/skills/scan.js';
@@ -219,6 +220,74 @@ describe('renderMcpReport', () => {
       warnings: [],
     });
     assert.ok(text.includes("Run 'rg' under the hood"));
+    assert.equal((text.match(/`/g) ?? []).length % 2, 0, '内联代码段必须成对');
+  });
+});
+
+describe('renderPluginsReport', () => {
+  function plugin(overrides: Partial<LoadedPlugin> & { name: string }): LoadedPlugin {
+    return { entries: ['/x/index.ts'], root: 'bundled', tools: [], services: [], warnings: [], ...overrides };
+  }
+
+  it('列出每个插件的来源、工具与服务', () => {
+    const text = renderPluginsReport({
+      plugins: [
+        plugin({ name: 'sph-mcp', tools: ['mcp'], services: ['sph-mcp'] }),
+        plugin({ name: 'todo', root: 'user', entries: ['~/.sph/plugins/todo.ts'] }),
+      ],
+      failures: [],
+      shadowed: [],
+    });
+    assert.match(text, /## Plugins \(2\)/);
+    assert.match(text, /### sph-mcp/);
+    assert.match(text, /bundled with sph/);
+    assert.match(text, /- tools: `mcp`/);
+    assert.match(text, /- services: `sph-mcp`/);
+    // 没有工具/服务的插件要显式写 none，而不是留空行让人以为被截断。
+    assert.match(text, /- tools: none/);
+    assert.match(text, /### todo/);
+    assert.match(text, /~\/\.sph\/plugins/);
+  });
+
+  it('一个插件都没有时说清插件该放哪、以及被禁用是正常原因', () => {
+    const text = renderPluginsReport({ plugins: [], failures: [], shadowed: [] });
+    assert.match(text, /## Plugins \(0\)/);
+    assert.match(text, /No plugins loaded/);
+    assert.match(text, /src\/plugins\//);
+    assert.match(text, /~\/\.sph\/plugins\//);
+    // 「工具表里没有 todo」最容易的答案是配置禁用了它，所以这里必须给出来。
+    assert.match(text, /disabled = \["sph-mcp"\]/);
+  });
+
+  it('加载失败单独成段，带上入口与原因', () => {
+    const text = renderPluginsReport({
+      plugins: [],
+      failures: [{ name: 'broken', entries: ['/ws/.sph/plugins/broken.ts'], reason: 'Unexpected token' }],
+      shadowed: [],
+    });
+    assert.match(text, /### Failed to load/);
+    assert.match(text, /\*\*broken\*\* — Unexpected token/);
+    assert.match(text, /\/ws\/\.sph\/plugins\/broken\.ts/);
+  });
+
+  it('遮蔽内置插件时说明是替换而非合并', () => {
+    const text = renderPluginsReport({
+      plugins: [plugin({ name: 'sph-mcp', root: 'project', tools: [] })],
+      failures: [],
+      shadowed: ['sph-mcp'],
+    });
+    assert.match(text, /### Shadowing/);
+    assert.match(text, /- sph-mcp$/m);
+    // 关键语义：被顶掉的内置实现是消失了，不是与第三方实现合并。
+    assert.match(text, /gone, not merged/);
+  });
+
+  it('原因里的反引号被中和，不留下未闭合的代码段', () => {
+    const text = renderPluginsReport({
+      plugins: [],
+      failures: [{ name: 'x', entries: [], reason: "Cannot find module './a.ts'" }],
+      shadowed: [],
+    });
     assert.equal((text.match(/`/g) ?? []).length % 2, 0, '内联代码段必须成对');
   });
 });
