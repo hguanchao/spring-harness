@@ -26,11 +26,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
-import { sphHome } from '../home.js';
-import { errorMessage } from '../util.js';
-import { canonicalize } from '../workspace/boundary.js';
-import { isWorkspaceTrusted } from '../workspace/trust.js';
 import type { McpOrigin } from './hub.js';
+import type { PluginHostFacts } from '../types.js';
+
+/**
+ * `error instanceof Error ? message : String(error)`。本地三行，不值得为它撑大宿主 api 面。
+ */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export type McpSourceKind =
   | 'sph'
@@ -97,27 +101,29 @@ export interface McpPreferences {
 
 export interface DiscoverOptions {
   workspaceRoot: string;
+  /** 宿主事实与策略。路径规范化、状态目录、信任判定都取自它，插件不自带一份。 */
+  host: PluginHostFacts;
   /** 项目级查找的起点，向上走到 `workspaceRoot`（含）。省略即从 `workspaceRoot` 开始。 */
   fromDir?: string;
-  /** sph 用户级状态目录，默认 `~/.sph`。 */
+  /** sph 用户级状态目录，省略取宿主事实里的 `sphHome`。 */
   sphHomeDir?: string;
   home?: string;
   env?: NodeJS.ProcessEnv;
-  /** 工作区是否已信任。默认查 `trusted.json`；false 时项目级来源一律丢弃。 */
+  /** 工作区是否已信任。省略查 config.toml；false 时项目级来源一律丢弃。 */
   trusted?: boolean;
   /** 本地启停偏好，取自 sph 用户级配置。 */
   preferences?: McpPreferences;
 }
 
 export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
-  const workspaceRoot = canonicalize(options.workspaceRoot);
+  const workspaceRoot = options.host.canonicalize(options.workspaceRoot);
   const fromDir = resolve(options.fromDir ?? options.workspaceRoot);
-  const sphHomeDir = options.sphHomeDir ?? sphHome();
+  const sphHomeDir = options.sphHomeDir ?? options.host.sphHome;
   // 注意别把 `home` 回退成 sphHomeDir(=~/.sph)：那会让所有外部来源都去找
   // `~/.sph/.claude.json` 这种不存在的路径，表现为「一个 server 都扫不到」。
   const home = options.home ?? homedir();
   const env = options.env ?? process.env;
-  const trusted = options.trusted ?? isWorkspaceTrusted(options.workspaceRoot);
+  const trusted = options.trusted ?? options.host.isWorkspaceTrusted(options.workspaceRoot);
   const preferences = options.preferences ?? { disabledServers: [], enabledServers: [], lazyServers: [] };
 
   const reports: McpSourceReport[] = [];
@@ -127,7 +133,7 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
   /** 项目级来源声明过的**全部**名字，含输给高优先级的那些。信任门按它过滤。 */
   const projectDeclared = new Set<string>();
 
-  const chain = chainDirs(workspaceRoot, fromDir);
+  const chain = chainDirs(workspaceRoot, fromDir, options.host);
   const projectBlocked = !trusted;
 
   const put = (spec: MergedServer): void => {
@@ -288,13 +294,13 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
  * 拼一遍路径迟早会漂移，而漂移的后果是「标记说导过了，实际读的是另一批文件」。
  */
 export function externalSourcePaths(scope: 'user' | 'project', options: DiscoverOptions): string[] {
-  const workspaceRoot = canonicalize(options.workspaceRoot);
+  const workspaceRoot = options.host.canonicalize(options.workspaceRoot);
   const fromDir = resolve(options.fromDir ?? options.workspaceRoot);
   // 与 discoverMcpServers 保持同一套默认值：这里要是回退到 ~/.sph，两处算出的文件清单
   // 就不一致了，而导入标记正是按这份清单算指纹的。
   const home = options.home ?? homedir();
   if (scope === 'user') return [join(home, '.claude.json'), join(home, '.codex', 'config.toml')];
-  const chain = chainDirs(workspaceRoot, fromDir);
+  const chain = chainDirs(workspaceRoot, fromDir, options.host);
   return [
     ...chain.map((dir) => join(dir, '.mcp.json')),
     ...chain.map((dir) => join(dir, '.codex', 'config.toml')),
@@ -309,13 +315,13 @@ export function externalSourcePaths(scope: 'user' | 'project', options: Discover
  * 后读的覆盖先读的，于是「最近的目录赢」。只收 `workspaceRoot` 自身及其后代——启动目录
  * 在别处时不该把无关目录的项目级配置一并读进来。
  */
-function chainDirs(workspaceRoot: string, fromDir: string): string[] {
+function chainDirs(workspaceRoot: string, fromDir: string, host: PluginHostFacts): string[] {
   const dirs: string[] = [];
   let current = resolve(fromDir);
   for (;;) {
     const rel = relative(workspaceRoot, current);
     if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) dirs.push(current);
-    if (canonicalize(current) === workspaceRoot) break;
+    if (host.canonicalize(current) === workspaceRoot) break;
     const parent = dirname(current);
     if (parent === current) break;
     current = parent;
@@ -362,7 +368,7 @@ function readLayer(input: {
         path,
         status: 'invalid',
         count: 0,
-        detail: errorMessage(error),
+        detail: describeError(error),
       });
       continue;
     }
@@ -371,7 +377,7 @@ function readLayer(input: {
       entries = input.read(path, text);
     } catch (error) {
       // 外部配置解析失败不该让 sph 起不来：记一条报告 + 一条警告就够。
-      const detail = errorMessage(error);
+      const detail = describeError(error);
       input.reports.push({ label: input.label, path, status: 'invalid', count: 0, detail });
       input.warnings.push(`${input.label}: ${detail}`);
       continue;

@@ -67,7 +67,7 @@ describe('wire incremental projection', () => {
       session({
         role: 'assistant',
         content: '看',
-        toolCalls: [{ id: 'c1', name: 'list_dir', arguments: { path: '.' } }],
+        toolCalls: [{ id: 'c1', name: 'ls', arguments: { path: '.' } }],
         reasoning: [{ id: 'rs_1', encryptedContent: 'enc' }],
       }),
     ];

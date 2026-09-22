@@ -11,7 +11,10 @@ import { theme } from '../../src/tui/theme/theme.js';
 import { renderMcpReport, renderSkillsReport } from '../../src/tui/reports.js';
 import { runTui, type TuiDeps } from '../../src/tui/interactive-mode.js';
 import type { ProviderDeclaration } from '../../src/config/registry.js';
-import { McpHub } from '../../src/mcp/hub.js';
+import { McpHub } from '../../src/plugins/sph-mcp/hub.js';
+import { testHostFacts } from '../plugins/host-fixture.js';
+import type { McpService } from '../../src/plugins/services.js';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import { JobBoard } from '../../src/runtime/jobs.js';
 import { TodoList } from '../../src/runtime/todos.js';
 import { JsonlSession } from '../../src/session/store.js';
@@ -176,6 +179,26 @@ describe('上报弹窗的真实渲染', () => {
 /** 让 TUI 把一次输入处理完（渲染是同步的，只需让出事件循环）。 */
 const settle = (ms = 80): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * 测试用的 MCP 服务：列表/调用走真 hub，seam 上插件侧才有的两份状态按空给。
+ *
+ * 本文件验的是弹窗渲染（`/mcps` 要把连不上的原因显示出来），刷新与来源报告由
+ * tests/plugins/sph-mcp.test.ts 与 tests/mcp/* 覆盖，这里不重复触发。
+ */
+function mcpService(hub: McpHub): McpService {
+  return {
+    reload: async () => ({ warnings: [], added: [], removed: [], restarted: [] }),
+    sources: () => [],
+    warnings: () => [],
+    listTools: () => hub.listTools(),
+    listServers: () => hub.listServers(),
+    listToolsOf: (server) => hub.listToolsOf(server),
+    call: (server, name, args) => hub.call(server, name, args),
+    whenReady: (timeoutMs) => hub.whenReady(timeoutMs),
+    dispose: () => hub.dispose(),
+  };
+}
+
 function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
   const provider: ProviderDeclaration = {
     name: 'test',
@@ -205,11 +228,12 @@ function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
       dispose() {},
     },
     session: new JsonlSession(root, 'test'),
-    mcp,
+    mcp: () => mcpService(mcp),
     reloadMcp: async () => ({ warnings: [], added: [], removed: [], restarted: [] }),
     refreshMcpPreferences: () => {},
     mcpPreferences: { disabledServers: [], enabledServers: [], lazyServers: [] },
-    mcpSources: () => [],
+    pluginReport: () => ({ plugins: [], failures: [] }),
+    pluginServices: EMPTY_PLUGIN_SERVICES,
     todos: new TodoList(),
     jobs: new JobBoard(),
     approvalMode: 'ask',
@@ -261,7 +285,7 @@ describe('斜杠命令打通到弹窗', () => {
   it('/skills 打开弹窗，且目录来自工作区扫描', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-skills-'));
     const terminal = new FakeTerminal();
-    const mcp = new McpHub();
+    const mcp = new McpHub(testHostFacts());
     try {
       // 名字按字母序排最前：列表可能长过一屏，只有排在最前的条目才一定在视口内。
       const dir = join(root, '.sph', 'skills', '000-widget');
@@ -282,7 +306,7 @@ describe('斜杠命令打通到弹窗', () => {
   it('/mcps 打开管理器，把连不上的 server 连原因一起显示出来', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-mcps-'));
     const terminal = new FakeTerminal();
-    const mcp = new McpHub();
+    const mcp = new McpHub(testHostFacts());
     try {
       await mcp.reload([{ name: 'broken', command: 'definitely-not-a-real-binary-xyz' }]);
       await mcp.whenReady();
@@ -300,7 +324,7 @@ describe('斜杠命令打通到弹窗', () => {
   it('/resume 打开会话选择器并列出会话', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-resume-'));
     const terminal = new FakeTerminal();
-    const mcp = new McpHub();
+    const mcp = new McpHub(testHostFacts());
     try {
       // 选择器只列有对话的会话：没有 message 记录的文件会被 listSessions 跳过。
       writeFileSync(
@@ -322,7 +346,7 @@ describe('斜杠命令打通到弹窗', () => {
   it('/sessions 是 /resume 的别名，仍然可达', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-alias-'));
     const terminal = new FakeTerminal();
-    const mcp = new McpHub();
+    const mcp = new McpHub(testHostFacts());
     try {
       // 空目录下能走到「没有会话」这句，就说明别名解析到了 /resume；被当成未知命令时
       // 屏幕上会是 "Unknown command"，两者完全不同。
@@ -338,7 +362,7 @@ describe('斜杠命令打通到弹窗', () => {
   it('/permission 打开审批模式选择器（命令名对齐 dsh）', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-permission-'));
     const terminal = new FakeTerminal();
-    const mcp = new McpHub();
+    const mcp = new McpHub(testHostFacts());
     try {
       const screen = await driveCommand(terminal, root, mcp, {}, '/permission');
       assert.match(screen, /Approval mode/);
@@ -352,7 +376,7 @@ describe('斜杠命令打通到弹窗', () => {
   it('/compact 把历史压成检查点，并落一条 compaction 事件', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-compact-'));
     const terminal = new FakeTerminal();
-    const mcp = new McpHub();
+    const mcp = new McpHub(testHostFacts());
     try {
       // 摘要只在「保留窗口之外还有原始记录」时才会跑，所以要给足 8 条以上。
       // 用 JsonlSession 真写一遍而不是手搓 JSON：parentId 链条由 append 自己接，

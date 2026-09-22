@@ -55,7 +55,7 @@ function buildThreeIterationGroup(): ToolGroupComponent {
     tool.updateResult({ content: 'ok', isError: false });
   };
   const rounds: Array<[string, string]> = [
-    ['第一轮：先看目录结构。', 'list_dir'],
+    ['第一轮：先看目录结构。', 'ls'],
     ['第二轮：读构建脚本。', 'read'],
     ['第三轮：跑一次编译。', 'bash'],
   ];
@@ -132,7 +132,7 @@ describe('ToolGroupComponent 缩进分层', () => {
 
   it('折叠态进行中的思考也缩进，不和汇总行并排', () => {
     const group = new ToolGroupComponent(ui);
-    const tool = new ToolExecutionComponent('list_dir', 'c1', { path: 'a.java' }, ui);
+    const tool = new ToolExecutionComponent('ls', 'c1', { path: 'a.java' }, ui);
     group.addTool(tool);
     tool.markExecutionStarted();
     group.beginThinking();

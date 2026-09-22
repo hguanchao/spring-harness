@@ -1,5 +1,5 @@
 import type { FileObservation } from './observe.js';
-import type { McpHub } from '../mcp/hub.js';
+import type { PluginServices } from '../plugins/types.js';
 import type { JobBoard } from '../runtime/jobs.js';
 import type { TodoList } from '../runtime/todos.js';
 import { assertWriteAllowed } from '../sandbox/policy.js';
@@ -23,7 +23,11 @@ export interface ToolContext {
   skills: SkillEntry[];
   todos: TodoList;
   jobs: JobBoard;
-  mcp: McpHub;
+  /**
+   * 插件提供的服务表。核心工具用不到它；插件工具靠它取兄弟插件的服务
+   * （如 `sph-mcp` 的 hub）。缺席的服务取到 undefined——调用方必须处理。
+   */
+  services: PluginServices;
   runShell(
     command: string,
     timeoutMs: number,

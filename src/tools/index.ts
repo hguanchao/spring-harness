@@ -11,7 +11,6 @@ import { webFetchTool, webSearchTool } from './web-search.js';
 import { jobsTool } from './jobs.js';
 import { subagentTool } from './subagent.js';
 import { sendSubagentMessageTool } from './send-subagent.js';
-import { mcpTool } from './mcp.js';
 import type { ToolSpec } from './types.js';
 import { enterPlanModeTool, exitPlanModeTool } from './plan.js';
 import { writeTool } from './write.js';
@@ -44,7 +43,6 @@ export const tools: ToolSpec[] = [
   tagged(jobsTool, { concurrencySafe: true }),
   tagged(subagentTool, { concurrencySafe: true }),
   tagged(sendSubagentMessageTool, { rootOnly: true }),
-  mcpTool,
   tagged(enterPlanModeTool, { rootOnly: true }),
   tagged(exitPlanModeTool, { rootOnly: true }),
   tagged(webFetchTool, { concurrencySafe: true, explore: true }),

@@ -16,8 +16,14 @@ import { openaiAdapter, type LlmClient, type ReasoningEffort } from '../llm/open
 import { responsesAdapter } from '../llm/responses.js';
 import type { ProtocolAdapter } from '../llm/stream-client.js';
 import { createSseClient } from '../llm/stream-client.js';
-import { McpHub, type McpReloadResult } from '../mcp/hub.js';
-import { discoverMcpServers, type McpPreferences, type McpSourceReport } from '../mcp/sources.js';
+import { PluginHost } from '../plugins/host.js';
+import { discoverPlugins, userPluginsRoot } from '../plugins/loader.js';
+import {
+  MCP_SERVICE,
+  type McpPreferences,
+  type McpReloadResult,
+  type McpService,
+} from '../plugins/services.js';
 import { JobBoard } from '../runtime/jobs.js';
 import { TodoList } from '../runtime/todos.js';
 import { WorktreeStore } from '../runtime/worktrees.js';
@@ -28,7 +34,7 @@ import { sessionDirFor } from '../session/path.js';
 import { jsonlSessionFactory, resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
 import type { SessionFactory } from '../session/types.js';
 import { runTurn, type AgentDriver } from '../agent/loop.js';
-import { defaultTools } from '../tools/index.js';
+import { tools as coreTools } from '../tools/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
 import {
@@ -139,15 +145,17 @@ export interface Runtime {
   tools: ToolRegistry;
   sessions: SessionFactory;
   driver: AgentDriver;
-  mcp: McpHub;
-  /** 可变容器：`/mcps` 刷新后就地替换内容，持有者无需重新取。 */
-  mcpWarnings: string[];
+  /** 插件宿主：工具表（核心 + 插件）、服务表、清理都归它。 */
+  plugins: PluginHost;
+  /**
+   * `sph-mcp` 插件提供的服务；插件未装载（被 `[plugins] disabled` 关掉或加载失败）时为
+   * undefined——界面据此如实显示「MCP 插件没装」，而不是假装没有 server。
+   */
+  mcp(): McpService | undefined;
   /** 重新发现并装载 MCP server；启动时首次调用与 `/mcps` 的刷新走同一条路径。 */
   reloadMcp(): Promise<McpReloadResult>;
   /** 重新读 `[mcp]` 偏好段（TUI 写回 config.toml 之后调用）。 */
   refreshMcpPreferences(): void;
-  /** 最近一次发现里各候选来源文件的读取结果。 */
-  readonly mcpSources: McpSourceReport[];
   /** 生效中的 MCP 启停偏好（写回后由 refreshMcpPreferences 更新）。 */
   readonly mcpPreferences: McpPreferences;
   todos: TodoList;
@@ -239,6 +247,10 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     if (!ok) throw new CliError(`workspace is not trusted: ${options.workspaceRoot}`, 2);
     rememberTrustedWorkspace(options.workspaceRoot);
   }
+  // 走到这里工作区必定已信任（上面那道门要么早已通过，要么刚记住）。仍然显式取一次而不是
+  // 写死 true：插件发现与 MCP 项目级来源都吃这个值，将来信任门若挪了位置，这里不会静默
+  // 变成「永远信任」——那种失效方式不会有任何症状。
+  const trusted = isWorkspaceTrusted(options.workspaceRoot);
 
   const sessionDir = sessionDirFor(options.workspaceRoot);
   mkdirSync(sessionDir, { recursive: true });
@@ -272,30 +284,47 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     throw error;
   }
 
-  const mcp = new McpHub();
-  // 可变容器：`/mcps` 刷新后警告要就地替换，任何持有它的地方都看到最新一批。
-  const mcpWarnings: string[] = [];
-  // 握手已改为后台完成（启动不为此阻塞），失败不再走 reload 的返回值——接到这个回调里，
-  // 警告容器与 /mcps 弹窗才能看见「server 没起来」。刷新会清空容器重填，过期的失败警告
-  // 不会永久残留；TUI 不为此弹 toast，状态以 /mcps 为准。
-  mcp.onProblem = (message) => {
-    if (!mcpWarnings.includes(message)) mcpWarnings.push(message);
-  };
-  let mcpReports: McpSourceReport[] = [];
+  // 插件在 MCP 之前装好：MCP 本身就是一个插件（sph-mcp），核心只是按服务名取它。
+  // 项目级插件受信任门保护——仓库里的 plugins/*.ts 是会被执行的代码，而仓库内容是别人写的。
+  const plugins = new PluginHost({
+    coreTools,
+    workspaceRoot: options.workspaceRoot,
+    configPath: sphConfigPath(),
+  });
+  const discovered = discoverPlugins({
+    workspaceRoot: options.workspaceRoot,
+    userRoot: userPluginsRoot(),
+    trusted,
+    disabled: config.disabledPlugins,
+  });
+  // 内置插件被顶掉是合法的（就地打补丁），但必须说出来：`sph-mcp` 被顶掉意味着 /mcps
+  // 依赖的整个服务换成了另一份实现，而界面上看不出任何差别。
+  for (const name of discovered.shadowed) {
+    process.stderr.write(`warning: plugin ${name} shadows the bundled one
+`);
+  }
+  await plugins.load(discovered.candidates);
+  const pluginWarnings = plugins.warnings();
+  for (const warning of pluginWarnings) process.stderr.write(`warning: ${warning}\n`);
+
   const preferences = { ...config.mcpPreferences };
 
+  /**
+   * MCP 的域逻辑全在插件里，这里只做两件事：把宿主事实交给它，把结果转给界面。
+   * 服务缺席（插件被禁用或加载失败）时返回空结果而不是抛错——`/mcps` 会如实说明
+   * 「MCP 插件没装」，这比让整个命令域崩掉有用。
+   */
+  const mcp = (): McpService | undefined => plugins.get<McpService>(MCP_SERVICE);
+  const EMPTY_RELOAD: McpReloadResult = { warnings: [], added: [], removed: [], restarted: [] };
   const reloadMcp = async (): Promise<McpReloadResult> => {
-    const discovery = discoverMcpServers({
+    const service = mcp();
+    if (!service) return EMPTY_RELOAD;
+    return service.reload({
       workspaceRoot: options.workspaceRoot,
       fromDir: options.startDir ?? process.cwd(),
       preferences,
+      trusted,
     });
-    mcpReports = discovery.reports;
-    const result = await mcp.reload(discovery.servers);
-    // 顺序即因果：先有来源读取的问题，再有装载的问题，最后是 `[mcp]` 偏好的提示。
-    mcpWarnings.length = 0;
-    mcpWarnings.push(...discovery.warnings, ...result.warnings);
-    return result;
   };
   await reloadMcp();
 
@@ -308,7 +337,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     if (cleaned) return;
     cleaned = true;
     jobs.abortAll();
-    mcp.dispose();
+    // 插件逆序清理：sph-mcp 在这里关掉所有 MCP 子进程。
+    plugins.dispose();
     // 干净的隔离工作树移除（提交留在 sph/<id> 分支）；有未提交改动的一律保留并报告
     // 路径——绝不静默丢弃子代理的工作。
     for (const path of worktrees.dispose().kept) {
@@ -336,11 +366,12 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     configPath: sphConfigPath(),
     sandbox,
     session,
-    tools: defaultTools,
+    tools: plugins.tools(),
     sessions: jsonlSessionFactory,
     driver: runTurn,
+    plugins,
     mcp,
-    mcpWarnings,
+
     todos,
     jobs,
     worktrees,
@@ -409,9 +440,6 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       preferences.disabledServers = fresh.disabledServers;
       preferences.enabledServers = fresh.enabledServers;
       preferences.lazyServers = fresh.lazyServers;
-    },
-    get mcpSources() {
-      return mcpReports;
     },
     get mcpPreferences() {
       return preferences;

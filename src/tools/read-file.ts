@@ -119,7 +119,7 @@ export const readFileTool: ToolSpec = {
     if (!existsSync(abs)) return { ok: false, content: `file not found: ${rel}` };
     const stat = statSync(abs);
     if (stat.isDirectory()) {
-      return { ok: false, content: `not a file: ${rel} (it is a directory — use list_dir)` };
+      return { ok: false, content: `not a file: ${rel} (it is a directory — use ls)` };
     }
     const size = stat.size;
     const mime = imageMime(abs);

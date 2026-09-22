@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { McpHub, type McpServerSpec } from '../../src/mcp/hub.js';
+import { McpHub, type McpServerSpec } from '../../src/plugins/sph-mcp/hub.js';
+import { testHostFacts } from '../plugins/host-fixture.js';
 
 describe('McpHub 启动失败', () => {
   it('命令不存在时降级成问题记录，而不是把进程带走', async () => {
@@ -9,7 +10,7 @@ describe('McpHub 启动失败', () => {
     // 未捕获异常——配置里写错一个命令名就足以让 sph 起不来。启动路径必经 connect，
     // 所以这条必须被承接。此用例在修复前会让整个测试文件崩掉，而不是失败。
     // 握手改为后台完成后，失败经 onProblem 回调与 listServers().problem 露出。
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     const problems: string[] = [];
     hub.onProblem = (message) => problems.push(message);
     try {
@@ -24,7 +25,7 @@ describe('McpHub 启动失败', () => {
   });
 
   it('连不上的 server 仍出现在 listServers 里，供 /mcps 显示', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.connect([{ name: 'broken', command: 'definitely-not-a-real-binary-xyz', args: ['--flag'] }]);
       await hub.whenReady();
@@ -43,7 +44,7 @@ describe('McpHub 启动失败', () => {
   });
 
   it('未配置任何 server 时 listServers 为空数组', () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       assert.deepEqual(hub.listServers(), []);
     } finally {
@@ -68,7 +69,7 @@ async function pidOf(hub: McpHub, name: string): Promise<number> {
 
 describe('McpHub 热重载', () => {
   it('签名未变的连接被复用：子进程 pid 不变', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       const first = await hub.reload([spec('echo')]);
       assert.deepEqual(first.added, ['echo']);
@@ -84,7 +85,7 @@ describe('McpHub 热重载', () => {
   });
 
   it('命令签名变化时重启连接', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('echo')]);
       const before = await pidOf(hub, 'echo');
@@ -100,7 +101,7 @@ describe('McpHub 热重载', () => {
   });
 
   it('消失的条目被断开并关闭子进程', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('echo')]);
       const child = (hub as unknown as { connections: Map<string, { child: { pid?: number } }> })
@@ -117,7 +118,7 @@ describe('McpHub 热重载', () => {
   });
 
   it('禁用与 HTTP 条目不 spawn，但如实出现在 listServers 里', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       const result = await hub.reload([
         spec('off', { enabled: false }),
@@ -139,7 +140,7 @@ describe('McpHub 热重载', () => {
   });
 
   it('调用被禁用或不支持的 server 时给出可读原因，而不是静默失败', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('off', { enabled: false })]);
       await assert.rejects(() => hub.call('off', 'ping', {}), /unavailable.*disabled/);
@@ -153,7 +154,7 @@ describe('McpHub 热重载', () => {
 describe('McpHub 展示用的 target 打码', () => {
   /** `/mcps` 会把 target 打到屏幕上，而屏幕内容经常被截图或贴进 issue。 */
   async function target(specs: McpServerSpec[]): Promise<string> {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload(specs);
       return hub.listServers()[0]?.target ?? '';
@@ -193,7 +194,7 @@ describe('McpHub 展示用的 target 打码', () => {
 
   it('打码只发生在展示层：子进程仍然收到原值', async () => {
     // 「屏幕上看不到」和「真的没传进去」是两件事，只有问过子进程才算证明了前者。
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([
         { name: 'echo', command: process.execPath, args: [FIXTURE, '--api-key', 'sk-secret-value'] },
@@ -208,7 +209,7 @@ describe('McpHub 展示用的 target 打码', () => {
 
 describe('启动不阻塞在握手上', () => {
   it('reload 立即返回（握手在后台），connecting 可见，whenReady 收口', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       const result = await hub.reload([spec('echo')]);
       assert.deepEqual(result.added, ['echo']);
@@ -228,7 +229,7 @@ describe('启动不阻塞在握手上', () => {
   });
 
   it('call 在握手在途时等待同一个连接，而不是叠出第二个子进程', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('echo')]); // 不 whenReady：故意在握手进行中调用
       const raw = await hub.call('echo', 'ping', {});
@@ -252,7 +253,7 @@ function isAlive(pid: number | undefined): boolean {
 
 describe('listTools 排序', () => {
   it('输出按 server + 工具名排序，与连接建立的顺序无关', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       // zeta 先连接：若按插入序输出，zeta 会排在 alpha 前面。
       await hub.reload([spec('zeta'), spec('alpha')]);
@@ -269,7 +270,7 @@ describe('listTools 排序', () => {
 
 describe('McpHub lazy 连接', () => {
   it('lazy 条目 reload 后不 spawn：状态是 lazy 而未连接，且没有 problem', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('lazy-one', { lazy: true })]);
       await hub.whenReady();
@@ -284,7 +285,7 @@ describe('McpHub lazy 连接', () => {
   });
 
   it('call 命中 lazy server 时自动连接并成功', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('lazy-call', { lazy: true })]);
       const pid = await pidOf(hub, 'lazy-call');
@@ -296,7 +297,7 @@ describe('McpHub lazy 连接', () => {
   });
 
   it('listToolsOf 触发定向连接并返回工具；listTools 保持只读', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('lazy-list', { lazy: true })]);
       const tools = await hub.listToolsOf('lazy-list');
@@ -312,7 +313,7 @@ describe('McpHub lazy 连接', () => {
   });
 
   it('签名变化后，死掉的 lazy 连接不会在 reload 里被重新拉起', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('lazy-sig', { lazy: true })]);
       await pidOf(hub, 'lazy-sig');
@@ -328,7 +329,7 @@ describe('McpHub lazy 连接', () => {
   });
 
   it('非 lazy 条目行为不变：reload 后自动连接', async () => {
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('eager')]);
       await hub.whenReady();

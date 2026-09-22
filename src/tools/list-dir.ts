@@ -6,8 +6,8 @@ import { asString, clip, type ToolContext, type ToolResult, type ToolSpec } from
 const MAX_ENTRIES = 200;
 
 export const listDirTool: ToolSpec = {
-  name: 'list_dir',
-  description: 'List a directory inside the workspace — not shell ls or find. node_modules and .git are skipped, and a directory over the entry cap is truncated with an explicit count, so an entry missing here is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
+  name: 'ls',
+  description: 'Use ls — this tool, not the shell command — to list a directory inside the workspace. node_modules and .git are skipped, and a directory over the entry cap is truncated with an explicit count, so an entry missing here is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
   schema: {
     type: 'object',
     properties: {

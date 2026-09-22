@@ -17,7 +17,8 @@ import { runToolBatch } from './tool-run.js';
 import { CacheMissTracker, describeCacheMiss } from '../llm/cache-stats.js';
 import { ContextOverflowError } from '../llm/errors.js';
 import type { ChatMessage, LlmClient, TokenUsage } from '../llm/openai.js';
-import { McpHub } from '../mcp/hub.js';
+import { MCP_SERVICE, type McpService } from '../plugins/services.js';
+import { EMPTY_PLUGIN_SERVICES, type PluginServices } from '../plugins/types.js';
 import { JobBoard, jobNotificationText, type JobRecord, type SubagentInbox } from '../runtime/jobs.js';
 import type { SpillStore } from '../runtime/spill.js';
 import { TodoList } from '../runtime/todos.js';
@@ -81,7 +82,11 @@ export interface RunTurnOptions {
   contextWindow: number;
   listener?: AgentListener;
   signal?: AbortSignal;
-  mcp?: McpHub;
+  /**
+   * 插件提供的服务表。loop 只按接缝名取它要的（如 `sph-mcp` 的 server/tool 清单用于提示词），
+   * 插件没装时取到 undefined——相关段落随之消失，而不是留下指向不存在能力的指令。
+   */
+  services?: PluginServices;
   todos?: TodoList;
   jobs?: JobBoard;
   depth?: number;
@@ -186,7 +191,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   for (const warning of skills.warnings) options.listener?.({ type: 'status', text: warning });
   const todos = options.todos ?? new TodoList();
   const jobs = options.jobs ?? new JobBoard();
-  const mcp = options.mcp ?? new McpHub();
+  const services = options.services ?? EMPTY_PLUGIN_SERVICES;
+  const mcp = services.get<McpService>(MCP_SERVICE);
   const memory = options.memory ?? new TouchMemory(options.workspaceRoot);
   const worktrees = options.worktrees ?? new WorktreeStore();
 
@@ -202,12 +208,14 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       model: options.model,
       sandbox: options.sandbox.status.mode,
       skills: skills.catalog,
-      mcpTools: mcp.listTools(),
+      mcpTools: mcp?.listTools() ?? [],
       // 清单只随配置变化、不随连接状态变化（见 prompt.ts 的 lazyMcpServers 注释）。
-      lazyMcpServers: mcp.listServers().filter((server) => server.lazy).map((server) => server.name),
+      lazyMcpServers: (mcp?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
       // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
-      // 整段消失，而不是留下一句指向不存在工具的指令。
-      allowedTools: options.allowedTools,
+      // 整段消失，而不是留下一句指向不存在工具的指令。`allowedTools` 为空时过去会放行
+      // 全部段落——那会让被插件禁用/装载失败的工具（如 sph-mcp 没装时的 `mcp`）也留一段
+      // 指令，所以这里按**工具表里真实存在的名字**收口。
+      allowedTools: options.allowedTools ?? new Set(registry.list().map((tool) => tool.name)),
       // goal / lastFailure / planMode 不进 system：它们随时可变，放在前缀最头部意味着
       // 一次变化就作废全部消息历史的缓存。经 sessionStateMessage 以尾部 user 消息注入。
     });
@@ -463,7 +471,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         contextWindow: options.contextWindow,
         listener: childListener,
         signal: input.signal ?? options.signal,
-        mcp,
+        services,
         todos,
         jobs,
         memory,
@@ -520,7 +528,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     skills: skills.catalog,
     todos,
     jobs,
-    mcp,
+    services,
     async runShell(command, timeoutMs, kind) {
       return options.sandbox.run({
         ...shellArgv(command, kind),

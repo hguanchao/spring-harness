@@ -111,7 +111,7 @@ export {
 	type TuiStopOptions,
 	type ViewportTUI,
 } from "./tui.js";
-export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.js";
+export { TuiAltScreen, type SelectionHighlight, type TuiAltScreenOptions } from "./tui-alt-screen.js";
 // Utilities
 export {
 	clipLineToWidth,

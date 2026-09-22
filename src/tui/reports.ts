@@ -6,8 +6,8 @@
  * server 连不上、路径里带反引号，都是真实会遇到而手测很容易漏的分支。
  */
 
-import type { McpServerStatus } from '../mcp/hub.js';
-import type { McpSourceReport } from '../mcp/sources.js';
+import type { McpServerStatus } from '../plugins/services.js';
+import type { McpSourceReport } from '../plugins/services.js';
 import type { SkillEntry } from '../skills/scan.js';
 
 /**

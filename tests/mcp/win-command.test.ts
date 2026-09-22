@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { McpHub } from '../../src/mcp/hub.js';
-import { cmdArgumentLine, escapeCmdArgument, resolveWindowsCommand } from '../../src/mcp/win-command.js';
+import { McpHub } from '../../src/plugins/sph-mcp/hub.js';
+import { testHostFacts } from '../plugins/host-fixture.js';
+import { cmdArgumentLine, escapeCmdArgument, resolveWindowsCommand } from '../../src/plugins/sph-mcp/win-command.js';
 
 describe('escapeCmdArgument', () => {
   it('普通参数包双引号（外层引号同样要过 meta 转义）', () => {
@@ -137,7 +138,7 @@ describe('经 cmd.exe 启动 .cmd 启动器跑通 MCP 握手', { skip: process.p
     const { fileURLToPath } = await import('node:url');
     const fixture = fileURLToPath(new URL('./fixtures/minimal-server.mjs', import.meta.url));
     const dir = mkdtempSync(join(tmpdir(), 'sph-cmd-e2e-'));
-    const hub = new McpHub();
+    const hub = new McpHub(testHostFacts());
     try {
       // 启动器刻意不带扩展名的裸调用 + 带引号的路径参数，把 cmd 转义层也一起压到。
       const launcher = join(dir, 'launcher.cmd');

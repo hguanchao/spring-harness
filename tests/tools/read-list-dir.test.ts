@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { listDirTool } from '../../src/tools/list-dir.js';
 import { readFileTool } from '../../src/tools/read-file.js';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 
 function ctx(root: string): ToolContext {
@@ -14,7 +15,7 @@ function ctx(root: string): ToolContext {
     skills: [],
     todos: {} as ToolContext['todos'],
     jobs: {} as ToolContext['jobs'],
-    mcp: {} as ToolContext['mcp'],
+    services: EMPTY_PLUGIN_SERVICES,
     runShell: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     approve: async () => true,
     askUser: async () => '',
@@ -32,14 +33,14 @@ describe('read 对目录输入的处理', () => {
       const result = await readFileTool.execute({ path: 'sub' }, ctx(root));
       assert.equal(result.ok, false);
       assert.match(result.content, /not a file: sub/);
-      assert.match(result.content, /list_dir/);
+      assert.match(result.content, /use ls/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 });
 
-describe('list_dir 截断提示', () => {
+describe('ls 截断提示', () => {
   it('条目超过上限时说明总数与实际列出数', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-list-cap-'));
     try {

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { planFilePath } from '../../src/agent/plan.js';
 import { enterPlanModeTool, exitPlanModeTool } from '../../src/tools/plan.js';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -15,7 +16,7 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
     skills: [],
     todos: {} as ToolContext['todos'],
     jobs: {} as ToolContext['jobs'],
-    mcp: {} as ToolContext['mcp'],
+    services: EMPTY_PLUGIN_SERVICES,
     runShell: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     approve: async () => true,
     askUser: async () => '',

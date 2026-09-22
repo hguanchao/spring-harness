@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import type { EditorTheme, MarkdownTheme, SelectListTheme } from '../screen/index.js';
+import type { EditorTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '../screen/index.js';
 import { overlayPalette, PALETTE, type ThemeColor } from './palettes.js';
 
 export type { ThemeColor };
@@ -142,10 +142,13 @@ const ANSI_FG: Record<string, string> = {
   success: '92', error: '91', warning: '93',
 };
 
-/** ansi 模式的背景码：画布交还终端默认底（49）——「跟随终端」的核心；面层用亮黑（100）。 */
+/**
+ * ansi 模式的背景码：画布交还终端默认底（49）——「跟随终端」的核心；面层用亮黑（100）。
+ * 划词高亮这里不给码：ansi 模式退回反显，块底由终端的 16 色主题决定（见 Theme.selectionStyle）。
+ */
 const ANSI_BG: Record<string, string> = {
   bg: '49',
-  selectedBg: '100', userMessageBg: '100', toolPendingBg: '100',
+  userMessageBg: '100', toolPendingBg: '100',
   // 挂起条悬停底用 256 色深灰：16 色档位里没有「只亮一档」的中间带。
   steerHoverBg: '48;5;236',
 };
@@ -197,9 +200,14 @@ export class Theme {
   }
 
   fg(color: ThemeColor, text: string): string {
+    return `${this.fgSeq(color)}${text}\x1b[39m`;
+  }
+
+  /** 裸前景 SGR。只在需要自己管复位的地方用（如划词高亮块），包文字请用 fg()。 */
+  fgSeq(color: ThemeColor): string {
     const ansi = this.fgColors.get(color);
     if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-    return `${ansi}${text}\x1b[39m`;
+    return ansi;
   }
 
   /**
@@ -250,6 +258,23 @@ export class Theme {
     const ansi = this.bgColors.get(color);
     if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
     return ansi;
+  }
+
+  /**
+   * 划词高亮样式。终端原生拖选就是「实心块 + 对比色文字」：块底是终端默认前景色，
+   * 字色按块底明度取黑或白（Windows Terminal 的 ColorFix::GetLightness 规则）。
+   *
+   * 字色在这里现推而不是查色板：块底可被 `theme.json` 覆盖，写死字色会让深色块配上
+   * 深色字（浅底同理），划词直接看不见文字。推出来的字色只在正文/画布两档里取，够用。
+   *
+   * ansi 模式返回 undefined，让 TuiAltScreen 退回反显（SGR 7）——块底直接取自终端的
+   * 16 色主题，跟终端拖选的观感天然一致；自己上真彩反而盖掉用户的配色。
+   */
+  selectionStyle(): SelectionHighlight | undefined {
+    if (this.mode === 'ansi') return undefined;
+    const { r, g, b } = hexToRgb(this.palette.selectedBg);
+    const blockIsLight = 0.299 * r + 0.587 * g + 0.114 * b >= 128;
+    return { bg: this.bgSeq('selectedBg'), fg: this.fgSeq(blockIsLight ? 'bg' : 'text') };
   }
 
   bold(text: string): string {

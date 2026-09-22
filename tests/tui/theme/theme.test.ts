@@ -173,6 +173,41 @@ describe('画布底色', () => {
   });
 });
 
+describe('划词高亮', () => {
+  /**
+   * 回归点：划词块曾是画布上「亮一档的灰」(#242424)，跟终端原生拖选的实心块不是一个观感，
+   * 用户要求两者一致。终端（Windows Terminal）的规则是块底=终端默认前景色、字色按块底明度
+   * 取黑或白；sph 用同样的画法：块底取正文色，字色按块底明度在正文/画布两档里取。
+   */
+  it('块底取正文色、字色取画布色——亮块配暗字，与终端同一套画法', () => {
+    const t = new Theme(PALETTE, 'truecolor');
+    const style = t.selectionStyle();
+    assert.ok(style, 'truecolor 模式应有固定样式');
+    assert.equal(style.bg, '\x1b[48;2;198;198;198m', '块底=正文色 #c6c6c6');
+    assert.equal(style.fg, '\x1b[38;2;20;20;20m', '字色=画布色 #141414');
+  });
+
+  it('块底被 theme.json 改成深色时，字色自动翻成正文色——不会深底配深字', () => {
+    // 深色块（如品牌紫）：明度 < 128，字色必须取较亮的一档，否则划词看不见字。
+    const dark = new Theme({ ...PALETTE, selectedBg: '#1e1e2e' }, 'truecolor');
+    const darkStyle = dark.selectionStyle()!;
+    assert.equal(darkStyle.bg, '\x1b[48;2;30;30;46m');
+    assert.equal(darkStyle.fg, dark.fgSeq('text'), '深块应配正文亮字');
+    // 浅色块：字色取画布暗色。
+    const light = new Theme({ ...PALETTE, selectedBg: '#eeddcc' }, 'truecolor');
+    const lightStyle = light.selectionStyle()!;
+    assert.equal(lightStyle.fg, light.fgSeq('bg'), '浅块应配画布暗字');
+  });
+
+  it('256 色/真彩同一规则，只是量化档位不同', () => {
+    const t = new Theme(PALETTE, '256color');
+    const style = t.selectionStyle();
+    assert.ok(style, '256color 模式应有固定样式');
+    assert.match(style.bg, /^\x1b\[48;5;\d+m$/);
+    assert.match(style.fg, /^\x1b\[38;5;\d+m$/);
+  });
+});
+
 describe('标题与列表强调色', () => {
   const primary = colorsOf(theme.fg('primary', 'x'))[0];
 
@@ -208,6 +243,10 @@ describe('终端默认配色（ansi 模式）', () => {
     assert.equal(ansi.bg('bg', 'x'), '\x1b[49mx\x1b[49m');
     assert.equal(ansi.bgSeq('bg'), '\x1b[49m');
     assert.equal(ansi.bg('userMessageBg', 'x'), '\x1b[100mx\x1b[49m');
+  });
+
+  it('划词高亮退回反显：块底交给终端 16 色主题，不自己上真彩', () => {
+    assert.equal(ansi.selectionStyle(), undefined);
   });
 
   it('未映射的键回落默认前景，不抛错', () => {

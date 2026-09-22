@@ -10,12 +10,13 @@ It is written from scratch in TypeScript with five runtime dependencies — no C
 - **Sessions** — append-only JSONL per workspace; state (todos, goal, plan mode, token spend) is folded back on resume.
 - **Sandbox** — Windows restricted token + ACL, or Linux `bwrap`. Enforcement is *partial* and described as such, in the prompt and here.
 - **Three upstream protocols** — `chat-completions`, `responses`, `anthropic-messages`, with runtime parameter degradation so an endpoint that rejects `max_tokens` or `stream_options` is adapted to instead of failing.
-- **MCP** — stdio servers discovered from five config sources, with lazy reconnect and hot reload. On Windows, bare commands (`npx`…) are resolved via `PATH × PATHEXT`; `.cmd`/`.bat` launchers run through `cmd.exe` with cmd-safe escaping (a bare `npx` is not an `.exe`, so naive spawning fails with ENOENT).
+- **Plugins** — built-ins live in `src/plugins/`, third-party ones in `.sph/plugins/`. They register tools and provide services, and the core never imports them. `sph-mcp` ships as one, so MCP is an optional capability rather than a built-in. See [Plugins](#plugins).
+- **MCP** — provided by the bundled `sph-mcp` plugin: stdio servers discovered from five config sources, with lazy reconnect and hot reload. On Windows, bare commands (`npx`…) are resolved via `PATH × PATHEXT`; `.cmd`/`.bat` launchers run through `cmd.exe` with cmd-safe escaping (a bare `npx` is not an `.exe`, so naive spawning fails with ENOENT).
 - **Skills** — `SKILL.md` catalogs discovered from four roots.
 
 ## Requirements
 
-- Node.js **>= 22**
+- Node.js **>= 22**. Bundled plugins are compiled with sph, so only **third-party** `.ts` plugins need **>= 22.18** (>= 23.6 on the 23 line) — that is when Node's native type stripping became the default. Ship a third-party plugin as `.js`/`.mjs` to support older Node.
 - Windows or Linux for the sandbox. **macOS is not supported** — `sph` refuses to start rather than pretend to confine.
 
 ## Install
@@ -89,6 +90,53 @@ Theming: sph ships a fixed dark palette. Set `SPH_THEME=terminal` to drop hardco
 
 TUI commands: `/help` `/new` `/resume` `/skills` `/mcps` `/plan` `/goal` `/compact` `/model` `/provider` `/effort` `/permission`. `/resume <id>` switches straight to a session and bare `/resume` opens the picker; `/sessions` is an alias. `/compact [instructions]` folds older history into a checkpoint on demand, optionally steering what the summary emphasises. `/provider` switches provider in two steps: pick a provider, its upstream catalog is fetched, then pick a model — a model not yet declared in `models.json` is appended there before switching (a fetch failure degrades to the declared list). `/permission` sets the approval mode (`ask | auto | yolo`) and writes it back to `config.toml` as the `approval` key. `/skills` re-scans the skill roots on every open, and `/mcps` reports live server status and lets you enable/disable, add, remove, and reload — all reflect the current state rather than what the running turn started with.
 
+### Plugins
+
+A plugin is a module that extends sph. It exports a factory (or an object with `setup`), receives a `PluginApi`, and can **register tools** callable by the model and **provide services** other plugins and the UI can consume:
+
+```js
+// ~/.sph/plugins/git-guard.js
+export default function setup(api) {
+  api.registerTool({
+    name: 'git_guard',
+    description: 'Report whether the worktree is dirty before a command runs.',
+    schema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+    async execute(args) {
+      return { ok: true, content: api.clip(`checked ${String(args.command)}`) };
+    },
+  });
+  api.warn('git-guard is in dry-run mode');
+}
+```
+
+`.ts` works the same way (with the constraints below). sph does not publish `.d.ts` yet, so a TypeScript plugin either declares the shapes it uses inline or imports types from a checkout of this repo — the JS example above is the path of least resistance.
+
+Plugins are discovered from three roots. On a name clash the higher one wins as a whole:
+
+| Root | Scope | Form |
+|---|---|---|
+| `src/plugins/*` | Bundled with sph (`sph-mcp` lives here), compiled into `dist/` | Directory with `index.ts` |
+| `~/.sph/plugins/*` | Your own, every project | Directory or single file |
+| `<workspace>/.sph/plugins/*` | Project-local — **loaded only when the workspace is trusted** | Directory or single file |
+
+Third-party plugins go under `.sph/` rather than a `plugins/` directory at the repo root: it keeps them with the rest of sph's per-project state (`.sph/config.toml`) and away from source directories. A `package.json` can declare `sph.plugins: ["./a.ts", "./b.ts"]` for a multi-module plugin and `sph.name` to name it.
+
+A repository's `.sph/plugins/*.ts` is arbitrary code someone else wrote, so it goes behind the same trust gate as `AGENTS.md` and the sandbox: reading a stranger's repo must not execute what they shipped. Because third-party plugins outrank bundled ones, a workspace or user plugin **can** replace `sph-mcp` — legitimate for patching, but sph prints `plugin <name> shadows the bundled one` when it happens, since a swapped-out service is otherwise invisible.
+
+Turn one off in `config.toml`:
+
+```toml
+[plugins]
+disabled = ["sph-mcp"]   # MCP's tool and service both disappear
+```
+
+Notes that save time:
+
+- **Bundled vs third-party.** Code in `src/plugins/` is compiled with sph and can import core freely. Third-party plugins are loaded as TypeScript source by Node's type stripping, so they carry three constraints: **sibling imports need the `.ts` extension** (`./hub.ts`, not `./hub.js`), **only erasable syntax** (no `enum`, runtime `namespace`, or parameter properties), and **types from core, runtime from `api`** — `import type { … }` is erased and free, while a plain import cannot resolve, because core is in `dist/` and the plugin is not.
+- **Runtime capability comes from `PluginApi`, including `host.mergeChildEnv`** for spawning — credential scrubbing is host policy, and re-implementing it means leaking `SPH_API_KEY` to third-party processes.
+- **A broken plugin never blocks startup.** Import failures, bad default exports, `setup` throws, duplicate tool names, and duplicate service names all become warnings; the other plugins still load. Warnings print at startup and in `sph -p` (headless).
+- Services are the only channel between plugins — there is no global registry and no importing each other's implementation. `sph-mcp` provides the service named `sph-mcp`, which is how `/mcps` reaches MCP without core knowing what MCP is.
+
 ### MCP servers
 
 Servers are discovered from five sources. Later ones win on a name clash — a name resolves to the higher-priority definition as a whole (fields are not merged):
@@ -112,6 +160,13 @@ enabled_servers  = ["one-that-ships-off"]  # turn on what a source disables
 ```
 
 `/mcps` can add and remove entries, but only in sph's own config. Only **stdio** servers run; HTTP entries are still discovered and listed as unsupported rather than dropped, so "I configured it but nothing happened" always has a visible answer.
+
+If MCP is not wanted at all, disable the plugin rather than the servers — `/mcps` then says so instead of showing an empty list:
+
+```toml
+[plugins]
+disabled = ["sph-mcp"]
+```
 
 `--output-format json` emits one JSON object per agent event, ending with a `result` line, so scripts do not have to reassemble deltas:
 
@@ -141,6 +196,9 @@ Everything user-level lives under `~/.sph/` and never in the repository:
 | `models.json` | hand-written endpoint and model declarations (`providers` table) |
 | `sessions/<ws-key>/<id>.jsonl` | append-only session records (`message` / `event`), plus `current.json` pointer |
 | `spill/` | oversized tool results, kept out of context and referenced by path |
+| `plugins/` | third-party plugins, loaded in every project |
+
+Project-local state uses the same name inside the repository: `<workspace>/.sph/config.toml`, which is read from the workspace root down to the current directory (closest wins), and `<workspace>/.sph/plugins/`, a single directory at the workspace root that loads only when the workspace is trusted.
 
 Malformed session lines are skipped rather than failing the file. Multiple `sph` processes can run in the same directory (each gets its own conversation); `-c` / `--resume` of a session that is already open exits immediately.
 
@@ -151,18 +209,21 @@ src/
 ├── cli/         entry, arg parsing, runtime assembly (bootstrap), output formats
 ├── agent/       loop.ts (the turn loop) · prompt.ts · compact.ts · tool-run.ts
 │                memory.ts (AGENTS.md) · plan.ts · recap.ts · subagent-prompt.ts
-├── tools/       the 17 tools + capability sets and permission helpers
+├── tools/       the 18 core tools + capability sets and permission helpers
 ├── llm/         protocol adapters, SSE client, retry, error classification, compat caps
 ├── tui/         terminal UI: screen/ (framework) + components/ (app)
 ├── sandbox/     OS confinement: open.ts dispatches to windows/ or linux.ts
 ├── session/     JSONL store, event folding, repair, locking, export
-├── mcp/         stdio MCP client
+├── plugins/     plugin contract, discovery/loader, host, service seams, and the
+│                bundled sph-mcp plugin (the `mcp` tool is here, not in tools/)
 ├── runtime/     in-process shared resources: jobs, todos, spill, worktrees
 ├── permission/  approval policy + the LLM safety reviewer + grant store
 ├── config/      TOML load/validate, models.json registry, surgical save
 ├── workspace/   path boundary, root resolution, trust
 └── skills/      SKILL.md catalog scanning
 ```
+
+`src/plugins/services.ts` is the MCP **seam**: data shapes plus an interface, no implementation. Core keeps it so `/mcps`, the reports, and `[[mcp_servers]]` config parsing can name MCP's data without importing the plugin — otherwise disabling `sph-mcp` would not even compile. This is the same split dsh uses (`@deepseek-ai/dsh-mcp-client` provides `ctx.mcp` over a seam core owns).
 
 One turn of `runTurn` looks like this:
 

@@ -47,7 +47,7 @@ export function planHeading(plan: string): string | undefined {
 export function planModeSection(): string {
   return [
     'You are in plan mode: explore the codebase and design an implementation plan. Do not implement.',
-    'Use read, grep, glob, list_dir, ask_user, todo, skill, web_search, web_fetch, jobs, and explore subagents.',
+    'Use read, grep, glob, ls, ask_user, todo, skill, web_search, web_fetch, jobs, and explore subagents.',
     'Writes, edit, bash, pwsh, mcp, general subagents, and send_subagent_message are blocked until the user approves the plan.',
     'When the plan is complete, call exit_plan_mode with the FULL markdown, starting with a # heading that names it.',
     'If the user asks you to write a plan or the approach is still ambiguous, stay here until they approve.',

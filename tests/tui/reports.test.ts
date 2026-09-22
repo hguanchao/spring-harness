@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { renderMcpReport, renderSkillsReport } from '../../src/tui/reports.js';
-import type { McpServerStatus } from '../../src/mcp/hub.js';
-import type { McpSourceReport } from '../../src/mcp/sources.js';
+import type { McpServerStatus } from '../../src/plugins/services.js';
+import type { McpSourceReport } from '../../src/plugins/services.js';
 import type { SkillEntry } from '../../src/skills/scan.js';
 
 function skill(name: string, description: string, path = `/ws/skills/${name}/SKILL.md`): SkillEntry {

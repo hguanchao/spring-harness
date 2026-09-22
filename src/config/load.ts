@@ -11,8 +11,7 @@ import { sphConfigPath, sphModelsPath } from '../home.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
 import type { CompatProfile } from '../llm/compat.js';
 import { DEFAULT_MAX_RETRIES } from '../llm/retry.js';
-import type { McpServerConfig } from '../mcp/hub.js';
-import type { McpPreferences } from '../mcp/sources.js';
+import type { McpServerConfig, McpPreferences } from '../plugins/services.js';
 import { DEFAULT_SPILL_THRESHOLD } from '../runtime/spill.js';
 import type { SandboxMode } from '../sandbox/types.js';
 import { ConfigError } from './errors.js';
@@ -110,6 +109,14 @@ export interface SphConfig {
    * 之外的副作用，而且很难撤销。
    */
   mcpPreferences: McpPreferences;
+  /**
+   * 被关掉的插件名（`[plugins] disabled`）。
+   *
+   * 插件是可选能力，所以这里只有「关」没有「开」：默认全装，坏插件由装载失败自己暴露。
+   * 关掉 MCP 就是 `disabled = ["sph-mcp"]`——它的工具与服务一并消失，这正是把 MCP 做成
+   * 插件而不是核心能力的收益。
+   */
+  disabledPlugins: string[];
 }
 
 export function parseSandboxMode(value: string | undefined): SandboxMode {
@@ -193,6 +200,7 @@ export function loadConfig(options?: {
   const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
   const maxRetries = parseMaxRetries(file.max_retries);
   const mcpPreferences = parseMcpPreferences(file.mcp);
+  const disabledPlugins = parseDisabledPlugins(file.plugins);
   return {
     provider: providerName,
     model,
@@ -206,7 +214,7 @@ export function loadConfig(options?: {
     sandbox, reasoningEffort, approval, mcpServers,
     permissions, subagentApproval,
     compactModel, reviewModel, aux, spillThreshold, proxy, subagentMaxDepth, promptCache,
-    maxSessionTokens, maxRetries, mcpPreferences,
+    maxSessionTokens, maxRetries, mcpPreferences, disabledPlugins,
   };
 }
 
@@ -355,21 +363,35 @@ function parseMcpPreferences(value: unknown): McpPreferences {
   }
   const row = value as Record<string, unknown>;
   return {
-    disabledServers: parseServerNameList(row.disabled_servers, 'mcp.disabled_servers'),
-    enabledServers: parseServerNameList(row.enabled_servers, 'mcp.enabled_servers'),
-    lazyServers: parseServerNameList(row.lazy_servers, 'mcp.lazy_servers'),
+    disabledServers: parseNameList(row.disabled_servers, 'mcp.disabled_servers', 'server names'),
+    enabledServers: parseNameList(row.enabled_servers, 'mcp.enabled_servers', 'server names'),
+    lazyServers: parseNameList(row.lazy_servers, 'mcp.lazy_servers', 'server names'),
   };
 }
 
-function parseServerNameList(value: unknown, key: string): string[] {
+function parseNameList(value: unknown, key: string, noun: string): string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of server names`);
+  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of ${noun}`);
   return value.map((item, index) => {
     if (typeof item !== 'string' || item.trim() === '') {
       throw new ConfigError(`${key}[${index}] must be a non-empty string`);
     }
     return item.trim();
   });
+}
+
+/**
+ * `[plugins] disabled`：关掉的插件名。
+ *
+ * 与 `[mcp] disabled_servers` 同一套语义——列出不存在的插件名不算错误（你可能只是还没把
+ * 插件放进 `plugins/`），写成非数组才报错。
+ */
+function parseDisabledPlugins(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('plugins must be a table');
+  }
+  return parseNameList((value as Record<string, unknown>).disabled, 'plugins.disabled', 'plugin names');
 }
 
 /**

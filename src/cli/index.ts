@@ -155,11 +155,12 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       contextWindow: rt.config.contextWindow,
       sandbox: rt.sandbox,
       session: rt.session,
-      mcp: rt.mcp,
+      mcp: () => rt.mcp(),
       reloadMcp: () => rt.reloadMcp(),
       refreshMcpPreferences: () => rt.refreshMcpPreferences(),
       mcpPreferences: rt.mcpPreferences,
-      mcpSources: () => rt.mcpSources,
+      pluginReport: () => rt.plugins.report(),
+      pluginServices: rt.plugins,
       todos: rt.todos,
       jobs: rt.jobs,
       approvalMode: args.approval ?? rt.config.approval ?? 'ask',
@@ -189,7 +190,6 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       sessions: rt.sessions,
       driver: rt.driver,
       claimSession: (id) => rt.claimSession(id),
-      mcpWarnings: rt.mcpWarnings,
       ...(ui === undefined ? {} : { ui }),
     });
   } finally {
@@ -204,9 +204,10 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
 async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string): Promise<void> {
   const runtime = await bootstrap(args, workspaceRoot, 'error');
   if (!runtime) return;
-  const { session, sandbox, mcp, todos, jobs, config } = runtime;
+  const { session, sandbox, todos, jobs, config } = runtime;
   try {
-    for (const warning of runtime.mcpWarnings) process.stderr.write(`${warning}\n`);
+    // 插件问题先报：坏插件不该只在 TUI 里可见，headless 用户更需要看到它。
+    for (const warning of runtime.plugins.warnings()) process.stderr.write(`${warning}\n`);
 
     // 优先级：命令行 > 配置文件 > 内置默认。这样 /permission 写回 config 后下次启动仍生效。
     // config.model 是 bootstrap 折叠后的生效模型（--model 的 provider/id 限定已在此解析）。
@@ -253,7 +254,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       maxSubagentDepth: config.subagentMaxDepth,
       maxSessionTokens: config.maxSessionTokens,
       listener: output.listener,
-      mcp,
+      services: runtime.plugins,
       todos,
       jobs,
       goal: folded.goal,

@@ -199,7 +199,7 @@ describe('toResponsesInput', () => {
         role: 'assistant',
         content: '看目录',
         reasoning: [{ id: 'rs_1', encryptedContent: 'enc', summary: '先列目录' }],
-        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }],
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'ls', arguments: '{}' } }],
       },
     ]);
     assert.equal(items[1]?.type, 'reasoning');

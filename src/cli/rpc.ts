@@ -17,7 +17,7 @@ export async function runRpcLoop(runtime: Runtime, options: {
   effort?: Runtime['config']['reasoningEffort'];
   approval: 'ask' | 'auto' | 'yolo';
 }): Promise<void> {
-  const { session, sandbox, mcp, todos, jobs, config } = runtime;
+  const { session, sandbox, todos, jobs, config } = runtime;
   const client = runtime.makeClient({
     model: options.model,
     api: options.api,
@@ -64,7 +64,7 @@ export async function runRpcLoop(runtime: Runtime, options: {
         contextWindow: config.contextWindow,
         listener: output.listener,
         signal: abort.signal,
-        mcp,
+        services: runtime.plugins,
         todos,
         jobs,
         worktrees: runtime.worktrees,

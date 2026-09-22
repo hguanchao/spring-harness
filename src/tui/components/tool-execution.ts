@@ -45,7 +45,7 @@ function previewWindow(toolName: string): { first: number; last: number } {
   switch (toolName) {
     case 'read':
       return { first: 5, last: 3 };
-    case 'list_dir':
+    case 'ls':
     case 'grep':
       return { first: 8, last: 4 };
     case 'bash':
@@ -86,7 +86,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   grep: 'Grep',
   glob: 'Glob',
-  list_dir: 'List',
+  ls: 'List',
   bash: 'Bash',
   pwsh: 'Pwsh',
   web_search: 'Search',
@@ -124,7 +124,7 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
       return oneLine(pick('command', 'cmd'));
     case 'read':
     case 'write':
-    case 'list_dir':
+    case 'ls':
       return oneLine(pick('path', 'file_path', 'filePath'));
     case 'grep':
     case 'glob':
@@ -371,7 +371,7 @@ export class ToolExecutionComponent extends Container {
    */
   /** List 折叠行带 `(N entries)`，与 grok-build 的 List 标题同形。 */
   private listEntrySuffix(): string {
-    if (this.toolName !== 'list_dir' || !this.result || this.result.isError) return '';
+    if (this.toolName !== 'ls' || !this.result || this.result.isError) return '';
     const count = this.result.content.split(/\r\n|\r|\n/).filter((line) => line.trim() !== '').length;
     if (count === 0) return '';
     return ` (${count} ${count === 1 ? 'entry' : 'entries'})`;

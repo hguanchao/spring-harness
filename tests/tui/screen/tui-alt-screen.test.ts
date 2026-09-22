@@ -56,24 +56,28 @@ describe('applySelectionHighlight', () => {
     assert.ok(out.endsWith('\x1b[27m'));
   });
 
-  it('固定底色：开头铺底，文字前景码保留，0m 重置后重申底色，结尾 49m 复位', () => {
-    const bg = '\x1b[48;5;236m';
-    const out = applySelectionHighlight('\x1b[95m紫标题\x1b[0m后续', bg);
-    assert.ok(out.startsWith(bg));
-    assert.match(out, /\x1b\[95m\x1b\[48;5;236m紫标题/);
-    assert.match(out, /\x1b\[0m\x1b\[48;5;236m后续/);
-    assert.ok(out.endsWith('\x1b[49m'));
+  it('固定样式：开头铺底并换字色，文字自己的前景码被块样式盖掉，0m 重置后重申，结尾复位', () => {
+    const style = { bg: '\x1b[48;5;236m', fg: '\x1b[38;5;255m' };
+    const out = applySelectionHighlight('\x1b[95m紫标题\x1b[0m后续', style);
+    assert.ok(out.startsWith(`${style.bg}${style.fg}`));
+    // 块内文字自己的紫色被重申的块样式覆盖：先原码、再块底、再块内字色。
+    assert.match(out, /\x1b\[95m\x1b\[48;5;236m\x1b\[38;5;255m紫标题/);
+    assert.match(out, /\x1b\[0m\x1b\[48;5;236m\x1b\[38;5;255m后续/);
+    assert.ok(out.endsWith('\x1b[39m\x1b[49m'));
   });
 
   it('选区内自带背景码的片段：底色在 SGR 后重申，覆盖片段自己的底', () => {
-    const out = applySelectionHighlight('\x1b[41m红底字', '\x1b[100m');
-    assert.match(out, /\x1b\[41m\x1b\[100m红底字/);
+    const out = applySelectionHighlight('\x1b[41m红底字', { bg: '\x1b[100m', fg: '\x1b[30m' });
+    assert.match(out, /\x1b\[41m\x1b\[100m\x1b\[30m红底字/);
   });
 
   it('非 SGR 序列（OSC 8 超链接）不改属性，不触发底色重申', () => {
-    const out = applySelectionHighlight('\x1b]8;;https://u\x1b\\link\x1b]8;;\x1b\\', '\x1b[100m');
+    const out = applySelectionHighlight('\x1b]8;;https://u\x1b\\link\x1b]8;;\x1b\\', {
+      bg: '\x1b[100m',
+      fg: '\x1b[30m',
+    });
     assert.equal(out.match(/\x1b\[100m/g)!.length, 1);
-    assert.ok(out.endsWith('\x1b[49m'));
+    assert.ok(out.endsWith('\x1b[39m\x1b[49m'));
   });
 });
 

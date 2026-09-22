@@ -6,9 +6,9 @@
 
 ## 一、现状盘点
 
-当前 19 个工具：`read` `write` `edit` `glob` `grep` `list_dir` `bash` `pwsh` `skill` `todo`
-`ask_user` `web_search` `web_fetch` `jobs` `subagent` `send_subagent_message` `mcp`
-`enter_plan_mode` `exit_plan_mode`。
+当前 18 个核心工具（`mcp` 已随实现搬进 plugins/sph-mcp）：`read` `write` `edit` `glob` `grep` `ls` `bash` `pwsh` `skill` `todo`
+`ask_user` `web_search` `web_fetch` `jobs` `subagent` `send_subagent_message`
+`enter_plan_mode` `exit_plan_mode`。插件再经 PluginApi.registerTool 追加（当前是 sph-mcp 的 `mcp`）。
 
 ### 新增一个工具的真实成本
 

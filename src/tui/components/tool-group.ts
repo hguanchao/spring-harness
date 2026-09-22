@@ -94,7 +94,7 @@ const TOOL_VERB_KINDS: Record<string, VerbKind> = {
   skill: 'skill',
   grep: 'search',
   glob: 'search',
-  list_dir: 'dir',
+  ls: 'dir',
   web_search: 'webSearch',
   web_fetch: 'webSearch',
   subagent: 'subagent',

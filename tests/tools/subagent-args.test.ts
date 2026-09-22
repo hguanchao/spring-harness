@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { mcpTool } from '../../src/tools/mcp.js';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import { subagentTool } from '../../src/tools/subagent.js';
 import type { ToolContext } from '../../src/tools/types.js';
 
@@ -17,11 +17,7 @@ function ctx(spawned: Spawned[], approvals: string[] = []): ToolContext {
     skills: [],
     todos: {} as ToolContext['todos'],
     jobs: {} as ToolContext['jobs'],
-    mcp: {
-      listTools: () => [{ name: 'x' }],
-      listToolsOf: async () => [{ name: 'y' }],
-      call: async () => 'ok',
-    } as unknown as ToolContext['mcp'],
+    services: EMPTY_PLUGIN_SERVICES,
     runShell: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     approve: async (tool: string, detail: string) => {
       approvals.push(`${tool}|${detail}`);
@@ -70,24 +66,5 @@ describe('subagent 参数校验', () => {
       ['explore', 'none'],
       ['general', 'worktree'],
     ]);
-  });
-});
-
-describe('mcp 参数校验', () => {
-  it('未知 action 报错指向 action，而不是 server 缺失', async () => {
-    const result = await mcpTool.execute({ action: 'bogus' }, ctx([]));
-    assert.equal(result.ok, false);
-    assert.match(result.content, /unknown action: bogus/);
-    assert.equal(/server is required/.test(result.content), false);
-  });
-
-  it('call 走审批，list 不走', async () => {
-    const approvals: string[] = [];
-    const c = ctx([], approvals);
-    await mcpTool.execute({ action: 'call', server: 's', tool: 't', arguments: {} }, c);
-    assert.deepEqual(approvals, ['mcp|s.t']);
-    approvals.length = 0;
-    await mcpTool.execute({ action: 'list' }, c);
-    assert.deepEqual(approvals, []);
   });
 });

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { skillTool } from '../../src/tools/skill.js';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 
 function ctx(skills: ToolContext['skills']): ToolContext {
@@ -13,7 +14,7 @@ function ctx(skills: ToolContext['skills']): ToolContext {
     skills,
     todos: {} as ToolContext['todos'],
     jobs: {} as ToolContext['jobs'],
-    mcp: {} as ToolContext['mcp'],
+    services: EMPTY_PLUGIN_SERVICES,
     runShell: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     approve: async () => true,
     askUser: async () => '',

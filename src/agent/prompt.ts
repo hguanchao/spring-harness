@@ -1,7 +1,7 @@
 import { sphHome } from '../home.js';
 import type { SkillEntry } from '../skills/scan.js';
 import type { SandboxMode } from '../sandbox/types.js';
-import type { McpTool } from '../mcp/hub.js';
+import type { McpTool } from '../plugins/services.js';
 import { loadMemory, memoryToPrompt } from './memory.js';
 import { planModeSection } from './plan.js';
 
@@ -78,9 +78,9 @@ const TOOL_SECTIONS: ReadonlyArray<{ tool: string; text: string }> = [
       'Use glob — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*.ts" finds every matching file in the tree. Results are files only, never directories, and skip vendor trees (node_modules, dist, .git); a file missing from glob is not proof it does not exist.',
   },
   {
-    tool: 'list_dir',
+    tool: 'ls',
     text:
-      'Use list_dir — not find or ls — to see what a directory contains. node_modules and .git are skipped, and a directory over the entry cap is truncated with an explicit count, so a file missing from the listing is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
+      'Use ls — this tool, not the shell command — to see what a directory contains. node_modules and .git are skipped, and a directory over the entry cap is truncated with an explicit count, so a file missing from the listing is not proof it does not exist; use glob to search by name when you are unsure where a file lives.',
   },
   {
     tool: 'bash',
@@ -232,7 +232,7 @@ ${identityFacts}
 </boundaries>`,
 
     `<tool_calling>
-Prefer a specialized tool over a shell command whenever one fits: read rather than cat/head/tail, glob rather than find, list_dir rather than ls, grep rather than shell grep/rg, edit rather than sed/awk. Reserve bash or pwsh for work that genuinely needs a shell.
+Prefer a specialized tool over a shell command whenever one fits: read rather than cat/head/tail, glob rather than find, ls rather than shell ls, grep rather than shell grep/rg, edit rather than sed/awk. Reserve bash or pwsh for work that genuinely needs a shell.
 
 ${toolText}
 

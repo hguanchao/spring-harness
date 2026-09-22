@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { FileObservation, NOT_OBSERVED } from '../../src/tools/observe.js';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 import { writeTool } from '../../src/tools/write.js';
 import { searchReplaceTool } from '../../src/tools/search-replace.js';
@@ -16,7 +17,7 @@ function ctx(root: string, observation: FileObservation): ToolContext {
     skills: [],
     todos: {} as ToolContext['todos'],
     jobs: {} as ToolContext['jobs'],
-    mcp: {} as ToolContext['mcp'],
+    services: EMPTY_PLUGIN_SERVICES,
     runShell: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     approve: async () => true,
     askUser: async () => '',

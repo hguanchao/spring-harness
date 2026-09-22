@@ -10,8 +10,10 @@ import type { AgentDriver } from '../agent/loop.js';
 import type { ApiProtocol } from '../config/load.js';
 import type { ProviderDeclaration, ResolvedModel } from '../config/registry.js';
 import type { LlmClient, ReasoningEffort } from '../llm/openai.js';
-import type { McpHub, McpReloadResult } from '../mcp/hub.js';
-import type { McpPreferences, McpSourceReport } from '../mcp/sources.js';
+import type { McpReloadResult, McpPreferences, McpService } from '../plugins/services.js';
+import type { LoadedPlugin } from '../plugins/host.js';
+import type { PluginLoadFailure } from '../plugins/loader.js';
+import type { PluginServices } from '../plugins/types.js';
 import type { ApprovalMode, PermissionRules, SubagentApprovalPolicy } from '../permission/policy.js';
 import type { JobBoard } from '../runtime/jobs.js';
 import type { TodoList } from '../runtime/todos.js';
@@ -39,7 +41,14 @@ export interface TuiDeps {
   maxTokens?: number;
   sandbox: SandboxHandle;
   session: JsonlSession;
-  mcp: McpHub;
+  /**
+   * 取 `sph-mcp` 插件提供的服务。
+   *
+   * 是方法而不是字段：服务在插件装载后才存在，且**可能永远不存在**（插件被
+   * `[plugins] disabled` 关掉，或加载失败）。用方法表达「每次都要重新确认它在不在」，
+   * 界面据此如实显示「MCP 插件没装」，而不是对着一份空清单猜。
+   */
+  mcp(): McpService | undefined;
   /**
    * 重新发现并装载 MCP server（`/mcps` 里按 r、改完启停、或导入之后调用）。
    *
@@ -51,8 +60,10 @@ export interface TuiDeps {
   refreshMcpPreferences(): void;
   /** 生效中的 MCP 启停偏好，供弹窗显示当前状态。 */
   mcpPreferences: McpPreferences;
-  /** 最近一次发现的候选来源读取结果。 */
-  mcpSources(): readonly McpSourceReport[];
+  /** 已装载插件与导入失败的摘要，供 `/plugins` 与诊断显示。 */
+  pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[] };
+  /** 插件服务表；loop 按接缝名取用（sph-mcp 的清单进提示词），插件工具也靠它取兄弟服务。 */
+  pluginServices: PluginServices;
   todos: TodoList;
   jobs: JobBoard;
   approvalMode: ApprovalMode;

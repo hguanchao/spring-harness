@@ -32,7 +32,11 @@ export const PALETTE = {
   text: TEXT,
   thinkingText: PRIMARY,
 
-  selectedBg: CHROME,
+  /**
+   * 划词高亮块底：实心块 + 对比色文字，和终端的原生选区同一套画法——终端拿默认前景色当块底，
+   * 再按块底明度挑黑/白当字色。这里块底取正文色，字色由明度推出（见 Theme.selectionStyle）。
+   */
+  selectedBg: TEXT,
   scrollbarTrack: MUTED,
   /** 滑块前景：中性灰，与 dim 同色，不跟滚动状态变。 */
   scrollbarThumb: '#808080',

@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
-import { discoverMcpServers, externalSourcePaths, type DiscoverOptions, type McpDiscovery } from '../../src/mcp/sources.js';
+import { discoverMcpServers, externalSourcePaths, type DiscoverOptions, type McpDiscovery } from '../../src/plugins/sph-mcp/sources.js';
+import { testHostFacts } from '../plugins/host-fixture.js';
 
 interface Scaffold {
   root: string;
@@ -25,6 +26,7 @@ function scaffold(): Scaffold {
   // 信任门本身有专门的用例。
   const options = (overrides: Partial<DiscoverOptions> = {}): DiscoverOptions => ({
     workspaceRoot: root,
+    host: testHostFacts(),
     fromDir: root,
     home,
     sphHomeDir: sphHome,
@@ -349,7 +351,7 @@ describe('externalSourcePaths', () => {
     // home，这个 bug 一直没暴露，是拿真实 ~/.codex/config.toml 跑才发现的。
     const s = scaffold();
     try {
-      const paths = externalSourcePaths('user', { workspaceRoot: s.root, sphHomeDir: s.sphHome });
+      const paths = externalSourcePaths('user', { workspaceRoot: s.root, host: testHostFacts(), sphHomeDir: s.sphHome });
       assert.ok(paths.includes(join(homedir(), '.claude.json')));
       assert.ok(paths.includes(join(homedir(), '.codex', 'config.toml')));
       assert.equal(paths.some((path) => path.startsWith(s.sphHome)), false, '不该落在 ~/.sph 里');
@@ -362,7 +364,7 @@ describe('externalSourcePaths', () => {
     const s = scaffold();
     try {
       // 刻意不传 home：走生产默认值。
-      const discovery = discoverMcpServers({ workspaceRoot: s.root, fromDir: s.root, sphHomeDir: s.sphHome });
+      const discovery = discoverMcpServers({ workspaceRoot: s.root, host: testHostFacts(), fromDir: s.root, sphHomeDir: s.sphHome });
       const claude = discovery.reports.find((report) => report.path.endsWith('.claude.json'));
       assert.equal(claude?.path, join(homedir(), '.claude.json'));
     } finally {

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 import { searchReplaceTool } from '../../src/tools/search-replace.js';
 
@@ -13,7 +14,7 @@ function ctx(root: string): ToolContext {
     skills: [],
     todos: {} as ToolContext['todos'],
     jobs: {} as ToolContext['jobs'],
-    mcp: {} as ToolContext['mcp'],
+    services: EMPTY_PLUGIN_SERVICES,
     runShell: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     approve: async () => true,
     askUser: async () => '',

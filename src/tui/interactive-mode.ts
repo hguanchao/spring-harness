@@ -250,11 +250,11 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       : undefined;
 
     // 复制反馈落输入框右上角（状态行右侧），不走全屏 flash；未注入 deps.ui 的测试路径保持默认。
-    // 划词高亮用主题选中底：缺省反显会把彩色文字的前景色变成背景色。
+    // 划词高亮走主题实心块 + 对比字色，跟终端原生拖选同观感；ansi 模式 selectionStyle 为 undefined，退回反显。
     this.ui =
       deps.ui ??
       new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot, {
-        selectionBg: theme.bgSeq('selectedBg'),
+        selectionStyle: theme.selectionStyle(),
         onCopyFeedback: (message) => this.showCopyHint(message),
       });
     this.editor = new CustomEditor(this.ui, getEditorTheme(), {
@@ -650,7 +650,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         maxSessionTokens: this.deps.maxSessionTokens,
         listener: this.listener,
         signal: controller.signal,
-        mcp: this.deps.mcp,
+        services: this.deps.pluginServices,
         todos: this.deps.todos,
         jobs: this.deps.jobs,
         memory: new TouchMemory(this.deps.workspaceRoot),
@@ -1151,7 +1151,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       effort: this.effort,
       approvalMode: this.approval,
       sandboxMode: this.deps.sandbox.status.mode,
-      mcpServerCount: this.deps.mcp.listServers().length,
+      mcpServerCount: this.deps.mcp()?.listServers().length ?? 0,
     };
   }
 
@@ -1575,7 +1575,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         model: this.model,
         sandbox: this.deps.sandbox.status.mode,
         skills: scanSkills(this.deps.workspaceRoot).catalog,
-        mcpTools: this.deps.mcp.listTools(),
+        mcpTools: this.deps.mcp()?.listTools() ?? [],
         // goal / lastFailure / planMode 与 runTurn 同参：不进 system（前缀最头部），
         // 跨轮次状态由 runTurn 以尾部 user 消息注入。
       }),

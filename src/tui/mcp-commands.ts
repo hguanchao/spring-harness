@@ -29,8 +29,30 @@ export interface McpCommandHost {
  */
 export async function commandMcps(host: McpCommandHost): Promise<void> {
   const { ui, deps } = host;
+  // 服务取一次就够：插件不会在会话中途卸载，每轮迭代都判空只是噪音。
+  // 但它**确实可能不存在**（`[plugins] disabled = ["sph-mcp"]`，或插件加载失败），
+  // 那种情况必须如实说明——对着空清单说「0 个 server」会让人去查 server 配置，
+  // 而真正的原因是提供 MCP 能力的插件根本没装。
+  const service = deps.mcp();
+  if (!service) {
+    await showMessageDialog(ui, {
+      title: 'MCP plugin not loaded',
+      text: [
+        'The `sph-mcp` plugin provides MCP support, and it is not loaded.',
+        '',
+        'Check `[plugins] disabled` in your config, and that the plugin exists at one of:',
+        '  <sph install>/plugins/sph-mcp',
+        '  ~/.sph/plugins/sph-mcp',
+        '  <workspace>/plugins/sph-mcp',
+        '',
+        'Plugin load problems are printed at startup.',
+      ].join('\n'),
+      hint: 'Esc close',
+    });
+    return;
+  }
   for (;;) {
-    const servers = deps.mcp.listServers();
+    const servers = service.listServers();
     const choice = await showSelectDialog(ui, {
       title: `MCP servers (${servers.length})`,
       maxVisible: 14,
@@ -51,9 +73,9 @@ export async function commandMcps(host: McpCommandHost): Promise<void> {
       await showMessageDialog(ui, {
         title: 'MCP servers',
         text: renderMcpReport({
-          servers: deps.mcp.listServers(),
-          warnings: [...(deps.mcpWarnings ?? [])],
-          sources: [...deps.mcpSources()],
+          servers: service.listServers(),
+          warnings: [...(service.warnings())],
+          sources: [...service.sources()],
         }),
         hint: 'Esc close · status is live',
       });
@@ -87,7 +109,7 @@ export async function reloadMcpWithNotice(host: McpCommandHost): Promise<void> {
     parts.length === 0 ? 'MCP: reloaded, nothing changed' : `MCP: reloaded · ${parts.join(' · ')}`,
     'dim',
   );
-  for (const warning of deps.mcpWarnings ?? []) host.addNotice(warning, 'warn');
+  for (const warning of deps.mcp()?.warnings() ?? []) host.addNotice(warning, 'warn');
 }
 
 async function addMcpServer(host: McpCommandHost): Promise<void> {
@@ -118,7 +140,7 @@ async function addMcpServer(host: McpCommandHost): Promise<void> {
   await reloadMcpWithNotice(host);
 
   // 写进去却被项目级同名条目盖住是「设置不生效」的典型来源，必须当场说出来。
-  const written = deps.mcp.listServers().find((server) => server.name === name);
+  const written = deps.mcp()?.listServers().find((server) => server.name === name);
   if (written !== undefined && written.origin.path !== deps.configPath) {
     host.addNotice(
       `${name} is overridden by ${written.origin.label} (closer/project config wins)`,
@@ -129,7 +151,7 @@ async function addMcpServer(host: McpCommandHost): Promise<void> {
 
 async function manageMcpServer(host: McpCommandHost, name: string): Promise<void> {
   const { ui, deps } = host;
-  const server = deps.mcp.listServers().find((item) => item.name === name);
+  const server = deps.mcp()?.listServers().find((item) => item.name === name);
   if (server === undefined) return; // 列表是上一轮取的，条目可能已经不在了
   type Action = { value: string; label: string; description?: string };
   const items: Action[] = [

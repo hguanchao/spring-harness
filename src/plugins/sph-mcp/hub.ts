@@ -1,8 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { join } from 'node:path';
-import { mergeChildEnv } from '../sandbox/env.js';
-import { errorMessage } from '../util.js';
+import type { PluginHostFacts } from '../types.js';
 import { cmdArgumentLine, resolveWindowsCommand } from './win-command.js';
+
+/**
+ * `error instanceof Error ? message : String(error)`。
+ * 本地三行，不值得为它撑大宿主 api 面。
+ */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export interface McpServerConfig {
   name: string;
@@ -144,9 +151,21 @@ export class McpHub {
   /** 在途握手：按名字去重（call 的懒重连不该叠出第二个子进程），whenReady 等它们落定。 */
   private readonly inFlight = new Map<string, Promise<void>>();
   private nextId = 1;
+  /**
+   * 宿主事实。只用到 `mergeChildEnv`：spawn 第三方 server 必须走宿主那套凭据擦除，
+   * 直接传 process.env 会把 SPH_API_KEY 一类凭据送进别的进程。
+   *
+   * 由构造函数注入而不是 import 宿主实现——插件只从 core 引类型，运行时的宿主能力
+   * 一律经 api 拿（详见 src/plugins/types.ts 的模块说明）。
+   */
+  private readonly host: PluginHostFacts;
+
+  constructor(host: PluginHostFacts) {
+    this.host = host;
+  }
 
   /**
-   * 异步握手失败的出口。bootstrap 把它接进 mcpWarnings 容器，TUI 才能在弹窗之外
+   * 异步握手失败的出口。sph-mcp 插件把它接进自己的警告容器，TUI 才能在弹窗之外
    * 也看到「server 没起来」；不设置则只记在 `problems`（`listServers()` 可见）。
    */
   onProblem: (message: string) => void = () => {};
@@ -286,8 +305,8 @@ export class McpHub {
         this.problems.delete(spec.name);
       })
       .catch((error: unknown) => {
-        this.problems.set(spec.name, errorMessage(error));
-        this.onProblem(`${spec.name}: ${errorMessage(error)}`);
+        this.problems.set(spec.name, describeError(error));
+        this.onProblem(`${spec.name}: ${describeError(error)}`);
       })
       .finally(() => {
         if (this.inFlight.get(spec.name) === task) this.inFlight.delete(spec.name);
@@ -371,7 +390,7 @@ export class McpHub {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       // 擦除 KEY/TOKEN/SPH_* 后再叠 spec.env：MCP 自己的密钥可以显式转交，宿主的不行。
-      env: mergeChildEnv(spec.env),
+      env: this.host.mergeChildEnv(spec.env),
     };
     if (process.platform === 'win32') {
       const resolved = resolveWindowsCommand(launchCommand);
@@ -422,7 +441,7 @@ export class McpHub {
     } catch (error) {
       this.safeKill(child);
       this.connections.delete(spec.name);
-      this.problems.set(spec.name, errorMessage(error));
+      this.problems.set(spec.name, describeError(error));
       throw error;
     }
     this.problems.delete(spec.name);
