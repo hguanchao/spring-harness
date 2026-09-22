@@ -54,9 +54,7 @@ describe('代码块统一中性灰', () => {
     }
   });
 
-  it('语法高亮链路已整体移除：主题不提供 highlightCode，syntax 色板不再出现在代码块里', () => {
-    const themeObj = getMarkdownTheme();
-    assert.equal(themeObj.highlightCode, undefined, '主题不再接高亮');
+  it('语法高亮链路已整体移除：syntax 色板不再出现在代码块里', () => {
     const syntax = colorsOf(theme.fg('syntaxKeyword', 'x'))[0];
     const body = markdownOf('```bash\nnpm run build\n```').render(100);
     assert.equal(

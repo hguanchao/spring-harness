@@ -58,23 +58,6 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
-/**
- * 围栏是否已闭合。缩进代码块没有围栏，视为闭合。
- * 流式输出时未闭合的半截 fence 不高亮，避免 token 颜色跟着增量乱跳。
- */
-function isClosedCodeFence(token: Tokens.Code): boolean {
-	const raw = token.raw;
-	const open = /^(?: {0,3})(`{3,}|~{3,})/.exec(raw);
-	if (!open) return true;
-	const marker = open[1];
-	const body = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
-	const lastNl = body.lastIndexOf("\n");
-	if (lastNl < 0) return false;
-	const last = body.slice(lastNl + 1);
-	const close = /^(?: {0,3})(`{3,}|~{3,})[ \t]*$/.exec(last);
-	return Boolean(close && close[1][0] === marker[0] && close[1].length >= marker.length);
-}
-
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
@@ -123,8 +106,7 @@ export interface MarkdownTheme {
 	emphasis?: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
-	highlightCode?: (code: string, lang?: string) => string[];
-	/** Prefix applied to each rendered code block line (default: "  ") */
+	/** 代码块每行的缩进，缺省两个空格。代码一律走 codeBlock，不再按语言上色。 */
 	codeBlockIndent?: string;
 }
 
@@ -390,19 +372,8 @@ export class Markdown implements Component {
 				const indent = this.theme.codeBlockIndent ?? "  ";
 				const codeToken = token as Tokens.Code;
 				lines.push(this.theme.codeBlockBorder(`\`\`\`${codeToken.lang || ""}`));
-				const highlight = this.theme.highlightCode && isClosedCodeFence(codeToken)
-					? this.theme.highlightCode
-					: undefined;
-				if (highlight) {
-					const highlightedLines = highlight(codeToken.text, codeToken.lang);
-					for (const hlLine of highlightedLines) {
-						lines.push(`${indent}${hlLine}`);
-					}
-				} else {
-					const codeLines = codeToken.text.split("\n");
-					for (const codeLine of codeLines) {
-						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
-					}
+				for (const codeLine of codeToken.text.split("\n")) {
+					lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
 				}
 				lines.push(this.theme.codeBlockBorder("```"));
 				if (nextTokenType && nextTokenType !== "space") {
