@@ -69,6 +69,9 @@ function globToRegExp(pattern: string): RegExp {
  *
  * 返回 undefined 表示解析不了：未闭合引号、截断的操作符（`npm test &&`）、
  * 连续分隔符（`a ;; b`）。解析不了的命令绝不能被 allow 规则静默放行。
+ *
+ * 引号里的 `$(...)` 和 bash 反引号这里看不见（引号不是切点）。那部分不交给 allow，
+ * 见 hidesCommandSubstitution。
  */
 export function splitShellCommands(command: string): string[] | undefined {
   const parts: string[] = [];
@@ -185,6 +188,47 @@ export function splitShellCommands(command: string): string[] | undefined {
 const COMPOUND_COMMAND_TOOLS = new Set(['bash', 'pwsh']);
 
 /**
+ * 这一段里还有拆分器打不开的命令替换。
+ *
+ * 双引号里的 `$(...)` bash 与 pwsh 都会执行；bash 反引号在单引号外也会执行。
+ * 它们都不是切点，所以 `echo "$(rm -rf /)"` 整段仍像 echo，allow 的前缀 glob 会放行。
+ * 单引号内不执行。未加引号的 `$(...)` 已经被括号切点拆开，不在这里重复拦截。
+ * pwsh 的反引号是转义，不是替换。
+ *
+ * 这只撤掉 allow。yolo 下一条 `rm*` 的 deny 仍然匹配不到引号里面——那要完整 shell 解析。
+ */
+function hidesCommandSubstitution(segment: string, tool: 'bash' | 'pwsh'): boolean {
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = undefined;
+      continue;
+    }
+    // 与 splitShellCommands 同一套反斜杠：被转义的 $ / ` 不是替换。
+    if (ch === '\\' && i + 1 < segment.length) {
+      i += 1;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = undefined;
+        continue;
+      }
+      if (ch === '$' && segment[i + 1] === '(') return true;
+      if (tool === 'bash' && ch === '`') return true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (tool === 'bash' && ch === '`') return true;
+  }
+  return false;
+}
+
+/**
  * 一条规则是否命中。
  *
  * 语法 `<tool>` 或 `<tool>:<pattern>`，**只按第一个冒号切分**：shell 命令里冒号很常见
@@ -209,7 +253,8 @@ function ruleMatches(entry: string, request: ApprovalRequest, detail = approvalD
  * 即命中——`npm test && rm -rf /` 里那段 rm 逃不掉；allow 必须覆盖**每一个**子命令，
  * 漏一段就落回模式决定。解析不了的命令（未闭合引号、截断的操作符、未闭合的子 shell）
  * 不允许被 allow 规则放行，fail-closed 交回模式；deny/ask 仍按原文兜底匹配，
- * 能拦一条是一条。mcp/web_search 的 command 不是 shell 语义，保持整串匹配。
+ * 能拦一条是一条。段内还有打不开的命令替换时同样不给 allow。
+ * mcp/web_search 的 command 不是 shell 语义，保持整串匹配。
  */
 export function evaluateRules(
   rules: PermissionRules | undefined,
@@ -240,6 +285,9 @@ export function evaluateRules(
     const verdict = denyOrAsk(part);
     if (verdict) return verdict;
   }
+  // 段内还有打不开的替换：deny/ask 已经按看得见的文本查过，allow 不再凭整段前缀放行。
+  const shell = request.tool === 'pwsh' ? 'pwsh' : 'bash';
+  if (parts.some((part) => hidesCommandSubstitution(part, shell))) return undefined;
   // allow：每一段都得有规则罩着，漏一段就不算通过。
   if (parts.every((part) => rules.allow.some((entry) => ruleMatches(entry, request, part)))) {
     return 'allow';
