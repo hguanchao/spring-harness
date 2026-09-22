@@ -125,16 +125,16 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
   }
 
   // 到这一步确定要进 TUI，才付加载成本。
-  const { runTui, confirmWorkspaceTrust, TuiAltScreen, ProcessTerminal } = await import('../tui/index.js');
+  const { runTui, confirmWorkspaceTrust, createScreen } = await import('../tui/index.js');
 
   // 未信任时先 start 替代屏幕画信任页；主界面接手同一块屏，中间不退。
-  let ui: InstanceType<typeof TuiAltScreen> | undefined;
+  let ui: ReturnType<typeof createScreen> | undefined;
   let runtime: Runtime | undefined;
   let deferredError: string | undefined;
   try {
     const needsTrustUi = !args.trust && !isWorkspaceTrusted(workspaceRoot);
     if (needsTrustUi) {
-      ui = new TuiAltScreen(new ProcessTerminal(), false, workspaceRoot);
+      ui = createScreen(workspaceRoot);
       const decision = confirmWorkspaceTrust(workspaceRoot, ui);
       ui.start();
       if (!(await decision)) {

@@ -4,7 +4,7 @@
  * 每段带 emoji 前缀、用 | 分隔；上下文段按用量水位变色（越接近上限越醒目），其余段 dim。
  */
 
-import { type Component, visibleWidth } from '../core/index.js';
+import { type Component, visibleWidth } from '../screen/index.js';
 import { theme } from '../theme/theme.js';
 
 export interface FooterUsage {

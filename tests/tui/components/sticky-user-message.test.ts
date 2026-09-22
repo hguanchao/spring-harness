@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { renderLayoutFrame } from '../../../src/tui/core/layout.js';
-import { visibleWidth } from '../../../src/tui/core/utils.js';
-import { BLOCK_GAP, Text, VStack } from '../../../src/tui/components/primitives.js';
-import { ScrollView } from '../../../src/tui/components/scroll-view.js';
+import { renderLayoutFrame } from '../../../src/tui/screen/layout.js';
+import { visibleWidth } from '../../../src/tui/screen/utils.js';
+import { BLOCK_GAP, Text, VStack } from '../../../src/tui/screen/primitives.js';
+import { ScrollView } from '../../../src/tui/screen/scroll-view.js';
 import {
   computeStickyLayout,
   compositeStickyUserMessages,

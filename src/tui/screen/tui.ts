@@ -459,7 +459,8 @@ export interface TUI extends Component {
 	onMouseMotion?: (x: number, y: number) => void;
 }
 
-export const VIEWPORT_TUI = Symbol.for("@earendil-works/pi-tui/viewport");
+/** 备用屏幕才有的视口能力。模块内 Symbol，不用 Symbol.for。 */
+export const VIEWPORT_TUI = Symbol("sph.screen.viewport");
 
 export interface ViewportTUI extends TUI {
 	readonly [VIEWPORT_TUI]: true;

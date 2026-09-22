@@ -4,7 +4,7 @@
  * 参考实现 pi 的 builtInHeader 承担同样的职责（logo、键位提示、更新日志）。
  */
 
-import { type Component, truncateToWidth } from '../core/index.js';
+import { type Component, truncateToWidth } from '../screen/index.js';
 import { theme } from '../theme/theme.js';
 import { keyText } from './interaction.js';
 

@@ -7,7 +7,7 @@
  * 转录里的工具行不共用这一套：那里只留 `Subagent N 描述 总耗时`。
  */
 
-import { Container, isViewportTUI, Text, truncateToWidth, visibleWidth, type TUI } from '../core/index.js';
+import { Container, isViewportTUI, Text, truncateToWidth, visibleWidth, type TUI } from '../screen/index.js';
 import { theme } from '../theme/theme.js';
 import { formatDuration } from '../../util.js';
 

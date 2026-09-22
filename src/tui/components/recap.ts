@@ -13,7 +13,7 @@
  * 所以 pending 被撤掉时不会留下一道空行。
  */
 
-import { BLOCK_GAP, type Component, type TuiMouseEvent, type TuiMouseEventResult, wrapTextWithAnsi } from '../core/index.js';
+import { BLOCK_GAP, type Component, type TuiMouseEvent, type TuiMouseEventResult, wrapTextWithAnsi } from '../screen/index.js';
 import { theme } from '../theme/theme.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT } from './tool-execution.js';
 

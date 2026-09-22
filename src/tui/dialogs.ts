@@ -23,8 +23,8 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	truncateToWidth,
-} from './core/index.js';
-import { renderRoundedBox } from './core/utils.js';
+} from './screen/index.js';
+import { renderRoundedBox } from './screen/utils.js';
 import { getMarkdownTheme, getSelectListTheme, theme } from './theme/theme.js';
 
 const DEFAULT_HINT = '↑/↓ select · Enter confirm · Esc cancel';

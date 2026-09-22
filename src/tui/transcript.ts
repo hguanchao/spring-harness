@@ -11,8 +11,8 @@
 
 import type { SubagentEvent } from '../agent/events.js';
 import { flattenWhitespace, formatDuration } from '../util.js';
-import { Text } from './core/index.js';
-import type { Container, TUI, VStack } from './core/index.js';
+import { Text } from './screen/index.js';
+import type { Container, TUI, VStack } from './screen/index.js';
 import { AssistantMessageComponent } from './components/assistant-message.js';
 import { SubagentTaskComponent } from './components/subagent-task.js';
 import { WorkingLabel } from './components/interaction.js';

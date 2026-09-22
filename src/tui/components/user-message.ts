@@ -12,8 +12,8 @@ import {
   type Component,
   type TuiMouseEvent,
   type TuiMouseEventResult,
-} from '../core/index.js';
-import { truncateToWidth, visibleWidth, wrapOsc133Zones } from '../core/utils.js';
+} from '../screen/index.js';
+import { truncateToWidth, visibleWidth, wrapOsc133Zones } from '../screen/utils.js';
 import { getMarkdownTheme, theme } from '../theme/theme.js';
 import { STICKY_USER_MESSAGE } from './sticky-user-message.js';
 

@@ -5,7 +5,7 @@
  * 展开工具输出…）由这里定义，参考实现 pi 也是同样的分层。
  */
 
-import { formatKeyText, type KeyId, matchesKey } from './core/index.js';
+import { formatKeyText, type KeyId, matchesKey } from './screen/index.js';
 
 export { formatKeyText };
 

@@ -5,7 +5,7 @@ import {
 	type LayoutViewport,
 	type StackLayoutEntry,
 	type StackLayoutNode,
-} from "../core/layout.js";
+} from "./layout.js";
 import {
 	type Component,
 	Container,
@@ -15,8 +15,8 @@ import {
 	type TuiMouseDispatchResult,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
-} from "../core/tui.js";
-import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../core/utils.js";
+} from "./tui.js";
+import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";
 import { formatStatusElapsed, formatStatusTokens } from "../../util.js";
 import { theme } from "../theme/theme.js";
 

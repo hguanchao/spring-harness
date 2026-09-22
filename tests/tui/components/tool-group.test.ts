@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { TUI, TuiMouseEvent } from '../../../src/tui/core/index.js';
+import type { TUI, TuiMouseEvent } from '../../../src/tui/screen/index.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from '../../../src/tui/components/tool-execution.js';
 import { ToolGroupComponent } from '../../../src/tui/components/tool-group.js';
 import { selectRow } from '../../../src/tui/components/selectable-row.js';

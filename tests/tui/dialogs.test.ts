@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { showInputDialog, showMessageDialog, showSelectDialog } from '../../src/tui/dialogs.js';
-import { resolveOverlayWidth, type Component, type OverlayHandle, type OverlayOptions, type TUI } from '../../src/tui/core/index.js';
+import { resolveOverlayWidth, type Component, type OverlayHandle, type OverlayOptions, type TUI } from '../../src/tui/screen/index.js';
 
 const handle = {
 	hide: () => {},

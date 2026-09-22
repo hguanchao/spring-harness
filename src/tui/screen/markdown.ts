@@ -1,7 +1,7 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
-import { getCapabilities, hyperlink } from "../core/terminal-image.js";
-import type { Component } from "../core/tui.js";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../core/utils.js";
+import { getCapabilities, hyperlink } from "./terminal-image.js";
+import type { Component } from "./tui.js";
+import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "./utils.js";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -47,8 +47,8 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 		return;
 	}
 
-	// Trim streamed partial closing fences so code blocks do not shrink/flicker
-	// when the final fence character arrives. See https://github.com/earendil-works/pi/issues/5825.
+	// 流式输出时闭合围栏会逐字到达。半截围栏留在 token 里会让代码块先变高再缩回去。
+	// 末行只是围栏字符的前缀时先剪掉，等完整围栏到了再收口。
 	const marker = /^(`{3,}|~{3,})/.exec(token.raw)?.[1];
 	const lastLine = token.raw.split("\n").pop();
 	if (!marker || !lastLine || lastLine.length >= marker.length || lastLine !== marker[0]?.repeat(lastLine.length)) {

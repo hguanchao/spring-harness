@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Text, VStack } from '../../../src/tui/components/primitives.js';
-import { ScrollView } from '../../../src/tui/components/scroll-view.js';
-import { contentPaintRight, getScrollbarGeometry, getScrollViewBox, renderLayoutFrame } from '../../../src/tui/core/layout.js';
-import { stripTerminalSequences } from '../../../src/tui/core/utils.js';
+import { Text, VStack } from '../../../src/tui/screen/primitives.js';
+import { ScrollView } from '../../../src/tui/screen/scroll-view.js';
+import { contentPaintRight, getScrollbarGeometry, getScrollViewBox, renderLayoutFrame } from '../../../src/tui/screen/layout.js';
+import { stripTerminalSequences } from '../../../src/tui/screen/utils.js';
 
 describe('ScrollView 布局缓存', () => {
   it('同代缓存命中后 follow-end 改了 scrollTop，文档仍跟着平移', () => {

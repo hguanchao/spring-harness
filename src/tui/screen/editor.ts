@@ -1,8 +1,8 @@
-import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "../core/autocomplete.js";
-import { getKeybindings } from "../core/keybindings.js";
-import { decodePrintableKey, matchesKey } from "../core/keys.js";
+import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "./autocomplete.js";
+import { getKeybindings } from "./keybindings.js";
+import { decodePrintableKey, matchesKey } from "./keys.js";
 import { theme } from "../theme/theme.js";
-import { consumeBracketedPaste, findWordBackward, findWordForward, KillRing, UndoStack } from "../core/editor-support.js";
+import { consumeBracketedPaste, findWordBackward, findWordForward, KillRing, UndoStack } from "./editor-support.js";
 import {
 	type Component,
 	CURSOR_MARKER,
@@ -10,7 +10,7 @@ import {
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
-} from "../core/tui.js";
+} from "./tui.js";
 import {
 	cjkBreakRegex,
 	getGraphemeSegmenter,
@@ -19,7 +19,7 @@ import {
 	renderRoundedBox,
 	sliceByColumn,
 	visibleWidth,
-} from "../core/utils.js";
+} from "./utils.js";
 import { SelectList, type SelectItem, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.js";
 
 const graphemeSegmenter = getGraphemeSegmenter();

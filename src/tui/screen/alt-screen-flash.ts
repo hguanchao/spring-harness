@@ -1,5 +1,5 @@
-import type { Component } from "../core/tui.js";
-import { truncateToWidth } from "../core/utils.js";
+import type { Component } from "./tui.js";
+import { truncateToWidth } from "./utils.js";
 
 const DEFAULT_DURATION_MS = 1000;
 

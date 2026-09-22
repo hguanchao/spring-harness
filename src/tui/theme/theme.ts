@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import type { EditorTheme, MarkdownTheme, SelectListTheme } from '../core/index.js';
+import type { EditorTheme, MarkdownTheme, SelectListTheme } from '../screen/index.js';
 import { overlayPalette, PALETTE, type ThemeColor } from './palettes.js';
 
 export type { ThemeColor };

@@ -1,4 +1,4 @@
-import type { ScrollView } from "../components/scroll-view.js";
+import type { ScrollView } from "./scroll-view.js";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.js";
 import {
 	extractAnsiCode,
@@ -9,7 +9,8 @@ import {
 	visibleWidth,
 } from "./utils.js";
 
-export const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
+/** 布局节点取值。模块内 Symbol，不注册到全局，避免和别的运行时撞名。 */
+export const LAYOUT_NODE = Symbol("sph.screen.layout-node");
 
 export interface LayoutViewport {
 	width: number;

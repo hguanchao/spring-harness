@@ -1,5 +1,5 @@
-import { LAYOUT_NODE, type ScrollLayoutNode } from "../core/layout.js";
-import { type Component, Container } from "../core/tui.js";
+import { LAYOUT_NODE, type ScrollLayoutNode } from "./layout.js";
+import { type Component, Container } from "./tui.js";
 
 export type ScrollViewScrollbar = "hidden" | "auto" | "always";
 

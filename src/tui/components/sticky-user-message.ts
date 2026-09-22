@@ -6,9 +6,9 @@
  * 自管视口上的软件吸顶，不是终端原生 sticky。
  */
 
-import { BLOCK_GAP } from './primitives.js';
-import { getScrollViewBox, type LayoutBox, type LayoutFrame } from '../core/layout.js';
-import { compositeTuiLine, type Component } from '../core/tui.js';
+import { BLOCK_GAP } from '../screen/primitives.js';
+import { getScrollViewBox, type LayoutBox, type LayoutFrame } from '../screen/layout.js';
+import { compositeTuiLine, type Component } from '../screen/tui.js';
 
 export const STICKY_USER_MESSAGE = Symbol.for('sph.sticky-user-message');
 

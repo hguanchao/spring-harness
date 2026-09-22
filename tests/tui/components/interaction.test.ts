@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { TUI } from '../../../src/tui/core/index.js';
-import { stripTerminalSequences, visibleWidth } from '../../../src/tui/core/index.js';
+import type { TUI } from '../../../src/tui/screen/index.js';
+import { stripTerminalSequences, visibleWidth } from '../../../src/tui/screen/index.js';
 import { formatStatusElapsed, formatStatusTokens } from '../../../src/util.js';
 import { formatWorkingWarning, IdleStatus, WorkingLabel, WorkingStatusIndicator, workingWarningKey } from '../../../src/tui/components/interaction.js';
 

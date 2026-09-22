@@ -20,7 +20,7 @@ import type { SandboxHandle } from '../sandbox/types.js';
 import type { JsonlSession } from '../session/store.js';
 import type { SessionFactory } from '../session/types.js';
 import type { ToolRegistry } from '../tools/index.js';
-import type { Terminal, TUI } from './core/index.js';
+import type { Terminal, TUI } from './screen/index.js';
 
 export interface TuiDeps {
   workspaceRoot: string;

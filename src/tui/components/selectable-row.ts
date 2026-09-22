@@ -3,8 +3,8 @@
  * 自管视口上的软件选中，不是终端原生选区。
  */
 
-import type { LayoutBox, LayoutFrame } from '../core/layout.js';
-import { compositeTuiLine, type Component, type TuiMouseEvent, type TuiMouseEventResult } from '../core/tui.js';
+import type { LayoutBox, LayoutFrame } from '../screen/layout.js';
+import { compositeTuiLine, type Component, type TuiMouseEvent, type TuiMouseEventResult } from '../screen/tui.js';
 import { theme } from '../theme/theme.js';
 
 /** 选中条左缘：工具行 `TOOL_GROUP_INDENT` 里再左 1 列，不盖住 ●。 */

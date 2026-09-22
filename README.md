@@ -153,7 +153,7 @@ src/
 │                memory.ts (AGENTS.md) · plan.ts · recap.ts · subagent-prompt.ts
 ├── tools/       the 17 tools + capability sets and permission helpers
 ├── llm/         protocol adapters, SSE client, retry, error classification, compat caps
-├── tui/         self-contained terminal UI: core/ (framework) + components/ (app)
+├── tui/         terminal UI: screen/ (framework) + components/ (app)
 ├── sandbox/     OS confinement: open.ts dispatches to windows/ or linux.ts
 ├── session/     JSONL store, event folding, repair, locking, export
 ├── mcp/         stdio MCP client

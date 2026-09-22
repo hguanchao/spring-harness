@@ -8,8 +8,8 @@
 
 import type { SteeringInbox } from '../runtime/jobs.js';
 import { flattenWhitespace } from '../util.js';
-import { visibleWidth } from './core/utils.js';
-import type { Component, TuiMouseEvent, TuiMouseEventResult } from './core/index.js';
+import { visibleWidth } from './screen/utils.js';
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from './screen/index.js';
 import { handleSelectablePress } from './components/selectable-row.js';
 import { theme } from './theme/theme.js';
 import type { CustomEditor } from './components/custom-editor.js';

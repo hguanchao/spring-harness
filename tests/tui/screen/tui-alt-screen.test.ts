@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applySelectionHighlight } from '../../../src/tui/core/tui-alt-screen.js';
+import { applySelectionHighlight } from '../../../src/tui/screen/tui-alt-screen.js';
 
 describe('applySelectionHighlight', () => {
   it('缺省反显：开头 7m，SGR 码后重申，结尾 27m 复位', () => {

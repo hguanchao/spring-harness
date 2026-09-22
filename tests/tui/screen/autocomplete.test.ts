@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { CombinedAutocompleteProvider, findFdBinary } from '../../../src/tui/core/autocomplete.js';
+import { CombinedAutocompleteProvider, findFdBinary } from '../../../src/tui/screen/autocomplete.js';
 
 const signal = () => new AbortController().signal;
 

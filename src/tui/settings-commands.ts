@@ -14,10 +14,10 @@ import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
 import { APPROVAL_MODES, type ApprovalMode } from '../permission/policy.js';
 import { errorMessage } from '../util.js';
 import { primaryColumnWidthFor } from './commands.js';
-import type { TUI, SelectItem } from './core/index.js';
+import type { TUI, SelectItem } from './screen/index.js';
 import type { TuiDeps } from './deps.js';
 import { showInputDialog, showLoadingDialog } from './dialogs.js';
-import { visibleWidth } from './core/utils.js';
+import { visibleWidth } from './screen/utils.js';
 import type { CustomEditor } from './components/custom-editor.js';
 
 /** `/provider` 拉上游目录的超时。刻意短：不少中转站根本没有 /models 目录端点（返回 502 或干脆挂住），走代理时 CONNECT 隧道也会拖很久。目录只是发现手段，降级路径（已声明 + 手动输入）才是兜底。 */

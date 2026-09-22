@@ -3,32 +3,26 @@ import { dirname, join } from "node:path";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const moduleRequire = createRequire(import.meta.url);
-const TUI_PACKAGE_NAME = "@earendil-works/pi-tui";
-
+/**
+ * 可选的平台原生助手：剪贴板和修饰键。
+ *
+ * 找不到和 sph 放在一起的 .node 就退化（剪贴板不可用，修饰键视为没按下）。
+ * 不按别的包名去 node_modules 里搜，否则屏幕实现会绑死在外部项目的安装布局上。
+ */
 export interface NativeModuleCandidateOptions {
 	moduleUrl?: string;
 	execPath?: string;
-	resolvePackage?: (specifier: string) => string;
 }
 
 export function getNativeModuleCandidates(nativePath: string, options: NativeModuleCandidateOptions = {}): string[] {
 	const moduleDir = dirname(fileURLToPath(options.moduleUrl ?? import.meta.url));
-	const candidates: string[] = [];
-
-	try {
-		const packageEntry = (options.resolvePackage ?? moduleRequire.resolve)(TUI_PACKAGE_NAME);
-		candidates.push(join(dirname(packageEntry), "..", nativePath));
-	} catch {
-		// Standalone binaries do not have an installed TUI package.
-	}
-
-	candidates.push(
-		join(moduleDir, "..", nativePath),
-		join(moduleDir, nativePath),
-		join(dirname(options.execPath ?? process.execPath), nativePath),
+	return Array.from(
+		new Set([
+			join(moduleDir, "..", nativePath),
+			join(moduleDir, nativePath),
+			join(dirname(options.execPath ?? process.execPath), nativePath),
+		]),
 	);
-	return Array.from(new Set(candidates));
 }
 
 const cjsRequire = createRequire(import.meta.url);

@@ -8,7 +8,7 @@
 import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
 import { createSession, listSessions, type JsonlSession } from '../session/store.js';
 import { primaryColumnWidthFor } from './commands.js';
-import type { TUI, SelectItem } from './core/index.js';
+import type { TUI, SelectItem } from './screen/index.js';
 import type { TuiDeps } from './deps.js';
 import { showConfirmDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import type { CustomEditor } from './components/custom-editor.js';

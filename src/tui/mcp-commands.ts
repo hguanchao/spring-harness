@@ -6,7 +6,7 @@
  */
 
 import { removeSphMcpServer, setSphMcpLazy, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../config/mcp-write.js';
-import type { TUI } from './core/index.js';
+import type { TUI } from './screen/index.js';
 import type { TuiDeps } from './deps.js';
 import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import { mcpStateLabel, renderMcpReport, renderMcpTools } from './reports.js';

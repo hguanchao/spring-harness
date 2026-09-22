@@ -77,7 +77,7 @@ import {
   VStack,
   ScrollView,
   formatKeyText,
-} from './core/index.js';
+} from './screen/index.js';
 import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
 import { showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
@@ -105,7 +105,7 @@ import { commandHistory, commandNewSession, commandResume, commandExport, type S
 import { commandModel, commandProvider, commandEffort, commandPermission, cycleApprovalMode, type SettingsCommandHost } from './settings-commands.js';
 import type { TuiDeps } from './deps.js';
 
-// 对外类型面保持在原路径：tui/index.ts 与外部调用方仍从本模块取 TuiDeps。
+/** 命令模块和测试从这里拿 TuiDeps。进程入口不再把屏幕类型一起导出。 */
 export type { TuiDeps } from './deps.js';
 
 function message(error: unknown): string {

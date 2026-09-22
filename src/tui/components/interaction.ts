@@ -1,4 +1,4 @@
-import { type Component, Loader, type TUI, visibleWidth } from "../core/index.js";
+import { type Component, Loader, type TUI, visibleWidth } from "../screen/index.js";
 import { appKeyText, type AppKeybinding } from "../app-keybindings.js";
 import { theme } from "../theme/theme.js";
 import { flattenWhitespace } from "../../util.js";

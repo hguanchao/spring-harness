@@ -1,8 +1,8 @@
-import { getKeybindings } from "../core/keybindings.js";
-import { decodeKittyPrintable } from "../core/keys.js";
-import { consumeBracketedPaste, findWordBackward, findWordForward, KillRing, UndoStack } from "../core/editor-support.js";
-import { type Component, CURSOR_MARKER, type Focusable, type TuiMouseEvent, type TuiMouseEventResult } from "../core/tui.js";
-import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, truncateToWidth, visibleWidth } from "../core/utils.js";
+import { getKeybindings } from "./keybindings.js";
+import { decodeKittyPrintable } from "./keys.js";
+import { consumeBracketedPaste, findWordBackward, findWordForward, KillRing, UndoStack } from "./editor-support.js";
+import { type Component, CURSOR_MARKER, type Focusable, type TuiMouseEvent, type TuiMouseEventResult } from "./tui.js";
+import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, truncateToWidth, visibleWidth } from "./utils.js";
 
 const segmenter = getGraphemeSegmenter();
 

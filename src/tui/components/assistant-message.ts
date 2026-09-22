@@ -10,8 +10,8 @@
  * 多次增量在 render(width) 里合并成一次重建。
  */
 
-import { BLOCK_GAP, Container, Markdown, type MarkdownTheme, Spacer } from '../core/index.js';
-import { wrapOsc133Zones } from '../core/utils.js';
+import { BLOCK_GAP, Container, Markdown, type MarkdownTheme, Spacer } from '../screen/index.js';
+import { wrapOsc133Zones } from '../screen/utils.js';
 import { getMarkdownTheme, theme } from '../theme/theme.js';
 
 /** 对齐 opencode TextPart 的 paddingLeft=3。 */

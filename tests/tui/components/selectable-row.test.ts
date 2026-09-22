@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { LayoutBox, LayoutFrame } from '../../../src/tui/core/layout.js';
-import type { Component } from '../../../src/tui/core/tui.js';
+import type { LayoutBox, LayoutFrame } from '../../../src/tui/screen/layout.js';
+import type { Component } from '../../../src/tui/screen/tui.js';
 import {
   asSelectableRow,
   compositeRowSelection,

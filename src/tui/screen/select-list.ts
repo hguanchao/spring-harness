@@ -1,6 +1,6 @@
-import { getKeybindings } from "../core/keybindings.js";
-import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../core/tui.js";
-import { truncateToWidth, visibleWidth } from "../core/utils.js";
+import { getKeybindings } from "./keybindings.js";
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from "./tui.js";
+import { truncateToWidth, visibleWidth } from "./utils.js";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const PRIMARY_COLUMN_GAP = 2;

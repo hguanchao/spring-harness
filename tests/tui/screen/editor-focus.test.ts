@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { TUI } from '../../../src/tui/core/index.js';
-import { stripTerminalSequences } from '../../../src/tui/core/index.js';
-import { Editor } from '../../../src/tui/components/editor.js';
+import type { TUI } from '../../../src/tui/screen/index.js';
+import { stripTerminalSequences } from '../../../src/tui/screen/index.js';
+import { Editor } from '../../../src/tui/screen/editor.js';
 
 const IDLE = '\x1b[90m';
 const FOCUS = '\x1b[95m';

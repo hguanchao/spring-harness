@@ -1,4 +1,8 @@
-// Core TUI interfaces and classes
+/**
+ * 屏幕实现的内部入口。
+ *
+ * 交互模式、对话框、消息块从这里取控件。进程入口不重新导出这些类型。
+ */
 
 export { Marked, type Token, type Tokens } from "marked";
 // Autocomplete support
@@ -20,30 +24,30 @@ export {
 	Text,
 	type LoaderIndicatorOptions,
 	type MouseRegionHandler,
-} from "../components/primitives.js";
-export { Editor, type EditorOptions, type EditorTheme } from "../components/editor.js";
-export { Input } from "../components/input.js";
-export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "../components/markdown.js";
+} from "./primitives.js";
+export { Editor, type EditorOptions, type EditorTheme } from "./editor.js";
+export { Input } from "./input.js";
+export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./markdown.js";
 export {
 	ScrollView,
 	type ScrollViewOptions,
 	type ScrollViewScrollbar,
 	type ScrollViewScrollToOptions,
-} from "../components/scroll-view.js";
+} from "./scroll-view.js";
 export {
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
 	type SelectListTheme,
 	type SelectListTruncatePrimaryContext,
-} from "../components/select-list.js";
+} from "./select-list.js";
 export {
 	type StackChild,
 	type StackEntry,
 	type StackEntryOptions,
 	type StackOptions,
 	VStack,
-} from "../components/primitives.js";
+} from "./primitives.js";
 // Fuzzy matching
 export { type FuzzyMatch, fuzzyFilter } from "./fuzzy.js";
 // Keybindings

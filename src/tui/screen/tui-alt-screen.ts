@@ -1,5 +1,5 @@
-import { AltScreenFlashContainer } from "../components/alt-screen-flash.js";
-import { ScrollView } from "../components/scroll-view.js";
+import { AltScreenFlashContainer } from "./alt-screen-flash.js";
+import { ScrollView } from "./scroll-view.js";
 import { compositeRowSelection, isSelectableRow, selectRow } from "../components/selectable-row.js";
 import { compositeStickyUserMessages, stickyOverlayRects } from "../components/sticky-user-message.js";
 import { getKeybindings } from "./keybindings.js";

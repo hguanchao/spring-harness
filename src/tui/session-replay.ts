@@ -18,7 +18,7 @@ import type { JsonlSession } from '../session/store.js';
 import type { CustomEditor } from './components/custom-editor.js';
 import { AssistantMessageComponent } from './components/assistant-message.js';
 import { UserMessageComponent } from './components/user-message.js';
-import type { VStack } from './core/index.js';
+import type { VStack } from './screen/index.js';
 import { getMarkdownTheme } from './theme/theme.js';
 import type { TranscriptProjection } from './transcript.js';
 

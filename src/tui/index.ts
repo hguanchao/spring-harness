@@ -1,29 +1,16 @@
 /**
- * TUI 模块公共入口。
+ * TUI 进程入口。
  *
- * 分层与参考实现 pi 对齐：
- *   - core/       —— 通用终端 UI 框架（差分渲染、布局、组件、键位、编辑器、Markdown…）
- *   - theme/      —— 命名色板与组件主题
- *   - components/ —— 应用组件（消息块、工具块、底栏、编辑器外壳…）
- *   - interactive-mode.ts —— 交互模式装配与调度
+ * 外面只拿到启动交互和信任确认。屏幕控件留在 screen/，不从这里再导出一套通用库。
+ * createScreen 是例外：信任页要先占住备用屏幕，主界面接手同一块，所以创建权在调用方。
  */
+
+import { ProcessTerminal, TuiAltScreen, type ViewportTUI } from './screen/index.js';
 
 export { runTui, type TuiDeps } from './interactive-mode.js';
 export { confirmWorkspaceTrust } from './trust.js';
 
-// 框架与主题的常用导出，方便测试与其他呈现层复用。
-export * from './core/index.js';
-export {
-  getEditorTheme,
-  getMarkdownTheme,
-  getSelectListTheme,
-  theme,
-  Theme,
-  type ThemeColor,
-} from './theme/theme.js';
-export { AssistantMessageComponent } from './components/assistant-message.js';
-export { UserMessageComponent } from './components/user-message.js';
-export { ToolExecutionComponent } from './components/tool-execution.js';
-export { FooterComponent, formatTokens } from './components/footer.js';
-export { HeaderComponent } from './components/header.js';
-export { DynamicBorder } from './components/interaction.js';
+/** 信任页与主界面共用的备用屏幕。调用方 start 一次，结束时 stop。 */
+export function createScreen(workspaceRoot: string): ViewportTUI {
+  return new TuiAltScreen(new ProcessTerminal(), false, workspaceRoot);
+}

@@ -29,7 +29,7 @@ import {
   type TuiMouseEventResult,
   visibleWidth,
   VStack,
-} from '../core/index.js';
+} from '../screen/index.js';
 import { formatDuration } from '../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
