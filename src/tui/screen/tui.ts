@@ -1,5 +1,6 @@
 /**
- * Minimal TUI implementation with differential rendering
+ * 屏幕控件：组件树、焦点、浮层、按键与鼠标分发。
+ * 备用屏幕上的按行差分绘制在 TuiAltScreen。
  */
 
 import { performance } from "node:perf_hooks";
@@ -144,12 +145,9 @@ export function isFocusable(component: Component | null): component is Component
 }
 
 /**
- * Cursor position marker - APC (Application Program Command) sequence.
- * This is a zero-width escape sequence that terminals ignore.
- * Components emit this at the cursor position when focused.
- * TUI finds and strips this marker, then positions the hardware cursor there.
+ * 光标位置标记：零宽 APC，终端忽略。聚焦控件画在光标处，绘制层剥掉后把硬件光标摆过去。
  */
-export const CURSOR_MARKER = "\x1b_pi:c\x07";
+export const CURSOR_MARKER = "\x1b_sph:c\x07";
 
 export { visibleWidth };
 
@@ -386,9 +384,7 @@ export class Container implements Component {
 	}
 }
 
-/**
- * TUI - Main class for managing terminal UI with differential rendering
- */
+/** 浮层叠进一行：overlay 盖住 [startCol, startCol+overlayWidth)，两侧保留底稿。 */
 const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
 /** Composite overlay content into a terminal line at a fixed column. */

@@ -163,6 +163,38 @@ export interface TuiAltScreenOptions {
 }
 
 /**
+ * 把这一帧和上一帧比完再写终端。未改的行跳过；宽高变了才清屏。
+ * 清行用默认底（OSC 11 / SGR 49），不用真彩 48;2，避免 Windows Terminal 上画出浅带。
+ */
+export function paintScreenDiff(options: {
+  screen: readonly string[];
+  previous: readonly string[];
+  previousWidth: number;
+  previousHeight: number;
+  width: number;
+  height: number;
+  cursor?: { row: number; col: number } | null;
+  showHardwareCursor?: boolean;
+}): { buffer: string; fullRedraw: boolean } {
+  const { screen, previous, previousWidth, previousHeight, width, height, cursor, showHardwareCursor } = options;
+  const fullRedraw = previous.length === 0 || previousWidth !== width || previousHeight !== height;
+  let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
+  if (fullRedraw) buffer += `\x1b[49m\x1b[2J`;
+  for (let row = 0; row < height; row++) {
+    if (!fullRedraw && screen[row] === previous[row]) continue;
+    buffer += `\x1b[${row + 1};1H\x1b[49m\x1b[2K${screen[row] ?? ""}`;
+  }
+  if (cursor) {
+    buffer += `\x1b[${cursor.row + 1};${Math.min(width, cursor.col) + 1}H`;
+    buffer += showHardwareCursor ? "\x1b[?25h" : "\x1b[?25l";
+  } else {
+    buffer += "\x1b[?25l";
+  }
+  buffer += END_SYNCHRONIZED_OUTPUT;
+  return { buffer, fullRedraw };
+}
+
+/**
  * 划词高亮：给选中片段叠一层选中底色，文字自己的前景色原样保留。
  *
  * 反显（SGR 7）与固定底色生命周期同构：开头开启，之后每个 SGR 码都可能是 0（全重置）
@@ -1380,31 +1412,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => clipLineToWidth(line, width));
 
-		const fullRedraw =
-			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;
-
-		// 清行/清屏用默认底（OSC 11），不要再铺 SGR 48;2;#141414。
-		// Windows Terminal 上不透明真彩填充和 OSC 11 画布（含亚克力）不是同一块颜色，
-		// 状态行每帧 2K 就会在转录区深色空行上画出一条 #141414 浅带。
-		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
-		if (fullRedraw) {
-			this.fullRedrawCount += 1;
-			buffer += `\x1b[49m\x1b[2J`;
-		}
-
-		for (let row = 0; row < height; row++) {
-			if (!fullRedraw && screen[row] === this.previousScreen[row]) continue;
-			buffer += `\x1b[${row + 1};1H\x1b[49m\x1b[2K${screen[row] ?? ""}`;
-		}
-
-		if (cursorPos) {
-			buffer += `\x1b[${cursorPos.row + 1};${Math.min(width, cursorPos.col) + 1}H`;
-			buffer += this.getShowHardwareCursor() ? "\x1b[?25h" : "\x1b[?25l";
-		} else {
-			buffer += "\x1b[?25l";
-		}
-		buffer += END_SYNCHRONIZED_OUTPUT;
-		this.terminal.write(buffer);
+		const painted = paintScreenDiff({
+			screen,
+			previous: this.previousScreen,
+			previousWidth: this.previousScreenWidth,
+			previousHeight: this.previousScreenHeight,
+			width,
+			height,
+			cursor: cursorPos,
+			showHardwareCursor: this.getShowHardwareCursor(),
+		});
+		if (painted.fullRedraw) this.fullRedrawCount += 1;
+		this.terminal.write(painted.buffer);
 
 		this.previousScreen = screen;
 		this.previousScreenWidth = width;

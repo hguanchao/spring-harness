@@ -2,8 +2,72 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { Text, VStack } from '../../../src/tui/screen/primitives.js';
 import { ScrollView } from '../../../src/tui/screen/scroll-view.js';
-import { contentPaintRight, getScrollbarGeometry, getScrollViewBox, renderLayoutFrame } from '../../../src/tui/screen/layout.js';
+import {
+  allocateStackSizes,
+  contentPaintRight,
+  getScrollbarGeometry,
+  getScrollViewBox,
+  renderLayoutFrame,
+} from '../../../src/tui/screen/layout.js';
 import { stripTerminalSequences } from '../../../src/tui/screen/utils.js';
+
+describe('allocateStackSizes', () => {
+  const leaf = { component: { render: () => ['x'], invalidate() {} } };
+
+  it('不给可用高度时按 intrinsic / basis', () => {
+    const sizes = allocateStackSizes(
+      [
+        { ...leaf, basis: 3 },
+        { ...leaf, basis: 'auto' },
+      ],
+      [9, 4],
+      undefined,
+      1,
+    );
+    assert.deepEqual(sizes, [3, 4]);
+  });
+
+  it('有剩余时按 grow 权重分配', () => {
+    const sizes = allocateStackSizes(
+      [
+        { ...leaf, basis: 2, grow: 1 },
+        { ...leaf, basis: 2, grow: 3 },
+      ],
+      [2, 2],
+      12,
+      0,
+    );
+    assert.equal(sizes[0]! + sizes[1]!, 12);
+    assert.ok(sizes[1]! > sizes[0]!, 'grow 3 应分到更多');
+  });
+
+  it('超出时按 shrink 收，总和等于可用高度，不低于 minSize', () => {
+    const sizes = allocateStackSizes(
+      [
+        { ...leaf, basis: 10, shrink: 1, minSize: 3 },
+        { ...leaf, basis: 10, shrink: 1, minSize: 3 },
+      ],
+      [10, 10],
+      8,
+      0,
+    );
+    assert.equal(sizes[0]! + sizes[1]!, 8);
+    assert.ok(sizes[0]! >= 3 && sizes[1]! >= 3);
+  });
+
+  it('gap 从可用高度里扣掉再分配', () => {
+    const sizes = allocateStackSizes(
+      [
+        { ...leaf, basis: 2, grow: 1 },
+        { ...leaf, basis: 2, grow: 1 },
+      ],
+      [2, 2],
+      9,
+      1,
+    );
+    assert.equal(sizes[0]! + sizes[1]!, 8);
+  });
+});
 
 describe('ScrollView 布局缓存', () => {
   it('同代缓存命中后 follow-end 改了 scrollTop，文档仍跟着平移', () => {

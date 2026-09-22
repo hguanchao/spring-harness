@@ -1,6 +1,52 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applySelectionHighlight } from '../../../src/tui/screen/tui-alt-screen.js';
+import { applySelectionHighlight, paintScreenDiff } from '../../../src/tui/screen/tui-alt-screen.js';
+
+describe('paintScreenDiff', () => {
+  it('第一帧清屏并写出每一行', () => {
+    const { buffer, fullRedraw } = paintScreenDiff({
+      screen: ['a', 'b'],
+      previous: [],
+      previousWidth: 0,
+      previousHeight: 0,
+      width: 4,
+      height: 2,
+    });
+    assert.equal(fullRedraw, true);
+    assert.ok(buffer.includes('\x1b[2J'));
+    assert.ok(buffer.includes('\x1b[1;1H'));
+    assert.ok(buffer.includes('\x1b[2;1H'));
+    assert.ok(buffer.includes('a'));
+    assert.ok(buffer.includes('b'));
+  });
+
+  it('未改的行不写，改过的行清后再写', () => {
+    const { buffer, fullRedraw } = paintScreenDiff({
+      screen: ['a', 'B'],
+      previous: ['a', 'b'],
+      previousWidth: 4,
+      previousHeight: 2,
+      width: 4,
+      height: 2,
+    });
+    assert.equal(fullRedraw, false);
+    assert.equal(buffer.includes('\x1b[2J'), false);
+    assert.equal(buffer.includes('\x1b[1;1H'), false);
+    assert.ok(buffer.includes('\x1b[2;1H\x1b[49m\x1b[2KB'));
+  });
+
+  it('尺寸变了整屏重画', () => {
+    const { fullRedraw } = paintScreenDiff({
+      screen: ['a'],
+      previous: ['a'],
+      previousWidth: 4,
+      previousHeight: 2,
+      width: 8,
+      height: 1,
+    });
+    assert.equal(fullRedraw, true);
+  });
+});
 
 describe('applySelectionHighlight', () => {
   it('缺省反显：开头 7m，SGR 码后重申，结尾 27m 复位', () => {
@@ -28,5 +74,13 @@ describe('applySelectionHighlight', () => {
     const out = applySelectionHighlight('\x1b]8;;https://u\x1b\\link\x1b]8;;\x1b\\', '\x1b[100m');
     assert.equal(out.match(/\x1b\[100m/g)!.length, 1);
     assert.ok(out.endsWith('\x1b[49m'));
+  });
+});
+
+describe('CURSOR_MARKER', () => {
+  it('是 sph 的 APC，不含 pi', async () => {
+    const { CURSOR_MARKER } = await import('../../../src/tui/screen/tui.js');
+    assert.equal(CURSOR_MARKER.includes('pi'), false);
+    assert.ok(CURSOR_MARKER.includes('sph'));
   });
 });
