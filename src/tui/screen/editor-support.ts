@@ -1,11 +1,6 @@
 import { getWordSegmenter, isWhitespaceChar, PUNCTUATION_REGEX } from "./utils.js";
 
-/**
- * Ring buffer for kill/yank operations.
- *
- * Tracks killed (deleted) text entries. Consecutive kills can accumulate
- * into a single entry. Yank pastes the most recent entry.
- */
+/** 删除文本的环形缓冲。连续删除可以并进最近一条，yank 取最新一条。 */
 export class KillRing {
 	private ring: string[] = [];
 
@@ -38,12 +33,7 @@ export class KillRing {
 	}
 }
 
-/**
- * Generic undo stack with clone-on-push semantics.
- *
- * Stores deep clones of state snapshots. Popped snapshots are returned
- * directly (no re-cloning) since they are already detached.
- */
+/** 撤销栈。压入时深拷贝，弹出的快照已经和现场脱钩，不再拷一次。 */
 export class UndoStack<S> {
 	private stack: S[] = [];
 

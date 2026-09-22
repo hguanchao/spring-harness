@@ -1181,7 +1181,6 @@ export class Editor implements Component, Focusable {
 		this.notifyChange();
 	}
 
-	// All the editor methods from before...
 	private insertCharacter(char: string, skipUndoCoalescing?: boolean): void {
 		this.exitHistoryBrowsing();
 
