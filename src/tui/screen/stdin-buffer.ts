@@ -1,20 +1,8 @@
 /**
- * StdinBuffer buffers input and emits complete sequences.
+ * stdin 按完整序列切分再发出。
  *
- * This is necessary because stdin data events can arrive in partial chunks,
- * especially for escape sequences like mouse events. Without buffering,
- * partial sequences can be misinterpreted as regular keypresses.
- *
- * For example, the mouse SGR sequence `\x1b[<35;20;5m` might arrive as:
- * - Event 1: `\x1b`
- * - Event 2: `[<35`
- * - Event 3: `;20;5m`
- *
- * The buffer accumulates these until a complete sequence is detected.
- * Call the `process()` method to feed input data.
- *
- * Based on code from OpenTUI (https://github.com/anomalyco/opentui)
- * MIT License - Copyright (c) 2025 opentui
+ * 数据事件会把转义序列拆开：鼠标 SGR `\x1b[<35;20;5m` 可能先到 `\x1b`，再到 `[<35`，
+ * 最后才是 `;20;5m`。半截 ESC 若当普通键处理，就会误触发 Escape。
  */
 
 import { EventEmitter } from "node:events";

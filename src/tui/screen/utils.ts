@@ -254,6 +254,7 @@ function graphemeWidth(segment: string): number {
 /**
  * Calculate the visible width of a string in terminal columns.
  */
+/** 终端列宽。制表符按 3 列，ANSI 不占列，CJK / emoji 按东亚宽度。 */
 export function visibleWidth(str: string): number {
 	if (str.length === 0) {
 		return 0;
