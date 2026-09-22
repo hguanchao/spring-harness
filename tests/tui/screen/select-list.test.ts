@@ -135,6 +135,21 @@ describe('SelectList 的键盘与点击', () => {
 		assert.equal(confirmed, 'v2');
 	});
 
+	it('过滤按 value 前缀，空结果给出 No matches，Esc 取消', () => {
+		const l = list();
+		const lines: string[] = [];
+		l.onCancel = () => {
+			lines.push('cancel');
+		};
+		l.setFilter('v1');
+		assert.equal(selectedValue(l), 'item-1');
+		l.setFilter('nope');
+		assert.equal(l.itemCount, 0);
+		assert.ok(l.render(40).some((line) => line.includes('No matches')));
+		l.handleInput('\x1b');
+		assert.deepEqual(lines, ['cancel']);
+	});
+
 	it('移动鼠标不改选中项（hover 不选中）', () => {
 		const l = list();
 		const before = selectedValue(l);

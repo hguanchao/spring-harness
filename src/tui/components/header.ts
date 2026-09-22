@@ -1,7 +1,5 @@
 /**
  * 顶部欢迎头：产品标识 + 工作区/会话/模型等关键上下文 + 键位提示。
- *
- * 参考实现 pi 的 builtInHeader 承担同样的职责（logo、键位提示、更新日志）。
  */
 
 import { type Component, truncateToWidth } from '../screen/index.js';

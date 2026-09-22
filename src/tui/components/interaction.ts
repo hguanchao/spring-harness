@@ -39,9 +39,7 @@ export class DoubleClickTracker {
 }
 
 /**
- * 随视口宽度伸缩的分隔线。
- *
- * 直接对应参考实现 pi 的同名组件：整行填满 "─"，颜色可由调用方注入（默认取 border 色）。
+ * 随视口宽度伸缩的分隔线：整行填满 "─"，颜色可由调用方注入（默认取 border 色）。
  */
 
 
@@ -62,9 +60,7 @@ export class DynamicBorder implements Component {
 }
 
 /**
- * 键位提示文案工具。
- *
- * 对应参考实现的 components/keybinding-hints.ts：把动作渲染成「键位 + 说明」的暗色提示。
+ * 键位提示：把动作渲染成「键位 + 说明」的暗色提示。
  */
 
 
@@ -79,7 +75,7 @@ export function keyHint(action: AppKeybinding, description: string): string {
 /**
  * 活动状态指示器（转圈 + 文案）。
  *
- * 对应参考实现的 components/status-indicator.ts：working / retry / compaction 三类状态，
+ * working / retry / compaction 三类状态，
  * 以及空闲时占位的两行空白。渲染位置是输入框上方的状态行（见 InteractiveMode 的
  * statusContainer）：转圈 + 活动 + 阶段耗时，右侧本轮耗时与 token；空闲与工作同为两行。
  */

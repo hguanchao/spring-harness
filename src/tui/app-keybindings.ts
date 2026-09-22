@@ -2,7 +2,7 @@
  * 应用级键位。
  *
  * 框架层只定义 tui.* 键位（编辑器/选择列表/替代屏幕导航）；应用语义的键位（中断、退出、
- * 展开工具输出…）由这里定义，参考实现 pi 也是同样的分层。
+ * 展开工具输出…）由这里定义，不和编辑器的 tui.* 混在一张表里。
  */
 
 import { formatKeyText, type KeyId, matchesKey } from './screen/index.js';

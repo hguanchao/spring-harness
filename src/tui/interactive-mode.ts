@@ -1,15 +1,13 @@
 /**
  * 交互模式的装配与调度。
  *
- * 结构对应参考实现 pi 的 modes/interactive/interactive-mode.ts：
- *   - 文档容器（header + chat）放进 ScrollView，固定在底部的 dock 由
- *     「pending / status / editor / footer」垂直堆叠（见 createChatViewport 的等价实现）；
+ * 文档容器（header + chat）放进 ScrollView，固定在底部的 dock 由
+ *   「pending / status / editor / footer」垂直堆叠：
  *   - 全屏（替代屏幕）模式用 VStack 约束布局，主屏模式则按顺序 addChild 成一份纵向文档；
  *   - agent 事件 → 对话块（用户块 / 助手块 / 工具块 / 状态行）；
  *   - 审批、提问通过浮层对话框完成，浮层用 Promise 把结果回给等待中的 agent 调用。
  *
- * 与参考实现的差异来自运行时的不同：sph 的 agent 核心是 runTurn + AgentListener，
- * 因此这里的事件投影、会话回放与命令集都按 sph 的语义实现，交互形态保持一致。
+ * 事件投影走 runTurn + AgentListener，会话回放和命令集按 sph 的语义实现。
  *
  * 本文件只保留「装配 + 轮次调度 + 事件分派」这条主干；按职责拆出的协作模块：
  *   - commands.ts          —— 斜杠命令注册表（/help、面板、补全的单一数据源）
@@ -400,7 +398,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.editor.onSubmit = (text) => {
       void this.handleSubmit(text);
     };
-    // 挂起队列非空时 ↑ 把队列全部搬回编辑器（pi 的 dequeue 语义）：删掉不要的行即取消，
+    // 挂起队列非空时 ↑ 把队列全部搬回编辑器：删掉不要的行即取消，
     // Enter 重新挂起。全量搬回而不是逐条——一条规则讲清楚，没有歧义中间态。
     // 悬停离开检测：任何鼠标移动先清各类悬停高亮（挂起条浅底/提示/按钮、工具行/汇总行浅底）；
     // 若光标仍悬在原目标上，同帧的组件分发会重新点亮——监听器先于分发执行，一清一亮。
