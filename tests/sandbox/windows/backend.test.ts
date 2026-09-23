@@ -156,7 +156,7 @@ describe(
     });
 
     it('abort 终止子进程，而不是只停止等待', { timeout: 45_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
       const shell = await pwshCommand();
       assert.ok(shell, 'pwsh 不可用则本用例应被 skip');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-abort-ws-'));
