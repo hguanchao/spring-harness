@@ -75,7 +75,7 @@ export function restoreSessionInto(host: ReplayHost): void {
 }
 
 /**
- * 会话发过的用户指令回放进输入历史（grok 的 prompt_history 语义：会话级、最新在前）。
+ * 会话发过的用户指令回放进输入历史：只属于这一次会话，最新的在前。
  * 恢复会话（-c / --resume）后按 ↑ 就能翻出上次发过的指令，改了直接重发。
  * 过滤：斜杠命令、以 '[' 开头的系统合成消息（[session state] / [steering] / [background
  * task] 等，非用户原文）、超长上下文倾倒——回放的是「指令」，不是消息存档。

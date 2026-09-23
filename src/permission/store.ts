@@ -3,7 +3,7 @@
  *
  * 作用域键取 git 仓库根，不在仓库里就退回工作区根。为什么不按精确 cwd：在仓库里任何
  * 位置批准的动作都应该对整个仓库有效，按 cwd 分键会让子目录里启动的会话看不到仓库根上
- * 批准过的授权。grok-build 与 Claude Code 都选了按项目，理由相同。
+ * 批准过的授权。按项目记，换一个仓库不会把授权带过去。
  *
  * 存储在 config.toml 的 `[grants]` 表（键是作用域根）。不叫 `[permissions]`：那是规则表
  * （allow/ask/deny）的名字，这里存的是已批准的**授权**。存的内容仍是 approvalScopeKey
@@ -38,7 +38,7 @@ function findGitRoot(from: string): string | undefined {
  * 授权存储的作用域根。
  *
  * `$HOME` 上的仓库退回工作区根：dotfiles 风格的仓库如果按仓库根分键，等于给整个家目录
- * 发授权——那恰好是最不该被一条命令覆盖的地方。grok-build 对同一种情况做了同样的例外。
+ * 发授权——那恰好是最不该被一条命令覆盖的地方。没有 git 根时不落盘。
  */
 export function permissionScopeRoot(workspaceRoot: string, home = homedir()): string {
   const canonical = canonicalize(workspaceRoot);

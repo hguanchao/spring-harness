@@ -8,7 +8,7 @@ import { describe, it } from 'node:test';
  * Windows 沙箱后端：双令牌分档的生命周期与行为。
  *
  * - pwsh → 受限令牌 + ACL 写围栏（能力 SID 授权工作区/私有临时目录）：跑真实 pwsh
- *   验证工作区可写、工作区外被拒——这是 dsh windows-acl 方案的有效域。
+ *   验证工作区可写、工作区外被拒。
  * - bash → 过滤令牌：msys/cygwin 与受限 SID 列表根本冲突，跑真实 Git Bash 验证它
  *   活得过初始化——这曾是线上故障（couldn't create signal pipe, Win32 error 5）。
  *

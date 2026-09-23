@@ -14,7 +14,7 @@ export function planFilePath(sessionDir: string, sessionId: string): string {
   return join(sessionDir, `${sessionId}.plan.md`);
 }
 
-/** 计划必须以一级标题开头（dsh exit_plan_mode 同约束），否则评审没有名字。 */
+/** 计划必须以一级标题开头，否则评审没有名字。 */
 export function hasPlanHeading(plan: string): boolean {
   return /^#\s+\S/.test(plan.trim());
 }

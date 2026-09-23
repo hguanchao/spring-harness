@@ -9,7 +9,7 @@ import type { SessionMessage, SessionPort, SessionRecord } from './types.js';
 
 /**
  * 工具已记录、结果未落盘：可能已有副作用，禁止盲着重试。
- * 对齐 dsh TOOL_OUTCOME_UNKNOWN。
+ * 结果未知，不能当成失败再盲跑一遍。
  */
 export const INTERRUPTED_TOOL =
   'The tool call was interrupted after it was recorded, but no result was durably recorded. '
@@ -74,7 +74,7 @@ function hasOpenTurn(records: readonly SessionRecord[]): boolean {
 
 /**
  * 崩溃尾：补悬挂工具结果，再关未结束的 turn。
- * 对齐 dsh interruptedTurnClosers——先 tool result，再 turn/end interrupted。
+ * 先补 tool result，再写 turn/end interrupted。顺序反了，上游会看到一个还开着的工具调用。
  */
 export function closeInterruptedTurn(session: SessionPort, messages: SessionMessage[]): number {
   const repaired = repairDanglingTools(session, messages);

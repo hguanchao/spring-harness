@@ -1,7 +1,7 @@
 /**
  * 转录视口里的用户消息吸顶。
  *
- * 算法对齐 grok-build `scrollback/sticky.rs`：滚过某条用户气泡后把它钉在视口顶，
+ * 滚过某条用户气泡后把它钉在视口顶，
  * 高度随滚动 1:1 收缩到最小截断高度；下一条用户消息靠近时从顶部把前一条顶走。
  * 自管视口上的软件吸顶，不是终端原生 sticky。
  */
@@ -12,7 +12,7 @@ import { compositeTuiLine, type Component } from '../../../tui/tui.js';
 
 export const STICKY_USER_MESSAGE = Symbol.for('sph.sticky-user-message');
 
-/** 吸顶截断后的最大行数：上/下各 1 行 pad + 3 行正文（grok `MAX_TRUNCATED_HEADER_HEIGHT` 的等价）。 */
+/** 吸顶截断后的最大行数：上/下各 1 行 pad + 3 行正文。 */
 export const MAX_STICKY_HEIGHT = 5;
 
 /** 吸顶块与下一条用户气泡之间预留的 1 行空隙，顶走判定用。 */
@@ -167,7 +167,7 @@ function stickyPlacement(frame: LayoutFrame): { x: number; y: number; width: num
 
   const viewportTop = scrollBox.clip.y;
   const viewportHeight = scrollBox.clip.height;
-  // 子文档已按 -scrollTop 平移；换到内容坐标后才能沿用 grok 的 scrollOffset==0 短路。
+  // 子文档已按 -scrollTop 平移；换到内容坐标后，滚动量为 0 就可以直接短路。
   const originY = scrollBox.children[0]?.rect.y ?? scrollBox.rect.y;
   const scrollOffset = viewportTop - originY;
   const prompts: PromptDescriptor[] = [];

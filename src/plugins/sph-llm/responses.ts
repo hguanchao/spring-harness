@@ -289,7 +289,7 @@ export function applyResponsesEvent(payload: string, acc: SseAcc): { textDelta?:
       }
       // incomplete 的 reason 要区分：max_output_tokens 是正常截断（提示用户即可），
       // content_filter 是审核拒绝（loop 应当作明确 stop 而不是续写）；未知 reason 按
-      // 截断处理——对齐 pi 把 provider 原因保留在 finishReason 之外的做法。
+      // 截断时把提供方的原因留在 finishReason 外面，界面才能显示具体原因。
       if (data.type === 'response.incomplete') {
         const reason = data.response?.status_details?.reason ?? data.response?.incomplete_details?.reason;
         acc.finish = reason && reason !== 'max_output_tokens' ? `incomplete:${reason}` : 'length';

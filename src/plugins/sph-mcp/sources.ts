@@ -1,13 +1,13 @@
 /**
  * MCP server 的多来源发现。
  *
- * sph 自己的配置与 Codex 同一套：`[mcp_servers.<name>]`。用户在 Claude Code /
- * Codex 里已经配好的 server 必须先手工抄一遍，而「抄漏一个字段」导致的静默失败最难查。
+ * sph 自己的配置是 `[mcp_servers.<name>]`。外部编辑器里已经配好的 server 也要能被读到，
+ * 否则「抄漏一个字段」导致的静默失败最难查。
  * 这里把同一台机器上其他 agent 的配置读进来，按工具优先级合并。
  *
  * 三条设计约束：
  *
- * 1. **外部文件只读。** Claude / Codex / `.mcp.json` 的文件一概不写。启停状态存在 sph
+ * 1. **外部文件只读。** 别人的配置文件一概不写。启停状态存在 sph
  *    自己的配置里（`[mcp] disabled_servers`）——写别人的配置会带来意料之外的副作用，
  *    而「读了却不改」也让整个发现过程可随时撤销。
  * 2. **坏条目降级为警告，不炸启动。** 外部来源尤其如此：别人的配置文件格式演进不该让
@@ -17,7 +17,7 @@
  *
  * 优先级（低 → 高，同名整条替换、不做字段合并）：
  *
- *   `.mcp.json`  <  Codex  <  Claude  <  sph 自身
+ *   `.mcp.json`  <  用户级外部配置  <  项目级外部配置  <  sph 自身
  *
  * 每个工具内部则是「项目级 > 用户级」：仓库里的声明比全局声明更贴近当下这次工作。
  */
@@ -166,7 +166,7 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
     put,
   });
 
-  // ── 2. Codex：用户级 → 项目级 ────────────────────────────────────────────
+  // ── 2. 用户主目录与项目里的外部 TOML：用户级 → 项目级 ─────────────────────
   readLayer({
     label: '~/.codex/config.toml',
     paths: [join(home, '.codex', 'config.toml')],
@@ -197,7 +197,7 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
     put,
   });
 
-  // ── 3. Claude：`~/.claude.json` 的顶层与 per-project 两处 ────────────────
+  // ── 3. 用户主目录 JSON：顶层 mcpServers 与按目录分的 projects 段 ──────────
   readLayer({
     label: '~/.claude.json',
     paths: [join(home, '.claude.json')],
@@ -404,7 +404,7 @@ type RawEntry = Omit<
 >;
 
 /**
- * `[mcp_servers.<name>]`。sph 自己的配置和 Codex 都是这一种，名字在表头上，不在 `name` 字段里。
+ * `[mcp_servers.<name>]`。名字在表头上，不在 `name` 字段里。表内 `name` 只是显示名。
  *
  * `env_vars`（要继承的父进程环境变量名列表）在这里就地展开成具体值：sph 的 spawn 只接受
  * 一张现成的环境表，把「继承」留到 spawn 时会让签名比较也变复杂。
@@ -420,7 +420,7 @@ function tomlMcpTable(
   const out = new Map<string, RawEntry>();
   if (raw === undefined) return out;
   if (!isRecord(raw)) {
-    warnings.push(`${path}: mcp_servers must be a table of tables (Codex format)`);
+    warnings.push(`${path}: mcp_servers must be a table of tables ([mcp_servers.<name>])`);
     return out;
   }
   for (const [name, value] of Object.entries(raw)) {
@@ -453,10 +453,10 @@ function tomlMcpTable(
 }
 
 /**
- * `{"mcpServers": {...}}` 形态：`.mcp.json` 与 Claude 两处共用。
+ * `{"mcpServers": {...}}` 形态：`.mcp.json` 和用户主目录那份 JSON 共用。
  *
  * `claudeProject` 给定时，额外从 `projects.<dir>.mcpServers` 取条目；按 dir 从浅到深读，
- * 深的覆盖浅的。Claude Code 按精确 cwd 存，但仓库根的那份对本仓库的任意子目录都成立，
+ * 深的覆盖浅的。有的外部配置按精确 cwd 存，但仓库根的那份对本仓库的任意子目录都成立，
  * 所以按查找链逐级读比只认精确 cwd 实用。
  */
 function jsonMcpServers(
@@ -485,7 +485,7 @@ function jsonMcpServers(
   return out;
 }
 
-/** Claude / `.mcp.json` 的单条 server：`command`/`args`/`env` 或 `url`，外加 `disabled`。 */
+/** JSON 配置里的单条 server：`command`/`args`/`env` 或 `url`，外加 `disabled`。 */
 function normalizeJsonServers(value: unknown, where: string, warnings: string[]): Map<string, RawEntry> {
   const out = new Map<string, RawEntry>();
   if (value === undefined) return out;
@@ -512,7 +512,7 @@ function normalizeJsonServers(value: unknown, where: string, warnings: string[])
       url,
       ...remoteFields(raw, `${where}: mcpServers.${name}`, warnings),
       ...displayTitle(raw.name, name),
-      // `disabled` 是 Claude 的字段名；`enabled` 在 Codex 里。两者都认。
+      // 两种外部字段都认：`disabled: true` 与 `enabled: false`。
       enabled: raw.disabled === true ? false : raw.enabled === undefined ? true : raw.enabled === true,
     });
   }
@@ -529,7 +529,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * `transport` 与 Claude 的 `type` 是同一个意思。写错了不丢掉整条 server：
+ * `transport` 与 JSON 里的 `type` 是同一个意思。写错了不丢掉整条 server：
  * 留下 url，让 hub 按默认传输去连，并在发现警告里说明原词。
  */
 function remoteFields(

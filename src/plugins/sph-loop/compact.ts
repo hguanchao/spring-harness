@@ -394,7 +394,7 @@ async function summarize(
   onUsage?: (usage: TokenUsage) => void,
   instructions?: string,
 ): Promise<string> {
-  // 对齐 dsh：压缩走对话前缀（system + 历史），指令垫在最后一条 user，吃 KV 缓存。
+  // 压缩走对话前缀（system + 历史），指令垫在最后一条 user，吃 KV 缓存。
   //
   // `/compact <指令>` 的聚焦说明接在固定指令**之后**：它只改这一次摘要的重点，
   // 段落与规则仍由 COMPACTION_SYSTEM 定——结构一旦由用户输入决定，下游解析就失去保证。

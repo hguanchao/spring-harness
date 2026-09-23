@@ -14,7 +14,7 @@ import { BLOCK_GAP, Container, Markdown, type MarkdownTheme, Spacer } from '../.
 import { wrapOsc133Zones } from '../../../tui/utils.js';
 import { getMarkdownTheme, theme } from '../theme/theme.js';
 
-/** 对齐 opencode TextPart 的 paddingLeft=3。 */
+/** 正文左边距 3 列，和工具行的缩进对齐。 */
 const DEFAULT_OUTPUT_PAD = 3;
 
 export class AssistantMessageComponent extends Container {

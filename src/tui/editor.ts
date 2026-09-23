@@ -572,9 +572,7 @@ export class Editor implements Component, Focusable {
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
-		// Render the menu box (autocomplete or inline menu) ABOVE the input box (Claude
-		// Code style): rounded border, title, list rows, scroll counter in the bottom
-		// border. Occupies the first rows of this component's output.
+		// 菜单画在输入框上方：圆角边、标题、列表、底边滚动计数。占这个组件输出的前几行。
 		this.renderedAutocompleteHeight = 0;
 		let menuRows = 0;
 		const menu = this.activeMenu();

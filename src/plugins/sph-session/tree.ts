@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { SessionMessage, SessionRecord } from '../../session/types.js';
 import { messagesOf } from './query.js';
 
-/** 短 id：和 pi 一样够本文件内唯一，JSONL 里也短。 */
+/** 短 id：本文件内唯一即可，JSONL 里也短。 */
 export function newEntryId(): string {
   return randomBytes(4).toString('hex');
 }

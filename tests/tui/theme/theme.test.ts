@@ -139,19 +139,19 @@ describe('引用块里的行内代码', () => {
 });
 
 describe('画布底色', () => {
-  it('主色是 OpenCode 紫，不是 Material / TokyoNight 品红', () => {
+  it('主色是这套暗色主题的紫', () => {
     assert.equal(PALETTE.primary, '#9d7cd8');
     assert.notEqual(PALETTE.primary, '#9575cd');
     assert.notEqual(PALETTE.primary, '#bb9af7');
   });
 
-  it('语法蓝是 OpenCode 蓝，不是 Material / TokyoNight 亮蓝', () => {
+  it('语法蓝是这套暗色主题的蓝', () => {
     assert.equal(PALETTE.syntaxKeyword, '#5c9cf5');
     assert.notEqual(PALETTE.syntaxKeyword, '#64b5f6');
     assert.notEqual(PALETTE.syntaxKeyword, '#7aa2f7');
   });
 
-  it('红黄绿与 OpenCode 默认暗色主题一致', () => {
+  it('红黄绿用同一套暗色', () => {
     assert.equal(PALETTE.error, '#e06c75');
     assert.equal(PALETTE.warning, '#f5a742');
     assert.equal(PALETTE.success, '#7fd88f');

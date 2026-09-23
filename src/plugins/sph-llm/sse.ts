@@ -7,7 +7,7 @@ import { formatFetchError, flattenWhitespace } from '../../util.js';
 import { classifyHttpError, llmError } from './errors.js';
 import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
 
-/** 两次 SSE chunk 之间的默认空闲上限。交互 CLI 比 grok 的 300s 更短，避免 TUI 挂死。 */
+/** 两次 SSE chunk 之间的默认空闲上限。交互界面不能挂太久。 */
 export const SSE_IDLE_TIMEOUT_MS = 120_000;
 /**
  * 首字节超时。实测网关常 200 + event-stream 然后挂到空体；用满 idle 120s 再重试，
@@ -54,7 +54,7 @@ async function readIdle(
  * 统一处理网络错误分类（可重试判定）、HTTP 状态码与按行分割；
  * 何时算"流完成"由各协议的 onData 消费者自行判断。
  */
-/** 空流 / 空 JSON 是网关抖动（截图里的 empty body），对齐 deepseek-harness 的 EMPTY_RESPONSE：可重试。 */
+/** 空流 / 空 JSON 是网关抖动，可重试，不当成模型已经答完。 */
 function emptyStreamError(contentType: string, hint: string): RetryableError {
   return new RetryableError(
     `LLM stream produced no SSE data events (${contentType || 'unknown content-type'}): ${hint.slice(0, 400)}`,
@@ -73,7 +73,7 @@ function sseField(line: string, name: string): string | undefined {
 /**
  * 把一帧 SSE 收成 adapter 能吃的 payload。
  *
- * grok-build / 官方 Responses 把事件名放在 `event:`，JSON 里未必再写 `type`。
+ * 有的端点把事件名放在 `event:`，JSON 里未必再写 `type`。
  * 只认 `data:` 且强求 `[DONE]` 时，中转站正常关流就会报 STREAM_CLOSED。
  */
 function materializeSse(event: string | undefined, data: string): string | undefined {

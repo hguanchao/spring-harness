@@ -1,7 +1,7 @@
 /**
  * sph-subagent：把委托做成内置插件。
  *
- * 参照 pi-subagents 的切法：agent 定义和两个工具在插件里，子会话仍由宿主跑。
+ * 代理定义和两个工具在插件里，子会话仍由宿主跑。
  * 关掉本插件，工具表里不再有 subagent / send_subagent_message，
  * loop 里的深度预算和事件协议留在原地，只是再也没人调用它们。
  *

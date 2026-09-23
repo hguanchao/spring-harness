@@ -472,7 +472,7 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	const canRevealHiddenAuto = includeHiddenAuto && view.scrollbar === "auto" && scrollHeight > trackHeight;
 	if (!view.isScrollbarVisible && !canRevealHiddenAuto) return undefined;
 
-	// 滑块比例按可滚高度（含 pin-reserve），与 grok-build total_height 一致。
+	// 滑块比例按可滚高度（含底部留白）。留白也算进滚动范围，滑块才不会在钉住用户消息时跳。
 	// 若只按真实内容，短对话时滑块会铺满整列，看起来像卡住。
 	const documentHeight = Math.max(trackHeight, scrollHeight);
 	const minThumbHeight = Math.min(2, trackHeight);

@@ -93,7 +93,7 @@ describe('renderMcpReport', () => {
     assert.match(text, /name = "Demo"/);
     assert.match(text, /type = "stdio"/);
     assert.match(text, /stdio, HTTP, and SSE servers are started/);
-    assert.match(text, /\.codex\/config\.toml/, '空列表时最该告诉用户还有哪些来源');
+    assert.match(text, /External MCP configs/, '空列表时要说明还会读外部配置');
   });
 
   it('显示名和 ID 不同时一起写出来', () => {

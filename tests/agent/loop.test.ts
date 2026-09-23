@@ -240,7 +240,7 @@ describe('参数降级进工作状态', () => {
       );
       assert.equal(retries.length, 1);
       assert.match(String(retries[0]?.message ?? ''), /prompt_cache_key/);
-      // 传输抖动与 pi 的 auto_retry 同款落盘：次数、预算、错误原文、距本跳开始的耗时。
+      // 传输抖动落盘：次数、预算、错误原文、距本跳开始的耗时。
       const transport = session.readAll().flatMap((record) =>
         record.type === 'event' && record.kind === 'stream_retry' ? [record.data] : [],
       );

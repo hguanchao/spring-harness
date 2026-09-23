@@ -443,7 +443,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       void this.openCommandPalette();
     });
 
-    // 后台任务完成推送（grok 语义：完成唤醒父级）：空闲时自动开一轮消化结果；
+    // 后台任务完成推送：空闲时自动开一轮消化结果；
     // 轮次进行中由 loop 在下一步顶部注入，这里不抢——回调里只跳过，不做 drain。
     this.deps.jobs.onTaskDone(() => {
       if (this.running) return;
@@ -699,7 +699,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       this.inFlightPrompt = undefined;
       if (rewind !== undefined) {
         this.dropLastUserBubble();
-        // Esc 中断自带队列回填（对齐 pi：abort restores queued messages）——模型还没
+        // Esc 中断自带队列回填：模型还没
         // 响应时整个轮次作废重来，未投递的挂起消息连同原 prompt 一起回到编辑器。
         // 模型已响应的普通中断不在此列：队列继续挂起，下一轮照常自动投递。
         const stranded = this.steerBar.drainAll();
@@ -772,7 +772,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
-   * 后台任务完成唤醒（grok 语义：完成唤醒父级）。空闲时自动开一轮，把完成通知
+   * 后台任务完成唤醒。空闲时自动开一轮，把完成通知
    * 作为 user 消息注入；通知正文由 jobNotificationText 统一构造，与 loop 注入同款。
    */
   private wakeForCompletedJobs(): void {
@@ -809,9 +809,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   /**
    * Esc / Ctrl+C：终止当前轮次。
    *
-   * 对齐 grok cancel-rewind：模型还没有任何响应时把原文放回输入框，转录里那条气泡也撤掉
+   * 模型还没有任何响应时把原文放回输入框，转录里那条气泡也撤掉
    * （看起来像没按过发送）。已经开始思考/正文/工具则只打断，不回填。
-   * 输入框里已有新草稿时不覆盖（grok 同样不 clobber composer）。
+   * 输入框里已有新草稿时不覆盖。
    */
   private handleInterrupt(): void {
     if (this.abort) {
@@ -1346,7 +1346,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const lines: string[] = [];
     lines.push('## Commands');
     for (const command of this.commandItems()) lines.push(`- \`${command.label}\` — ${command.hint}`);
-    // 别名不进上面的清单（与 grok-build 一致，菜单只列正名），但必须写出来，
+    // 别名不进上面的清单（菜单只列正名），但必须写出来，
     // 否则靠旧名字找到这里的人会以为命令被删了。
     const aliases = Object.entries(COMMAND_ALIASES).map(([alias, canonical]) => `\`/${alias}\` → \`/${canonical}\``);
     if (aliases.length > 0) lines.push(`- Aliases: ${aliases.join(' · ')}`);
@@ -1467,7 +1467,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
    * `runTurn` 启动时由 `loadCompaction` 读回来，所以这里不需要维护任何投影状态，
    * 也不会出现「命令改了状态、下一轮又按旧状态发请求」的错位。
    *
-   * 带参数时是**聚焦说明**（对齐 grok-build 的 `/compact compaction instructions`）：
+   * 带参数时是**聚焦说明**：
    * 只改这一次摘要的重点，不改固定段落结构。
    */
   private async commandCompact(instructions: string): Promise<void> {
@@ -1580,7 +1580,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
       if (this.recapEpoch !== epoch) {
         // 生成期间用户又发了一轮：整块丢弃，**不推进水印**——这一轮之后自动 recap
-        // 仍然可以再试（对齐 grok-build：只有成功或被抑制的自动 recap 才算提交）。
+        // 仍然可以再试。只有成功或被抑制的自动 recap 才算提交。
         this.dropRecapBlock(block);
         if (!auto) this.addNotice('Recap dropped — a new turn started while it was generating.', 'dim');
         return;

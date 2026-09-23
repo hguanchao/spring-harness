@@ -52,7 +52,7 @@ export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox
 }
 
 /**
- * 后台任务与主 loop 脱钩；完成结果以「推送」送达（grok-build 语义）：完成即触发
+ * 后台任务与主 loop 脱钩；完成结果以「推送」送达：完成即触发
  * onTaskDone 回调并打上未投递标记，loop 在下一步顶部、TUI 在轮次收尾/空闲时 drain。
  * jobs 工具降级为状态快照，不再是获知完成的必要手段。
  */

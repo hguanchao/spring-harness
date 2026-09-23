@@ -13,7 +13,7 @@
  *
  * **项目级插件受信任门保护**：仓库里的 `.sph/plugins/*.ts` 是会被执行的任意代码，而仓库
  * 内容是别人写的。sph 已有工作区信任机制（`config.toml` 的 `trusted`），这里复用同一道门
- * ——只读别人的仓库不该执行他带来的代码。pi 的 `.pi/extensions` 同样只在项目受信任后装载。
+ * ——只读别人的仓库不该执行他带来的代码。项目目录里的插件只在工作区受信任后装载。
  *
  * ## 单个插件坏掉不炸启动
  *
@@ -21,7 +21,7 @@
  * 警告并继续装下一个。理由与 `[mcp_servers]` 坏条目降级一致——启动不该由最不重要的那个
  * 插件决定。装载失败必须**可见**（警告汇总上报），否则「插件没生效」会变成纯猜。
  *
- * ## 入口解析（与 pi 的 extensions 同构）
+ * ## 入口解析
  *
  * 1. `package.json` 的 `sph.plugins` 数组（可多个入口，用于多文件插件）
  * 2. 目录下的 `index.ts` / `index.js`
@@ -89,7 +89,7 @@ function hasScriptExtension(name: string): boolean {
   return SCRIPT_EXTENSIONS.some((ext) => name.endsWith(ext));
 }
 
-/** package.json 里插件声明的字段名，与 `pi` 字段同理：宿主专属段，不污染通用字段。 */
+/** package.json 里插件声明的字段名：宿主专属段，不污染通用字段。 */
 interface SphManifest {
   name?: string;
   sph?: { name?: string; plugins?: unknown };

@@ -159,7 +159,7 @@ function mentionsParam(text: string, name: string): boolean {
  * 调用方应原样抛出该错误。
  *
  * 顺序上先处理「报文已明确指出该换成哪个名字」的两条，它们不必再要求出现
- * unsupported 字样（zen Console 拒绝 reasoning 时的措辞里就没有）。
+ * unsupported 字样（有的控制台拒绝 reasoning 时不写 unsupported）。
  *
  * 两个名字同时出现时（OpenAI 的真实报文就是如此：`Unsupported parameter:
  * 'max_tokens' ... Use 'max_completion_tokens' instead.`）优先按「迁向新名字」处理——

@@ -143,13 +143,13 @@ Servers are discovered from five sources. Later ones win on a name clash — a n
 
 | Source | Scope | Notes |
 |---|---|---|
-| `~/.sph/config.toml` `[mcp_servers.<name>]` | user | same shape as Codex, including `type` |
+| `~/.sph/config.toml` `[mcp_servers.<name>]` | user | table of tables, including `type` |
 | `<repo>…<cwd>/.sph/config.toml` | project | walked root→cwd, closest wins |
 | `~/.claude.json` | user + project | `mcpServers`, and `projects.<dir>.mcpServers` |
 | `~/.codex/config.toml`, `<dir>/.codex/config.toml` | user + project | `[mcp_servers.<name>]`, incl. `env_vars` |
 | `.mcp.json` | project | walked root→cwd, closest wins |
 
-Priority is **sph > Claude > Codex > `.mcp.json`**, and within a tool project beats user. Malformed entries in foreign files degrade to warnings — they never block startup.
+Priority is **sph, then the other external configs, then `.mcp.json`**, and within a tool project beats user. Malformed entries in foreign files degrade to warnings — they never block startup.
 
 External files are **never written to**. Enable/disable is recorded as a local preference in `~/.sph/config.toml`:
 
@@ -224,9 +224,9 @@ src/
 
 Startup resolves `sph-llm`, `sph-session`, `sph-loop`, and `sph-schedule` by service name. If one of those is disabled, sph exits instead of running a turn with a missing half. `sph-sandbox` is the other required piece for `workspace` and `read-only`, and a same-named third-party plugin cannot replace it. Tools are not a service: `sph-tools` registers them into an otherwise empty tool table.
 
-`src/plugins/services.ts` holds the seams. The host names a capability without importing its implementation, which is the same split dsh uses.
+`src/plugins/services.ts` holds the seams. The host names a capability without importing its implementation.
 
-`sph-subagent` follows the pi-subagents split: agent definitions and the `subagent` / `send_subagent_message` tools live in the plugin, while the child session, depth budget, approval, and event protocol stay in the turn loop. Built-in agents are `explore` (read-only) and `general`. A markdown file in `~/.sph/agents/` or `<workspace>/.sph/agents/` adds or replaces one; the workspace directory is read only when the workspace is trusted. A file looks like this:
+Agent definitions and the `subagent` / `send_subagent_message` tools live in the plugin, while the child session, depth budget, approval, and event protocol stay in the turn loop. Built-in agents are `explore` (read-only) and `general`. A markdown file in `~/.sph/agents/` or `<workspace>/.sph/agents/` adds or replaces one; the workspace directory is read only when the workspace is trusted. A file looks like this:
 
 ```markdown
 ---

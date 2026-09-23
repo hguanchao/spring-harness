@@ -2,7 +2,7 @@
  * MCP 配置的写回。
  *
  * 两件事：
- *   1. `[mcp_servers.<name>]` 的新增 / 更新 / 删除（与 Codex 同一套表头）；
+ *   1. `[mcp_servers.<name>]` 的新增 / 更新 / 删除；
  *   2. `[mcp]` 段的 `disabled_servers` / `enabled_servers` 本地启停偏好。
  *
  * 为什么不用「解析成对象 → 序列化整份重写」：与 `config/save.ts` 同一理由——这是用户手改
@@ -12,7 +12,7 @@
  * （`args = [\n "-a",\n]`）里以 `[` 开头的行不是表头。所以扫描时必须跟踪括号深度与
  * 三引号字符串——否则一次「删除某个 server」就可能把后面半份配置当成它的一部分删掉。
  *
- * 外部来源的文件（Claude / Codex / `.mcp.json`）**绝不写入**，启停改走本地偏好。
+ * 外部来源的文件**绝不写入**，启停改走本地偏好。
  */
 
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';

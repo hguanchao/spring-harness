@@ -85,7 +85,7 @@ export class TranscriptProjection {
    * 本轮模型是否已经真正响应（思考/正文/工具）。
    * 不能用「助手组件是否已创建」代替：`thinking_start` 在请求发出前就会广播。
    * stream_retry 会丢掉半截画面，但一旦响应过就不能再把原文塞回输入框
-   * （对齐 grok in_flight_prompt 在 first activity 后作废）。
+   * 一旦已经有过响应，就不能再把原文塞回输入框。
    */
   private modelRespondedFlag = false;
   private readonly pendingTools = new Map<string, ToolExecutionComponent>();
@@ -97,7 +97,7 @@ export class TranscriptProjection {
   /**
    * 子代理 id → 主流程里对应的 Task 工具行 + 转录内实时任务块。
    *
-   * 子代理的内部活动（工具调用、错误）实时刷进任务块（Claude Code 式），聚合结果在
+   * 子代理的内部活动（工具调用、错误）实时刷进任务块，聚合结果在
    * subagent_end 时写到 Task 行的活动后缀上，随后任务块整块撤除、不在时间线常驻。
    * 后台任务的工具行在 job id 返回时就已完成，所以这里独立于 pendingTools 持有引用。
    */
@@ -205,7 +205,7 @@ export class TranscriptProjection {
     this.modelRespondedFlag = true;
     // 工具活动切断当前助手段：下一个 thinking/text 事件经 ensureAssistant 在工具组
     // 下方新起组件。否则整轮文字都挤进轮首那个组件里，最终总结会排在工具汇总之上，
-    // 变成「全部回答在上、工具组沉底」——时间线要按真实顺序交错（grok-build 语义）。
+    // 变成「全部回答在上、工具组沉底」——时间线要按真实顺序交错。
     this.streamingAssistant?.setStreaming(false);
     this.streamingAssistant = undefined;
     const tool = new ToolExecutionComponent(name, id, args, this.host.ui);
@@ -313,7 +313,7 @@ export class TranscriptProjection {
   // ------------------------------------------------------------------ 子代理
 
   /**
-   * 子代理开始：活动归并到主流程的 Task 工具行上（grok-build 式的单行实时摘要），
+   * 子代理开始：活动归并到主流程的 Task 工具行上（单行实时摘要），
    * 并在输入框上方挂实时任务块（跑完即撤，不常驻）。
    * 返回是否挂上了工具行——false 时宿主退回独立通知（找不到 Task 行的异常时序）。
    */

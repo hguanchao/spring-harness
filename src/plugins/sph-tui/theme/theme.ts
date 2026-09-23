@@ -331,7 +331,7 @@ export function getMarkdownTheme(): MarkdownTheme {
     },
     link: (text: string) => theme.underline(theme.fg('mdLink', text)),
     linkUrl: (text: string) => theme.fg('mdLinkUrl', text),
-    // grok-build：行内码整段蓝、加粗，不做词法猜测。
+    // 行内码整段蓝、加粗，不做词法猜测。
     code: (text: string) => theme.bold(theme.fg('mdCode', text)),
     codeBlock: (text: string) => theme.fg('mdCodeBlock', text),
     // 围栏 ``` 与注释同为 #808080，但**刻意不叠斜体**：斜体留给注释，

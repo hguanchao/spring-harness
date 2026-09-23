@@ -1,6 +1,6 @@
 /**
  * 程序嵌入面：别的进程可以 bootstrap + driver 跑一轮，不必进 TUI。
- * 不是 pi 那套 RPC 服务；只把已经存在的运行时接缝导出。
+ * 只把已经存在的运行时接缝导出，不另开一套远程服务。
  */
 export { runTurn } from './plugins/sph-loop/loop.js';
 export type { AgentDriver, RunTurnOptions } from './agent/driver.js';

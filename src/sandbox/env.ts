@@ -1,5 +1,5 @@
 /**
- * 子进程环境：对齐 deepseek-harness 的 scrubbedParentEnv。
+ * 子进程环境：从父进程继承，但擦掉凭据，避免工具把密钥带进子进程。
  *
  * 模型能跑 shell / MCP，子进程默认继承 process.env 就会把 SPH_API_KEY、
  * NPM_TOKEN 一类凭据带进 `env` 输出和第三方 server。显式 spec.env 叠在擦除之后，

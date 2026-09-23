@@ -10,7 +10,7 @@ import {
 import { RetryableError } from '../../src/plugins/sph-llm/retry.js';
 
 describe('looksLikeContextOverflow', () => {
-  it('认 dsh 结构化 context_window_limit_exceeded', () => {
+  it('认结构化 context_window_limit_exceeded', () => {
     assert.equal(looksLikeContextOverflow('context_window_limit_exceeded'), true);
   });
 

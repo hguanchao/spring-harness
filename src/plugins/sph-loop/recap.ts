@@ -2,7 +2,7 @@
  * Recap：会话「我讲到哪了」的一句话摘要。
  *
  * 与压缩（compact）的本质区别：recap **永不改动会话**。它从只读快照生成、只用于展示，
- * 生成过程既不落 compaction 事件，也不往会话里写消息（对齐 grok-build 的 session_recap）。
+ * 生成过程既不落 compaction 事件，也不往会话里写消息。
  *
  * 生成时复用主轮次的会话前缀（system + 投影后的历史），只在末尾追加一条指令轮——
  * 前缀逐字不变，提供方的提示词缓存才能继续命中；追加之前要先摘掉悬挂的工具尾
@@ -38,7 +38,7 @@ export const RECAP_WATCH_INTERVAL_MS = 30 * 1000;
  * 两次自动 recap **尝试**之间的最小间隔。
  *
  * 闸门经常拒绝（还没到空闲阈值、这一轮已经 recap 过），而每次尝试都要读一遍整个会话文件；
- * 不设退避就会变成每 30s 白读一次长会话。对齐 grok-build 的 AUTO_RECAP_RETRY_INTERVAL。
+ * 不设退避就会变成每 30s 白读一次长会话。
  */
 export const AUTO_RECAP_RETRY_MS = 90 * 1000;
 
@@ -275,7 +275,7 @@ function truncateLastTurn(messages: readonly ChatMessage[], budget: number): Cha
  * 只读预算：把快照压进 recap 的提示词预算内。
  *
  * 这里刻意**不做** LLM 摘要（那是压缩的职责，会写会话状态）——只用零成本的整轮丢弃，
- * 与 grok-build 的 fit_conversation_to_budget 同语义。超预算时前缀缓存已经失效，
+ * 超预算时前缀缓存已经失效，
  * 所以丢多少都不再有额外代价。
  */
 function fitToRecapBudget(

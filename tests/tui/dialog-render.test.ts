@@ -399,7 +399,7 @@ describe('斜杠命令打通到弹窗', () => {
     }
   });
 
-  it('/permission 打开审批模式选择器（命令名对齐 dsh）', async () => {
+  it('/permission 打开审批模式选择器', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-permission-'));
     const terminal = new FakeTerminal();
     const mcp = new McpHub(testHostFacts());

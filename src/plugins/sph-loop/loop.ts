@@ -217,7 +217,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   if (!closeTurn) throw new Error('sph-session is not loaded');
   closeTurn(options.session, mirror);
   // 用户消息先只进内存。首次模型活动再落盘——取消时 TUI 把原文放回输入框，
-  // JSONL 里也不该留下一条没有回复的 user（对齐 grok cancel-rewind）。
+  // JSONL 里也不该留下一条没有回复的 user。
   const pendingUser: SessionMessage = {
     type: 'message',
     ts: new Date().toISOString(),
@@ -289,14 +289,14 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     description?: string;
     mode: 'foreground' | 'background';
     toolCallId?: string;
-    /** 续接的源子代理会话 id；源消息复制进新会话（grok 的 resume_from 同语义）。 */
+    /** 续接的源子代理会话 id；源消息复制进新会话。 */
     resumeFrom?: string;
     /** worktree：在隔离 git 工作树里跑。 */
     isolation?: 'none' | 'worktree';
     /** 后台任务的 record：子会话创建后回写 subagentSessionId 供 resume / send 寻址。 */
     jobRecord?: JobRecord;
   }): Promise<string> => {
-    // resume 校验（grok 同语义：源必须已完成、同类型）。源子代理的 start 事件落在
+    // resume 校验：源必须已完成、同类型。源子代理的 start 事件落在
     // 父会话文件里（childSessionId 关联），childType 与 worktree 从那里读。
     let sourceRecords: SessionRecord[] = [];
     let resumedWorktree: string | undefined;
@@ -328,7 +328,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       }
     }
 
-    // workspace 决策：resume 沿用源会话的工作树（仍在时，grok 同语义）；isolation
+    // workspace 决策：resume 沿用源会话的工作树（仍在时）；isolation
     // worktree 在下方新建。树建在 workspace 内——Windows ACL 写授权与 bwrap bind 都按
     // workspace root 授予，放外面子代理写不进。
     let childWorkspaceRoot = options.workspaceRoot;
@@ -351,7 +351,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         }
       }
     }
-    // isolation worktree：从 HEAD 派生 sph/<id> 分支的隔离工作树（grok 同语义：
+    // isolation worktree：从 HEAD 派生 sph/<id> 分支的隔离工作树（
     // 解析失败即 spawn 失败，不静默降级成共享工作区）。
     let childWorktree: string | undefined;
     if (input.isolation === 'worktree' && input.resumeFrom === undefined) {
@@ -538,7 +538,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     observation,
     spillRoot: options.spill?.root,
     async spawnSubagent(input) {
-      // 深度预算守卫（对齐 grok-build 的扁平代理树）：工具保持对子代理可见，运行时统一拒绝
+      // 深度预算守卫：工具保持对子代理可见，运行时统一拒绝
       // 超额派生。抛错经 runOne 的 catch 转成 isError 工具结果，模型能明确读到预算耗尽。
       const childDepth = depth + 1;
       if (childDepth > maxSubagentDepth) {
@@ -574,7 +574,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     if (options.signal?.aborted) throw new Error('aborted');
     assertBudget();
 
-    // 后台任务完成推送（grok-build 语义：完成唤醒父级）：轮次进行中收到即注入下一步。
+    // 后台任务完成推送：完成唤醒父级。轮次进行中收到即注入下一步。
     // 已收尾的轮次由 TUI 在 finally 里 drain 并自动开后续轮次；delivered 标记保证不重不漏。
     for (const job of jobs.drainNotifications()) {
       if (!notify) throw new Error('sph-schedule is not loaded');
@@ -582,7 +582,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     }
 
     // 父级/模型发来的消息（send_subagent_message）在下一步顶部入列——投递到
-    // 下一个安全点（grok 的 steer 语义），不打断当前 LLM 调用。
+    // 下一个安全点，不打断当前 LLM 调用。
     for (const text of options.inbox?.drain() ?? []) {
       appendMessage({ role: 'user', content: `[message from parent session — steering input, not a new task assignment]\n${text}` });
     }
@@ -668,8 +668,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // provider 判定超窗时压缩后重试一次。上限 1 次：再失败说明单轮内容本身就超窗，
     // 重试只会再烧一次调用。已经给用户看过正文**或思考链**时绝不重试，否则会看到重复内容。
     let overflowRetried = false;
-    // transport 重试的累计墙钟（pi auto_retry_start/end 同款事件语义，dsh 还会持久化——
-    // 没有这个落盘，长思考被网关反复掐断时 JSONL 里只是一段几十分钟的时间空洞）。
+    // transport 重试的累计墙钟。不落盘的话，长思考被网关反复掐断时 JSONL 里只是一段几十分钟的时间空洞。
     const transportRetryStartedAt = Date.now();
     for (;;) {
       anchorAt = mirror.length;
@@ -785,7 +784,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         }
       : {};
     if (!reply.toolCalls?.length) {
-      // OpenCode / deepseek-harness 会话环：只有明确的 stop/length/content-filter 且没有工具才退出。
+      // 只有明确的 stop/length/content-filter 且没有工具才退出。
       //
       // 线协议写 `tool_calls`，内部测试写 `tool-calls`，Anthropic 写 `tool_use`——漏掉任何
       // 一种都会把「该调工具」当成收工，表现为突然停止。
@@ -793,7 +792,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       const toolFinish = finish === 'tool_calls' || finish === 'tool-calls' || finish === 'tool_use';
       const stopped = finish !== undefined && !toolFinish && finish !== 'unknown';
       if (!stopped) {
-        // 对齐 dsh：没有明确 finish 且没有工具，不当成成功空消息。有半截才落盘再续。
+        // 没有明确 finish 且没有工具，不当成成功空消息。有半截才落盘再续。
         if (reply.text || reply.thinking || reply.reasoning?.length) {
           appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
         }

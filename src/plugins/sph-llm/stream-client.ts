@@ -68,7 +68,7 @@ const MAX_DEGRADATIONS = 8;
  * 三种协议共用的流式客户端。
  *
  * 两条不变量在这里：
- * 1. 传输失败不提交半截（对齐 dsh：failed chunks 不进会话，同一步再打）。
+ * 1. 传输失败不提交半截：失败的片段不进会话，同一步再打。
  *    思考或正文已经上屏也一样——重试会再流一遍，TUI 可能短暂重复，但不会留下空 assistant。
  *    参数降级只在尚未向用户输出任何内容时发生。
  * 2. 参数降级的结果记在**闭包**里（一个 client ≈ 一个进程/会话），同一会话内换完就不再踩，
@@ -137,7 +137,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           throw error;
         }
         const result = finishStream(acc);
-        // 对齐 deepseek-harness：正常结束但零内容是 EMPTY_RESPONSE，重试同一请求，
+        // 正常结束但零内容按空回复处理，重试同一请求，
         // 不要当成成功空回复让 loop 收工（截图里工具跑完下一跳空体就是这条路径）。
         if (isEmptyReply(result)) {
           throw new RetryableError('LLM returned a completed response with no content');

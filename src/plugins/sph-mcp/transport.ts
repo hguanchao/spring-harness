@@ -3,7 +3,7 @@
  *
  * 显式 `transport` / `type` 优先（stdio、http、sse，以及 streamable-http 这个别名）。
  * 只有 url 时：路径以 `/sse` 结尾走旧 SSE，否则走可流式 HTTP。这和常见托管端点的写法一致，
- * 也和 grok 把 `--transport http` 与 `--transport sse` 分开的原因一样——两种线协议不能混用。
+ * 两种线协议不能混用。
  */
 
 export type McpTransportName = 'stdio' | 'http' | 'sse';

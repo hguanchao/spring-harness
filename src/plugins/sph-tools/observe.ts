@@ -1,5 +1,5 @@
 /**
- * 本轮已读/已写路径。对齐 dsh fs-observation-policy：覆盖或编辑已存在文件前必须先读过。
+ * 本轮已读/已写路径。覆盖或编辑已存在文件前必须先读过，避免在没看过内容时整文件重写。
  * 不落盘——resume 后要重新读。本轮内 write 新建的文件记为已观察，随后 search_replace 不必再读。
  */
 import { existsSync } from 'node:fs';

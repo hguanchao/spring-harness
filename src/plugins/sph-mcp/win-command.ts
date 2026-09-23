@@ -3,9 +3,8 @@
  *
  * 为什么需要这个模块：`spawn('npx', ...)`（不带 shell）在 Windows 上走 CreateProcess，
  * 它在 PATH 里的查找只会自动补 `.exe`，**不认 `PATHEXT`**——而 npx / npm 在 Windows 上
- * 是批处理启动器（`npx.cmd`），根本没有 `npx.exe`。Codex / Claude / `.mcp.json` 配置里
- * `command = "npx"` 是最主流的写法，不解析就等于 Windows 上这类 MCP server 必然 ENOENT
- * （grok-build 用同一条规则解决了这个问题）。
+ * 是批处理启动器（`npx.cmd`），根本没有 `npx.exe`。外部配置里
+ * `command = "npx"` 是最常见的写法，不解析就等于 Windows 上这类 MCP server 必然 ENOENT。
  *
  * 解析到 `.cmd`/`.bat` 还不能直接 spawn：Node ≥18.20 / ≥20.12 出于 CVE-2024-27980 会拒绝
  * 无 shell 的批处理 spawn（EINVAL），必须经 `cmd.exe /d /s /c`。`/c` 内联串由 cmd 的解析器

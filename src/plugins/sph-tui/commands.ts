@@ -35,7 +35,7 @@ export const COMMANDS: readonly CommandItem[] = [
 /**
  * 别名 → 正名。正名进菜单（`/help`、Ctrl+P 命令面板），别名只保证还能敲。
  *
- * 这条分工照抄 grok-build：那边的 `/resume` 是会话选择器的正名，`/sessions` 留作
+ * `/resume` 是会话选择器的正名，`/sessions` 留作
  * 老习惯的重定向。sph 早先只有 `/sessions`，名字留下是因为肌肉记忆和已经写进会话
  * 记录的文本里都是它；新名字与 CLI 的 `sph --resume` 对齐。
  */

@@ -6,8 +6,7 @@
  *
  * 为什么 core 还要留着这些类型：宿主界面（`/mcps` 弹窗、上报文本）与核心配置解析
  * （`[mcp_servers.<name>]`、`[mcp]`）都要说这套数据结构。让它们 import 插件实现就等于把
- * MCP 重新焊回核心——插件被禁用时那些模块连编译都过不去。dsh 用的是同一套切法：
- * 能力接缝留在核心，实现由插件提供（`@deepseek-ai/dsh-mcp-client` 之于 `ctx.mcp`）。
+ * MCP 重新焊回核心——插件被禁用时那些模块连编译都过不去。接缝留在这里，实现留在插件里。
  */
 
 /** `[mcp_servers.<id>]` 的一条声明。表头是 ID；`title` 来自表内可选的 `name`。 */
@@ -19,7 +18,7 @@ export interface McpServerConfig {
   /** stdio 启动命令。与 `url` 二选一；都没有的条目无效。 */
   command?: string;
   args?: string[];
-  /** 追加到子进程环境之上。来源文件（Claude / Codex）里的 env 表直接落到这里。 */
+  /** 追加到子进程环境之上。外部配置里的 env 表直接落到这里。 */
   env?: Record<string, string>;
   /**
    * 远程端点。`transport` 省略时，路径以 `/sse` 结尾走 SSE，否则走可流式 HTTP。
@@ -33,14 +32,14 @@ export interface McpServerConfig {
 
 /** 一个定义的出处：展示标签 + 可否就地改写。 */
 export interface McpOrigin {
-  /** 展示标签，如 `~/.claude.json`、`.sph/config.toml`、`[mcp] disabled_servers`。 */
+  /** 展示标签，如外部配置路径、`.sph/config.toml`、`[mcp] disabled_servers`。 */
   label: string;
   /** 定义所在的文件路径；本地偏好来源指向 sph 用户配置。 */
   path: string;
   /**
    * sph 是否可以直接改写这个文件。
    *
-   * 外部工具的文件（Claude / Codex / `.mcp.json`）一律 false：写入别人的配置会带来
+   * 外部配置文件一律 false：写入别人的配置会带来
    * 意料之外的副作用，启停改为在 sph 自己配置里存一份本地偏好。
    */
   editable: boolean;
@@ -252,8 +251,7 @@ export const PLAN_MODE_SERVICE = 'sph-plan';
 //
 // 可插件化的是**引擎**：Windows 受限令牌、Linux bwrap/Landlock、macOS Seatbelt 是机制不是策略。核心保留
 // `SandboxHandle` 接口与 fail-closed 分派（`--sandbox off` 之外的模式必须有后端，否则拒绝
-// 启动），插件按注册名提供后端。dsh 也是这么切的：`dsh-sandbox` 是接缝，`dsh-sandbox-local`
-// / `dsh-sandbox-windows-acl` / `e2b` 是插件提供的后端。
+// 启动），插件按注册名提供后端。接缝在核心，具体后端在插件里。
 
 import type { SandboxHandle, SandboxMode } from '../sandbox/types.js';
 

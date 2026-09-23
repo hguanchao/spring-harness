@@ -84,8 +84,8 @@ export function bearerJsonHeaders(apiKey: string): Record<string, string> {
 
 /**
  * chat.completions 上推理档位的几种写法。一次只发一种，避免不认识的字段把请求打成 400。
- * 依据是各家文档和 pi 的 openai-completions：OpenAI 用 reasoning_effort，
- * OpenRouter 用 reasoning.effort，智谱用 thinking.type，通义兼容模式用 enable_thinking。
+ * 一次只发一种：`reasoning_effort`、`reasoning.effort`、`thinking.type`、`enable_thinking`。
+ * 端点报文点名哪一个，下一次就改用哪一个。
  */
 export function chatReasoningFields(
   effort: Exclude<ReasoningEffort, 'off'> | undefined,
@@ -191,7 +191,7 @@ function nextToolSlot(acc: SseAcc): number {
   return max + 1;
 }
 
-/** OpenRouter 把思考放在 `reasoning_details[]` 的 text/summary 上，而不是一个字符串。 */
+/** 有的端点把思考放在 `reasoning_details[]` 的 text/summary 上，而不是一个字符串。 */
 function thinkingText(value: unknown): string | undefined {
   if (!Array.isArray(value)) return undefined;
   const parts: string[] = [];
@@ -212,7 +212,7 @@ function applyChatDelta(acc: SseAcc, delta: ChatDelta): { textDelta?: string; th
   const text = firstString(row, TEXT_KEYS);
   if (text) textDelta = appendStreamDelta(acc, text).textDelta;
   for (const call of delta.tool_calls ?? []) {
-    // 寻址顺序对齐 pi：规范形态按 index；不发 index 的网关按 id 匹配已开的调用；
+    // 寻址顺序：规范形态按 index；不发 index 的网关按 id 匹配已开的调用；
     // 都没有就挂到「当前正在填充」的那条上——两个调用完全无差别时任何实现都无法拆分。
     if (typeof call.index === 'number' && Number.isFinite(call.index)) {
       acc.currentToolIndex = call.index;
@@ -252,7 +252,7 @@ export function applySsePayload(payload: string, acc: SseAcc): { textDelta?: str
   const usageRaw =
     json.usage && typeof json.usage === 'object'
       ? json.usage
-      : // Moonshot 把 usage 放在 choice.usage 而不是 chunk.usage（对齐 pi 的 fallback）。
+      : // 有的端点把 usage 放在 choice.usage 而不是 chunk.usage。
         (json as { choices?: Array<{ usage?: unknown }> }).choices?.[0]?.usage;
   if (usageRaw && typeof usageRaw === 'object') {
     const usage = usageRaw as Record<string, unknown>;

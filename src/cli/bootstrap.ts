@@ -83,7 +83,7 @@ export interface BootstrapOptions {
   untrusted: 'error' | 'confirm';
   /** TUI 启动前的信任确认；headless 不提供，继续走 fail-closed。 */
   confirmUntrustedWorkspace?: (workspaceRoot: string) => Promise<boolean>;
-  /** `-c` / `--continue`：续用本工作区最近一次会话；省略则新建（与 pi 的默认一致）。 */
+  /** `-c` / `--continue`：续用本工作区最近一次会话；省略则新建。 */
   continueSession: boolean;
   /** `--resume <id>`：打开指定会话。 */
   resumeId?: string;
@@ -267,7 +267,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     throw error;
   }
 
-  // 会话选择与 pi 对齐：默认新建；只有 `-c/--continue` 才续用最近一次主会话。
+  // 默认新建；只有 `-c/--continue` 才续用最近一次主会话。
   let session = await sessionApi.resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
   if (options.resumeId) {
     const file = join(sessionDir, `${options.resumeId}.jsonl`);

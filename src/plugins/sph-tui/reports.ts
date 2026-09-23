@@ -100,7 +100,7 @@ export function renderMcpReport(input: {
       'args = ["-y", "demo-mcp"]',
       '```',
       '',
-      'Claude (`~/.claude.json`), Codex (`~/.codex/config.toml`) and `.mcp.json` are read too.',
+      'External MCP configs and `.mcp.json` are read too.',
       'stdio, HTTP, and SSE servers are started. Set `type = "sse"` when the URL is the legacy event stream.',
     );
   } else {

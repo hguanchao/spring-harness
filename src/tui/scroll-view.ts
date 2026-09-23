@@ -25,7 +25,7 @@ export interface ScrollViewScrollToOptions {
 }
 
 /**
- * grok-build pin-reserve：回复还不满一屏时，在底部留白，让最新用户消息能停在视口顶。
+ * 回复还不满一屏时，在底部留白，让最新用户消息能停在视口顶。
  * 回复一旦超出一屏，留白归零，跟真实内容底。
  */
 export function pinReservePad(
@@ -57,7 +57,7 @@ export class ScrollView extends Container {
 	private scrollbarActive = false;
 	/** 最新用户消息在内容中的 y；follow-end 时优先把它留在视口顶，答过长再贴底。 */
 	private pinY: number | undefined;
-	/** 为把 pinY 滚到视口顶而加在内容底的空行（grok pin-reserve）。 */
+	/** 为把 pinY 滚到视口顶而加在内容底的空行。 */
 	private reservedPad = 0;
 
 	constructor(component: Component, options: ScrollViewOptions = {}) {
@@ -95,7 +95,7 @@ export class ScrollView extends Container {
 
 	get isScrollbarVisible(): boolean {
 		if (this.scrollbar === "always") return this.currentViewportHeight > 0;
-		// 与 grok-build 一样：可滚高度（含 pin-reserve）超出视口才画。留白让「用户消息钉在顶」成为真的滚动底，滑块跟这个范围走。
+		// 可滚高度（含底部留白）超出视口才画。留白让「用户消息钉在顶」成为真的滚动底，滑块跟这个范围走。
 		return this.scrollbar === "auto" && this.scrollHeight > this.currentViewportHeight;
 	}
 

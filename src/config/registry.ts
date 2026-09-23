@@ -5,10 +5,9 @@
  * 「这个端点长什么样」，而不是「sph 怎么工作」。分开之后 config.toml 只回答「用哪个
  * 端点」，端点自身的一切都在这里，一个端点写一次。
  *
- * 与 pi 的 models.json 的关系：结构与字段名对齐（`providers` / `baseUrl` / `apiKey` /
- * `models` / `contextWindow` / `maxTokens`），便于两边迁移。刻意**不支持**三样东西——
- * `!command`（等于从配置文件执行任意 shell，sph 有沙箱体系，不引入新的执行路径）、
- * `cost`（没有成本统计，没有消费者）、`modelOverrides`/`oauth`（sph 没有内置模型目录）。
+ * 字段是 `providers` / `baseUrl` / `apiKey` / `models` / `contextWindow` / `maxTokens`。
+ * 刻意不支持三样东西：`!command`（等于从配置文件执行任意 shell）、`cost`（没有成本统计）、
+ * `oauth`（没有内置登录目录）。
  *
  * 解析一律 fail-closed：缺 provider、重复模型 id、字段类型错误都直接抛错。声明是手写
  * 文件，静默忽略一个拼错的字段，表现为「配置明明写了却不生效」，最难排查。
@@ -334,7 +333,7 @@ export interface ResolvedModel {
  * 优先级 `api`：CLI `--api` > 模型级 > provider 级。`--api` 是最高的逃生口，因为它表达的
  * 是「我知道自己在干什么，这一个进程全按这个协议发」。
  *
- * `compat` 逐键浅合并（模型级赢）：与 pi 的语义一致，且 provider 级能作默认值。
+ * `compat` 逐键浅合并（模型级赢）：provider 级作默认，模型级只盖住自己写了的键。
  */
 export function resolveModel(
   provider: ProviderDeclaration,

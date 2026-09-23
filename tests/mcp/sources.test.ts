@@ -62,7 +62,7 @@ function sphConfig(...servers: Array<{ name: string; command: string }>): string
 }
 
 describe('discoverMcpServers 来源优先级', () => {
-  it('sph 自身 > Claude > Codex > .mcp.json，同名整条替换', () => {
+  it('sph 自身高于外部配置，外部配置高于 .mcp.json，同名整条替换', () => {
     const s = scaffold();
     try {
       s.write('.mcp.json', JSON.stringify({ mcpServers: { shared: { command: 'from-mcp-json' } } }));
@@ -115,7 +115,7 @@ describe('discoverMcpServers 来源优先级', () => {
     }
   });
 
-  it('.mcp.json 同样按「越近越优先」，与 grok-build 的 repo-root-down 一致', () => {
+  it('.mcp.json 同样按「越近越优先」', () => {
     const s = scaffold();
     try {
       s.write('.mcp.json', JSON.stringify({ mcpServers: { shared: { command: 'root' } } }));
@@ -200,7 +200,7 @@ describe('discoverMcpServers 特殊字段', () => {
     }
   });
 
-  it('Claude 的 type 与 headers 被收下', () => {
+  it('JSON 里的 type 与 headers 被收下', () => {
     const s = scaffold();
     try {
       s.write('.mcp.json', JSON.stringify({
@@ -218,7 +218,7 @@ describe('discoverMcpServers 特殊字段', () => {
     }
   });
 
-  it('Claude 的 disabled 与 Codex 的 enabled 都折算成 enabled', () => {
+  it('disabled 与 enabled 都折算成启用态', () => {
     const s = scaffold();
     try {
       write(
@@ -240,7 +240,7 @@ describe('discoverMcpServers 特殊字段', () => {
     }
   });
 
-  it('Codex 的 env_vars 就地展开成具体值，而不是留一个「继承」标记', () => {
+  it('env_vars 就地展开成具体值，而不是留一个「继承」标记', () => {
     // sph 的 spawn 只吃一张现成的环境表；把继承留到 spawn 时会让命令签名的比较也变复杂。
     const s = scaffold();
     try {
@@ -261,7 +261,7 @@ describe('discoverMcpServers 特殊字段', () => {
     }
   });
 
-  it('Claude 的 projects 段按查找链读取，找不到精确 cwd 也能用仓库根那份', () => {
+  it('projects 段按查找链读取，找不到精确 cwd 也能用仓库根那份', () => {
     const s = scaffold();
     try {
       write(

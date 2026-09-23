@@ -1,6 +1,6 @@
 /**
  * 最小 JSONL RPC：stdin 一行一个命令，stdout 一行一个事件。
- * 只覆盖 prompt / abort / quit，给脚本嵌 sph 用，不是完整 pi RPC。
+ * 只覆盖 prompt / abort / quit，给脚本嵌 sph 用。没有会话树、权限和子代理那些入口。
  */
 import { createInterface } from 'node:readline';
 import { HeadlessApprover } from '../permission/policy.js';

@@ -8,7 +8,7 @@ export const APPROVAL_MODES: readonly ApprovalMode[] = ['ask', 'auto', 'yolo'];
  *
  * `inherit`：复用父会话的审批器，包括父会话已经批准过的授权——子代理是父会话派出去的
  * 同一件事的延续。`strict`：fail-closed，受审工具一律拒绝、不弹窗、不共享父会话的授权
- * ——后台子代理不该把交互决策传下去，也不该悄悄扩大父会话的授权面（对齐 dsh 的强制 never）。
+ * ——后台子代理不该把交互决策传下去，也不该悄悄扩大父会话的授权面。严格档下受审工具直接拒绝。
  */
 export const SUBAGENT_APPROVAL_POLICIES = ['inherit', 'strict'] as const;
 export type SubagentApprovalPolicy = (typeof SUBAGENT_APPROVAL_POLICIES)[number];
@@ -28,7 +28,7 @@ export interface ApprovalRequest {
  * 与「模式」的分工——模式（ask/auto/yolo）是**全局的当下态度**，规则是**针对具体动作的
  * 长期意图**。用户写下的规则比一次模式切换更具体，所以优先级更高；deny 尤其如此：
  * 它是「这个绝对不能做」的硬边界，必须连 yolo 都绕不过去。
- * （grok-build 的注释也是这么定的：deny 在任何模式之前强制拒绝。）
+ * deny 在任何模式之前强制拒绝，包括总是允许。
  */
 export type RuleAction = 'allow' | 'ask' | 'deny';
 
@@ -60,7 +60,7 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 /**
- * 按顶层分隔符把复合命令拆成子命令，规则逐段匹配（对齐 Claude Code 的语义）。
+ * 按顶层分隔符把复合命令拆成子命令，规则逐段匹配。管道和逻辑连接符不能靠一条放行把后半段也放过去。
  *
  * 识别的分隔符：`&&`、`||`、`;`、`|`、`|&`、`&`、换行。引号内与反斜杠转义的
  * 分隔符不是切点（`echo "a && b"` 是一条命令）；`2>&1` 里的 `&` 是文件描述符
@@ -247,9 +247,9 @@ function ruleMatches(entry: string, request: ApprovalRequest, detail = approvalD
 /**
  * 按 deny > ask > allow 的次序求值；无命中返回 undefined（交回模式与授权集合决定）。
  *
- * 顺序就是优先级，两个参考实现（grok-build、Claude Code）都是这个次序。
+ * 顺序就是优先级：先拒绝，再询问，再允许，最后才看审批模式。
  *
- * 复合命令（bash/pwsh）逐段求值（对齐 Claude Code）：deny/ask 命中**任一**子命令
+ * 复合命令（bash/pwsh）逐段求值：deny/ask 命中**任一**子命令
  * 即命中——`npm test && rm -rf /` 里那段 rm 逃不掉；allow 必须覆盖**每一个**子命令，
  * 漏一段就落回模式决定。解析不了的命令（未闭合引号、截断的操作符、未闭合的子 shell）
  * 不允许被 allow 规则放行，fail-closed 交回模式；deny/ask 仍按原文兜底匹配，

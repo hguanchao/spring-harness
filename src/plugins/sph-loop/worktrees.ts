@@ -9,13 +9,13 @@ export interface WorktreeInfo {
 }
 
 /**
- * 子代理 git worktree 隔离（grok-build 的 isolation: worktree 同语义）。
+ * 子代理 git worktree 隔离：子代理改文件不落在用户当前工作区。
  *
  * 工作树建在 workspace root 内部的 .sph/worktrees/ 下：Windows ACL 沙箱的写授权与
  * Linux bwrap 的 bind 都按 workspace root 授予，树放在 workspace 外面子代理写不进。
  * .sph/ 追加进 .git/info/exclude（仓库本地排除，不动用户的 .gitignore）。
  *
- * 解析失败（非 git 仓库 / git 不可用 / worktree add 失败）即 spawn 失败——grok 同语义，
+ * 解析失败（非 git 仓库 / git 不可用 / worktree add 失败）即 spawn 失败——
  * 不静默降级成共享工作区。
  */
 export class WorktreeStore {

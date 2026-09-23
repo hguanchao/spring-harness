@@ -303,7 +303,7 @@ describe('空流与截断', () => {
     assert.equal(calls, 2);
   });
 
-  it('已经输出过正文后流中断：丢弃半截并重打（对齐 dsh partial_disconnect）', async () => {
+  it('已经输出过正文后流中断：丢弃半截并重打', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;

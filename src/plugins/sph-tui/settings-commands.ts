@@ -267,7 +267,7 @@ async function promptApi(host: SettingsCommandHost, current: ApiProtocol): Promi
 /**
  * `/permission [mode]`：无参数打开选择器，带参数直接设。
  *
- * 命令名对齐 dsh 的 `/permission`；写回的配置键仍是 `approval`——那是「审批策略」这个
+ * 命令名是 `/permission`；写回的配置键仍是 `approval`——那是「审批策略」这个
  * 概念的名字，而且已经躺在用户既有的 config.toml 里，跟着改名会静默丢掉他们的设置。
  */
 export async function commandPermission(host: SettingsCommandHost, argument = ''): Promise<void> {

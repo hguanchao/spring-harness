@@ -21,7 +21,7 @@ export interface McpServerConfig {
   /** stdio 启动命令。与 `url` 二选一；都没有的条目无效。 */
   command?: string;
   args?: string[];
-  /** 追加到子进程环境之上。来源文件（Claude / Codex）里的 env 表直接落到这里。 */
+  /** 追加到子进程环境之上。外部配置里的 env 表直接落到这里。 */
   env?: Record<string, string>;
   /**
    * 远程端点。`transport` 省略时路径以 `/sse` 结尾走 SSE，否则走可流式 HTTP。
@@ -43,7 +43,7 @@ export interface McpOrigin {
   /**
    * sph 是否可以直接改写这个文件。
    *
-   * 外部工具的文件（Claude / Codex / `.mcp.json`）一律 false：写入别人的配置会带来
+   * 外部配置文件一律 false：写入别人的配置会带来
    * 意料之外的副作用，启停改为在 sph 自己配置里存一份本地偏好。
    */
   editable: boolean;

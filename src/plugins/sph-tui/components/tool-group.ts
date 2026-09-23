@@ -2,7 +2,7 @@
  * 工具调用分组：把一段连续的工具调用收成一行汇总，形成三级渐进披露——
  * 汇总行（默认）→ 成员一行摘要（双击汇总行）→ 该工具的头尾预览（再双击成员行）。
  *
- * 汇总文案对齐参考实现 grok-build 的 verb-group：动词按时态切换（`Read` / `Reading`）、
+ * 汇总文案：动词按时态切换（`Read` / `Reading`）、
  * 名词按数量变单复数（`file` / `files`），按 kind 首次出现的顺序拼成
  * `Read 3 files, Searched 2 patterns`，有失败成员时在尾部追加 ` · N failed`。
  *
@@ -46,7 +46,7 @@ import {
 /** 扫光心跳周期：与状态行 Loader / 子代理行的转圈帧同拍（80ms）。 */
 const SHIMMER_TICK_MS = 80;
 
-/** 汇总行用的动词/名词词表（对齐 grok-build 的 VerbGroupKind）。 */
+/** 汇总行用的动词/名词词表。 */
 type VerbKind =
   | 'file'
   | 'skill'

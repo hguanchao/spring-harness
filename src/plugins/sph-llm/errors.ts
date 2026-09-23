@@ -52,7 +52,7 @@ const EXCEEDS_MODEL_CONTEXT = /\b(?:input|prompt|request|messages?)\b.{0,40}\b(?
  *
  * 刻意不把「413」单独当判据：413 是通用「载荷过大」，一张超限图片也会触发，
  * 对它做压缩重试纯属浪费一次调用。413 只有在正文命中措辞时才归类。
- * 结构化措辞对齐 dsh `isContextWindowExceededError`，避免漏掉 `context_window_limit_exceeded`。
+ * 结构化措辞里要认 `context_window_limit_exceeded`，否则超窗会被当成普通 400。
  */
 export function looksLikeContextOverflow(text: string): boolean {
   const lower = text.toLowerCase();
@@ -62,7 +62,7 @@ export function looksLikeContextOverflow(text: string): boolean {
     || EXCEEDS_MODEL_CONTEXT.test(text);
 }
 
-/** 对齐 dsh `isQuotaExceededError`：额度用尽不是瞬时 429。 */
+/** 额度用尽不是瞬时 429，重试没有意义。 */
 export function looksLikeQuotaExceeded(text: string): boolean {
   return /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/i.test(text)
     || /\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|exhausted|reached)\b/i.test(text)
@@ -72,7 +72,7 @@ export function looksLikeQuotaExceeded(text: string): boolean {
 }
 
 /**
- * HTTP 状态 → 稳定码。对齐 dsh `httpErrorCode`：401/403 AUTH，429 RATE_LIMIT，
+ * HTTP 状态 → 稳定码：401/403 AUTH，429 RATE_LIMIT，
  * 5xx SERVER，400 超窗单独识别。额度用尽不当成可重试限流。
  */
 export function classifyHttpError(status: number, detail: string): string {

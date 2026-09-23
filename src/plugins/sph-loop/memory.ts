@@ -5,7 +5,7 @@ import { pathEscapes, toWorkspaceRelative } from '../../workspace/boundary.js';
 /**
  * 项目记忆加载与触碰式注入。
  *
- * 设计取舍：不做 pi 的祖先目录递归链——sph 的 workspace root 已经由 git
+ * 设计取舍：不沿祖先目录递归找说明文件——工作区根已经由 git
  * 边界确定，向上越界反而模糊了 workspace 概念。采取三层：
  * 用户级 ~/.sph/AGENTS.md（全局偏好）→ workspace root 的 AGENTS.md →
  * root 的 CLAUDE.md（兼容存量项目）。子目录 AGENTS.md 采用触碰注入：

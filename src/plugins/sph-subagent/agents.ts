@@ -1,7 +1,7 @@
 /**
  * 子代理定义：一份 markdown，frontmatter 声明能力，正文是它的系统提示词。
  *
- * 形态对齐 pi-subagents 的 agent 文件，只保留 sph 真正执行的字段：
+ * 代理定义文件只保留真正执行的字段：
  * name、description、tools、writes。advertise / model / chain / workflow 不在这里——
  * sph 没有那一套运行时，加字段只会让定义看起来能做它做不到的事。
  *

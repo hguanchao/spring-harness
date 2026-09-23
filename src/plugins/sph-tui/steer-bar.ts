@@ -225,7 +225,7 @@ export class SteerBar {
     if (event.type === 'move') {
       // 悬停：该行铺浅底并亮出动作按钮。移出的隐藏由 onMouseMotion 先清、这里的命中
       // 分发再点亮（同帧内一清一亮，不需要绝对坐标）。悬停不劫持键盘选中（cursor
-      // 只由单击/键盘改，grok 同款——hover 只负责亮按钮）。首行是上间距空行：y 换算
+      // 只由单击/键盘改，悬停只负责亮按钮）。首行是上间距空行：y 换算
       // 行下标要扣掉。
       if (onRow) {
         const button = this.buttons.find((b) => b.row === row && event.x >= b.x0 && event.x < b.x1);

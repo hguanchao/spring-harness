@@ -14,7 +14,7 @@ function fakeClient(reply: string | Error, onCall?: (messages: Array<{ role: str
 }
 
 describe('sanitizeSessionTitle', () => {
-  it('剥掉控制字符与 bidi 隔离符（OSC 净化面，对齐 codex terminal_title）', () => {
+  it('剥掉控制字符与 bidi 隔离符，标题才能进终端标题转义', () => {
     assert.equal(sanitizeSessionTitle('fix\u001b]0;pwn\u202eauth'), 'fix]0;pwnauth');
     assert.equal(sanitizeSessionTitle('a\u2066b\u2069c'), 'abc');
   });

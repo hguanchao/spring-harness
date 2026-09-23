@@ -1,7 +1,7 @@
 /**
  * 会话标题：终端 tab 的常驻名字。
  *
- * 对齐 Claude Code / Codex 的做法——首轮回复后用一次廉价 LLM 调用把「用户请求 +
+ * 首轮回复后用一次廉价 LLM 调用把「用户请求 +
  * 助手回复」概括成 3-8 词的标题，随会话持久化（resume 直接回放，不重新生成）。
  * 生成是装饰性开销：失败静默返回 undefined，绝不打扰主流程。
  */
@@ -23,7 +23,7 @@ const SESSION_TITLE_SYSTEM = [
 ].join('\n');
 
 /**
- * 清洗后才能进 OSC 转义序列（对齐 codex terminal_title 的净化面）：控制字符可能
+ * 清洗后才能进 OSC 转义序列：控制字符可能
  * 终止或重塑转义序列，bidi/隔离符能视觉重排标题；`|` 是我们的标题分隔符，出现即折成 `/`。
  */
 export function sanitizeSessionTitle(raw: string): string {

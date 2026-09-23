@@ -1,7 +1,7 @@
 /**
  * 工具调用块：标题行（`>` + 工具名 + 参数摘要）+ 按需详情。
  *
- * 对齐 grok-build 的分层披露：分组展开只露一行成员摘要；再双击该行才出预览。
+ * 分层披露：分组展开只露一行成员摘要；再双击该行才出预览。
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。
  *
@@ -369,7 +369,7 @@ export class ToolExecutionComponent extends Container {
    * 进行与完成同字形同色（`▸`），靠标题 shimmer 区分——同一批工具行在跑完之后
    * 只应该「静下来」，而不是整行换色，否则一轮收尾会有半屏颜色跳变。
    */
-  /** List 折叠行带 `(N entries)`，与 grok-build 的 List 标题同形。 */
+  /** List 折叠行带 `(N entries)`，一行里能看出有多少项。 */
   private listEntrySuffix(): string {
     if (this.toolName !== 'ls' || !this.result || this.result.isError) return '';
     const count = this.result.content.split(/\r\n|\r|\n/).filter((line) => line.trim() !== '').length;

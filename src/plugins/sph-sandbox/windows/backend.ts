@@ -51,7 +51,7 @@ export function tokenTierFor(command: string): 'filtered' | 'restricted' {
  *   登录 SID + Everyone（保活不变式）+ 能力 SID；写访问做「正常检查 ∩ 受限检查」
  *   交集，工作区与私有临时目录之外的写一律被拒。TMP/TEMP 重写到私有临时目录，
  *   pwsh 的程序集探针才能落进已授权的位置（否则保守降级 ConstrainedLanguage）。
- *   这是 dsh windows-acl 方案验证过的有效域。
+ *   写限制覆盖工作区和私有临时目录，工作区外的写会被拒绝。
  * - bash（msys/cygwin 运行时）→ **过滤令牌**：cygwin 初始化要创建只授「用户 SID」
  *   的共享节与信号管道，受限列表把它拒掉（couldn't create signal pipe）——受限
  *   围栏与 cygwin 对象模型根本冲突。bash 只保留 LUA + 剥特权，写入边界落在工具层

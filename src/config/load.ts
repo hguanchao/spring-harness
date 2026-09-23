@@ -81,7 +81,7 @@ export interface SphConfig {
    * 三态：undefined 回退 HTTP(S)_PROXY 环境变量；显式 "" 强制直连；非空必须 http(s)。
    */
   proxy?: string;
-  /** 子代理嵌套深度预算：0 禁止派生，默认 1 层（对齐 grok-build 的扁平代理树）。 */
+  /** 子代理嵌套深度预算：0 禁止派生，默认 1 层，避免子代理再派子代理。 */
   subagentMaxDepth: number;
   /**
    * Anthropic 协议打 prompt-cache 断点，默认开。
@@ -102,7 +102,7 @@ export interface SphConfig {
   /**
    * MCP 的本地启停偏好（`[mcp]` 段）。
    *
-   * 来自外部工具配置（Claude / Codex / `.mcp.json`）的 server 一概不写回原文件，启停只在
+   * 来自外部配置文件的 server 一概不写回原文件，启停只在
    * 这里叠一层覆盖。这样「读别人的配置」和「改别人的配置」被彻底分开——后者会带来意料
    * 之外的副作用，而且很难撤销。
    */
@@ -262,7 +262,7 @@ function parsePromptCache(value: unknown): boolean {
 }
 
 /**
- * 子代理嵌套深度预算：非负整数，默认 1（对齐 grok-build 的扁平代理树，防止失控派生）。
+ * 子代理嵌套深度预算：非负整数，默认 1，防止子代理再往下派生。
  * 0 = 完全禁止派生；超出预算的调用在运行时被拒——工具保持对子代理可见，
  * 由运行时策略统一负责拒绝，schema 不做裁剪。
  */

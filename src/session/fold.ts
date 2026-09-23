@@ -30,8 +30,7 @@ export interface FoldedSessionState {
   /** 跨轮次的任务目标；空字符串表示已清除。 */
   goal?: string;
   /**
-   * 会话出现过的最大代理深度（对齐 deepseek-harness 的持久化 delegationDepth：
-   * 递归预算必须活过持久化——resume 拿它当下限，恢复出的子代理才不会伪装成顶层继续派生）。
+   * 会话出现过的最大代理深度。必须落盘：resume 拿它当下限，恢复出的子代理才不会伪装成顶层继续派生。
    */
   depth: number;
   /** 最近的工具失败（最旧在前）。 */
@@ -41,7 +40,7 @@ export interface FoldedSessionState {
    *
    * 自动 recap 靠它判断「距上次 recap 有没有新轮次」，所以必须活过持久化：
    * 只看内存的话，重启一次就会把同一段会话再 recap 一遍。
-   * 手动与自动 recap 提交时都会推进它（对齐 grok-build 的 last_recap_main_turn）。
+   * 手动与自动 recap 提交时都会推进它。
    */
   lastRecapMainTurn: number;
   /** 最近一次 recap 的正文（含未上屏的长尾输出），供 /status 展示。 */

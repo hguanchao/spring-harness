@@ -2,7 +2,7 @@
  * 启动前的工作区信任闸门。
  *
  * 信任发生在 sandbox / session / agent 创建之前，不能复用 InteractiveMode 的会话布局。
- * 画面对齐 grok-build 的 welcome trust：全屏居中（logo、提问、路径、风险说明、y/n）。
+ * 画面全屏居中：logo、提问、路径、风险说明、y/n。
  * 替代屏幕由调用方 start 一次，本模块只换 layout，确认后主界面在同一块屏上接手。
  */
 
@@ -31,7 +31,7 @@ const MENU = [
 /** 与 header 同一套字标，去掉左缘空格后给居中排版。 */
 const LOGO_SMALL = ['▄▄▄▄  ▄▄▄▄  ▄▄  ▄▄', '██▄▄  ██▄█▄ ██▄▄██', '▀▀▀▀  ▀▀ ▀▀ ▀▀  ▀▀'];
 
-/** 高终端上用更高的字标，体量接近 grok-build 的 stacked logo。 */
+/** 高终端上用更高的字标。 */
 const LOGO_FULL = [
   '▄▄▄▄▄▄  ▄▄▄▄▄▄  ▄▄    ▄▄',
   '██      ██  ██  ██    ██',
@@ -71,7 +71,7 @@ function centeredWrapped(text: string, color: (s: string) => string, inner: numb
 }
 
 /**
- * grok-build welcome trust 的全屏画面：垂直按「上 1/3 留白 + 内容 + 弹性空白 + 版本」堆叠，
+ * 全屏画面：垂直按「上 1/3 留白 + 内容 + 弹性空白 + 版本」堆叠，
  * 菜单是左标签右快捷键；↑/↓ 选中，Enter 确认当前项，y 信任，n/Esc 退出。
  */
 class TrustScreen implements Component {
