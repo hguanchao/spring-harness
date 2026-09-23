@@ -53,7 +53,8 @@ import type { LlmClient, ReasoningEffort, TokenUsage } from '../sph-llm/openai.j
 import { SpillStore } from '../sph-storage/spill.js';
 import { sessionEventData, type SessionFailure } from '../sph-session/fold.js';
 import { jsonlSessionFactory } from '../sph-session/store.js';
-import { SESSION_SERVICE, type SessionService } from '../services.js';
+import { EMPTY_PLUGIN_SERVICES } from '../types.js';
+import { SESSION_SERVICE, STORAGE_SERVICE, type SessionService, type SpillStorePort, type StorageService } from '../services.js';
 import { sessionService } from '../sph-session/index.js';
 import type { SessionPort } from '../../session/types.js';
 import { defaultTools } from '../sph-tools/index.js';
@@ -168,6 +169,20 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   /** 与 runTurn 共享同一对象，工具进出计划模式会原地翻转。 */
   private readonly plan = { active: false };
   private gitBranch?: string;
+
+  /** 超长工具结果落盘。装了插件就用 sph-storage；测试没装插件才直接建内置存储。 */
+  private openSpill(): SpillStorePort | undefined {
+    const root = this.deps.spillRoot;
+    if (root === undefined) return undefined;
+    const dir = join(root, this.session.id);
+    const threshold = this.deps.spillThreshold ?? 8 * 1024;
+    const storage = this.deps.pluginServices.get<StorageService>(STORAGE_SERVICE);
+    if (storage) return storage.open(dir, threshold);
+    if (this.deps.pluginServices === EMPTY_PLUGIN_SERVICES) {
+      return new SpillStore(dir, threshold);
+    }
+    return undefined;
+  }
 
   private running = false;
   /** 终端 tab 标题的项目段：工作区目录名，一次进程内不变。 */
@@ -640,7 +655,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         model: this.model,
         session: this.session,
         tools: this.deps.tools ?? defaultTools,
-        sessions: this.deps.sessions ?? jsonlSessionFactory,
+        sessions: this.deps.sessions
+          ?? this.deps.pluginServices.get<SessionService>(SESSION_SERVICE)?.factory
+          ?? (this.deps.pluginServices === EMPTY_PLUGIN_SERVICES ? jsonlSessionFactory : undefined),
         sandbox: this.deps.sandbox,
         approver: this.approver,
         contextWindow: this.contextWindow,
@@ -662,9 +679,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         onAuxUsage: (usage, purpose) => this.recordAuxUsage(usage, purpose),
         ...(mentions.attachments.length > 0 ? { attachments: mentions.attachments } : {}),
         ...(mentions.images.length > 0 ? { userImages: mentions.images } : {}),
-        ...(this.deps.spillRoot === undefined
-          ? {}
-          : { spill: new SpillStore(join(this.deps.spillRoot, this.session.id), this.deps.spillThreshold) }),
+        ...(this.deps.spillRoot === undefined ? {} : { spill: this.openSpill() }),
         ...(this.subagentApprover === undefined ? {} : { subagentApprover: this.subagentApprover }),
       });
     } catch (error) {

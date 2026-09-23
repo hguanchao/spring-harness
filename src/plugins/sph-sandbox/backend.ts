@@ -12,6 +12,7 @@ export async function createSandboxBackend(
   mode: SandboxMode,
   workspaceRoot: string,
   tempDir: string,
+  keepWorkspaceGrant?: () => boolean,
 ): Promise<SandboxHandle> {
   if (mode === 'off') throw new SandboxError('sandbox off has no confined backend');
   if (process.platform === 'win32') {
@@ -21,6 +22,7 @@ export async function createSandboxBackend(
       workspaceRoot,
       sphHomeDir: sphHome(),
       tempDir,
+      keepWorkspaceGrant,
     });
     await backend.init();
     return backend;

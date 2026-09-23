@@ -5,7 +5,7 @@ import type { PluginApi } from '../types.js';
 import { SESSION_SERVICE, type SessionService } from '../services.js';
 import { exportHtml, exportJson, exportMarkdown } from './export.js';
 import { foldSessionState } from './fold.js';
-import { acquireSessionLock, SessionLockedError } from './lock.js';
+import { acquireSessionLock, hasOtherLiveSessionIn, SessionLockedError } from './lock.js';
 import { sessionDirFor } from './path.js';
 import { jsonlSessionFactory, listSessions, setCurrentSession } from './store.js';
 
@@ -17,6 +17,7 @@ export const sessionService: SessionService = {
   activate: setCurrentSession,
   acquireLock: acquireSessionLock,
   isLockError: (error) => error instanceof SessionLockedError,
+  hasOtherLiveSession: (workspaceRoot) => hasOtherLiveSessionIn(sessionDirFor(workspaceRoot)),
   factory: jsonlSessionFactory,
   list: (dir, options) => listSessions(dir, options),
   fold: (records) => foldSessionState(records),

@@ -17,8 +17,8 @@ import { runToolBatch } from './tool-run.js';
 import { CacheMissTracker, describeCacheMiss } from '../sph-llm/cache-stats.js';
 import { ContextOverflowError } from '../sph-llm/errors.js';
 import type { ChatMessage, TokenUsage } from '../sph-llm/openai.js';
-import { EMPTY_TODO, MCP_SERVICE, SKILLS_SERVICE, TODO_SERVICE, todoEventData, type McpService, type SkillService, type TodoService } from '../services.js';
-import { EMPTY_PLUGIN_SERVICES } from '../types.js';
+import { EMPTY_TODO, MCP_SERVICE, SCHEDULER_SERVICE, SESSION_SERVICE, SKILLS_SERVICE, TODO_SERVICE, todoEventData, type McpService, type SchedulerService, type SessionService, type SkillService, type TodoService } from '../services.js';
+import { EMPTY_PLUGIN_SERVICES, type PluginServices } from '../types.js';
 import { JobBoard, jobNotificationText, type JobRecord } from '../sph-schedule/jobs.js';
 import { WorktreeStore } from './worktrees.js';
 import { shellArgv } from '../../sandbox/shell-bin.js';
@@ -111,19 +111,28 @@ function parseArgs(raw: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/** 没装插件（测试）才用内置实现。正式启动缺服务就是缺，不退回 JSONL 或自建任务板。 */
+function bundled<T>(services: PluginServices, value: T): T | undefined {
+  return services === EMPTY_PLUGIN_SERVICES ? value : undefined;
+}
+
 export async function runTurn(options: RunTurnOptions): Promise<void> {
   const depth = options.depth ?? 0;
   const maxSubagentDepth = Math.max(0, Math.floor(options.maxSubagentDepth ?? 1));
   const registry = options.tools;
-  const sessions = options.sessions ?? jsonlSessionFactory;
   const services = options.services ?? EMPTY_PLUGIN_SERVICES;
+  const sessionApi = services.get<SessionService>(SESSION_SERVICE);
+  const sessions = options.sessions ?? sessionApi?.factory ?? bundled(services, jsonlSessionFactory);
+  if (!sessions) throw new Error('sph-session is not loaded');
+  const fold = sessionApi?.fold ?? bundled(services, foldSessionState);
   // 测试不装插件，直接扫技能目录。正式启动装了插件之后，关掉 sph-skills 就是空目录，
   // 不再回落到循环自己的那份扫描。
   const skills = services === EMPTY_PLUGIN_SERVICES
     ? scanSkills(options.workspaceRoot)
     : (services.get<SkillService>(SKILLS_SERVICE)?.scan(options.workspaceRoot) ?? { catalog: [], warnings: [] });
   for (const warning of skills.warnings) options.listener?.({ type: 'status', text: warning });
-  const jobs = options.jobs ?? new JobBoard();
+  const jobs = options.jobs ?? services.get<SchedulerService>(SCHEDULER_SERVICE)?.create() ?? bundled(services, new JobBoard());
+  if (!jobs) throw new Error('sph-schedule is not loaded');
   const mcp = services.get<McpService>(MCP_SERVICE);
   // todo 与 mcp 同一套缺席语义：插件被禁用时清单不可用。工具表里也不会有 todo 工具，
   // 所以这里缺省成「空清单 + 不写事件」不会让任何核心路径拿到 undefined 而崩。
@@ -164,7 +173,11 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   // token 预算：整棵代理树的累计量（自己的 usage + 各子代理 end 事件里的 tokens）。
   const budget = Math.max(0, Math.floor(options.maxSessionTokens ?? 0));
   const budgetWarnAt = budget > 0 ? Math.floor(budget * BUDGET_WARN_RATIO) : 0;
-  let sessionTokens = budget > 0 ? foldSessionState(options.session.readAll()).tokensUsed : 0;
+  let sessionTokens = 0;
+  if (budget > 0) {
+    if (!fold) throw new Error('sph-session is not loaded');
+    sessionTokens = fold(options.session.readAll()).tokensUsed;
+  }
   let budgetWarned = false;
   /**
    * 记账。

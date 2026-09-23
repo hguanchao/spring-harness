@@ -352,6 +352,8 @@ export interface FoldedSessionView {
   goal?: string;
   failures: { tool: string; excerpt: string; ts: string }[];
   planMode: boolean;
+  /** 整棵代理树累计 token。预算靠它活过 resume。 */
+  tokensUsed: number;
 }
 
 export interface SessionService {
@@ -362,6 +364,8 @@ export interface SessionService {
   activate(dir: string, id: string, workspaceRoot: string): void;
   acquireLock(dir: string, id: string): () => void;
   isLockError(error: unknown): boolean;
+  /** 这个工作区是否还有别的活着的会话锁。沙箱退出时据此决定要不要收工作区授权。 */
+  hasOtherLiveSession(workspaceRoot: string): boolean;
   factory: SessionFactory;
   list(dir: string, options?: { search?: string; includeSubagents?: boolean }): Promise<SessionInfo[]>;
   fold(records: readonly SessionRecord[]): FoldedSessionView;

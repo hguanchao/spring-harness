@@ -7,6 +7,7 @@
 
 import { flattenWhitespace } from '../../util.js';
 import type { SessionPort } from '../../session/types.js';
+import { EMPTY_PLUGIN_SERVICES } from '../types.js';
 import { SESSION_SERVICE, type SessionService } from '../services.js';
 import { sessionService } from '../sph-session/index.js';
 import { primaryColumnWidthFor } from './commands.js';
@@ -16,8 +17,10 @@ import { showConfirmDialog, showMessageDialog, showSelectDialog } from './dialog
 import type { TUI, SelectItem } from './screen/index.js';
 
 /** 替换插件优先；没装载时用内置 JSONL，避免界面在测试装配里变成空列表。 */
-function sessionsOf(deps: TuiDeps): SessionService {
-  return deps.pluginServices.get<SessionService>(SESSION_SERVICE) ?? sessionService;
+function sessionsOf(deps: TuiDeps): SessionService | undefined {
+  const found = deps.pluginServices.get<SessionService>(SESSION_SERVICE);
+  if (found) return found;
+  return deps.pluginServices === EMPTY_PLUGIN_SERVICES ? sessionService : undefined;
 }
 
 /** 会话命令需要的宿主能力。 */
@@ -78,7 +81,12 @@ export async function commandNewSession(host: SessionCommandHost): Promise<void>
     cancelLabel: 'Cancel',
   });
   if (!confirmed) return;
-  const next = sessionsOf(host.deps).factory.create(host.deps.sessionDir, host.deps.workspaceRoot);
+  const sessionApi = sessionsOf(host.deps);
+  if (!sessionApi) {
+    host.addNotice('sph-session is not loaded.', 'warn');
+    return;
+  }
+  const next = sessionApi.factory.create(host.deps.sessionDir, host.deps.workspaceRoot);
   host.startSession(next);
 }
 
@@ -95,8 +103,13 @@ export async function commandNewSession(host: SessionCommandHost): Promise<void>
  */
 export async function commandResume(host: SessionCommandHost, id: string): Promise<void> {
   const { deps, session } = host;
+  const sessionApi = sessionsOf(deps);
+  if (!sessionApi) {
+    host.addNotice('sph-session is not loaded.', 'warn');
+    return;
+  }
   if (id !== '') {
-    const sessions = await sessionsOf(deps).list(deps.sessionDir, { includeSubagents: true });
+    const sessions = await sessionApi.list(deps.sessionDir, { includeSubagents: true });
     const match = sessions.find((info) => info.id === id || info.id.startsWith(id));
     if (!match) {
       host.addNotice(`No session matching "${id}".`, 'warn');
@@ -117,7 +130,7 @@ export async function commandResume(host: SessionCommandHost, id: string): Promi
     return;
   }
 
-  const sessions = await sessionsOf(deps).list(deps.sessionDir);
+  const sessions = await sessionApi.list(deps.sessionDir);
   if (sessions.length === 0) {
     host.addNotice('No sessions yet.', 'dim');
     return;
@@ -146,6 +159,10 @@ function subagentCountLabel(count: number): string {
 export async function commandExport(host: SessionCommandHost, argument: string): Promise<void> {
   const format = argument === 'json' || argument === 'html' ? argument : 'md';
   const sessionApi = sessionsOf(host.deps);
+  if (!sessionApi) {
+    host.addNotice('sph-session is not loaded.', 'warn');
+    return;
+  }
   const body = format === 'json'
     ? sessionApi.exportJson(host.session)
     : format === 'html'

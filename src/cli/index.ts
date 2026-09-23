@@ -172,7 +172,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
     };
     // 恢复的会话带着跨轮次状态：任务目标与上次失败要进提示词，否则「继续」时模型是失忆的。
     const folded = runtime.plugins.get<SessionService>(SESSION_SERVICE)?.fold(session.readAll())
-      ?? { depth: 0, failures: [], planMode: false };
+      ?? { depth: 0, goal: undefined, failures: [], planMode: false, tokensUsed: 0 };
     const output = args.outputFormat === 'json'
       ? createJsonOutput({ sessionId: session.id })
       : createTextOutput();

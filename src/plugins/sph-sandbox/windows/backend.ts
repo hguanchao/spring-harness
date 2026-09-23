@@ -1,7 +1,5 @@
 import { errorMessage } from '../../../util.js';
 import { canonicalize } from '../../../workspace/boundary.js';
-import { hasOtherLiveSessionIn } from '../../sph-session/lock.js';
-import { sessionDirFor } from '../../sph-session/path.js';
 import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../../../sandbox/types.js';
 import { SandboxError, type SandboxMode, type SandboxStatus } from '../../../sandbox/types.js';
 import { grantWrite, revokeWrite } from './acl.js';
@@ -26,6 +24,11 @@ export interface WindowsAclOptions {
   workspaceRoot: string;
   sphHomeDir: string;
   tempDir: string;
+  /**
+   * 退出时是否保留工作区写授权。同目录还有别的活会话时必须保留。
+   * 省略表示没有别的会话，授权随这次退出收掉。
+   */
+  keepWorkspaceGrant?: () => boolean;
 }
 
 /**
@@ -161,7 +164,7 @@ export class WindowsAclSandbox implements SandboxHandle {
   dispose(): void {
     // 工作区授权是同目录多实例共享的：别人还活着就跳过，留给最后一个退出的进程收——
     // 否则会留下「授权被别的进程悄悄撤掉」的间歇性写失败，比脏 ACE 难查得多。
-    const dropWorkspace = !hasOtherLiveSessionIn(sessionDirFor(this.options.workspaceRoot));
+    const dropWorkspace = this.options.keepWorkspaceGrant?.() !== true;
     for (const grant of this.revocable) {
       if (grant.retain === 'workspace' && !dropWorkspace) continue;
       try {
