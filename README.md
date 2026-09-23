@@ -2,22 +2,22 @@
 
 A personal, general-purpose agent runtime that runs on your own machine: one process, a terminal UI, and a tool-using LLM loop over a single workspace.
 
-It is written from scratch in TypeScript with five runtime dependencies — no CLI framework, no TUI framework, no HTTP client wrapper. That is a deliberate constraint rather than a boast: the parts that decide behaviour (the agent loop, the context budget, the terminal renderer, the sandbox) are the parts you can read end to end.
+It is written from scratch in TypeScript with five runtime dependencies — no CLI framework, no third-party TUI toolkit, no HTTP client wrapper. The terminal widgets live in `src/tui` and are exported as `@spring-harness/cli/tui`. `sph-tui` is their only in-repo consumer, and the widget layer does not import the agent loop, sessions, or tools.
 
 - **Agent loop** — multi-step tool calling with an explicit 32-step ceiling, parallel-safe tool batching, and results committed in model order.
 - **Context management** — three-tier compaction (tool-result stubbing → LLM incremental summary → mechanical fold) plus recovery when a provider rejects the request as over-window.
 - **Subagents** — foreground fan-out (3 concurrent), background jobs with completion push, `resume_from`, and optional `git worktree` isolation. Flat tree by default.
 - **Sessions** — append-only JSONL per workspace; state (todos, goal, plan mode, token spend) is folded back on resume.
-- **Sandbox** — Windows restricted token + ACL, or Linux `bwrap`. Enforcement is *partial* and described as such, in the prompt and here.
+- **Sandbox** — off unless you turn it on. `workspace` and `read-only` are a same-host file policy: Linux `bwrap` (Landlock if `bwrap` is missing), macOS Seatbelt, Windows restricted token + ACL. Reads and network stay on the host. Windows enforcement is partial.
 - **Three upstream protocols** — `chat-completions`, `responses`, `anthropic-messages`, with runtime parameter degradation so an endpoint that rejects `max_tokens` or `stream_options` is adapted to instead of failing.
 - **Plugins** — built-ins live in `src/plugins/`, third-party ones in `.sph/plugins/`. They register tools and provide services, and the core never imports them. `sph-mcp` ships as one, so MCP is an optional capability rather than a built-in. See [Plugins](#plugins).
-- **MCP** — provided by the bundled `sph-mcp` plugin: stdio servers discovered from five config sources, with lazy reconnect and hot reload. On Windows, bare commands (`npx`…) are resolved via `PATH × PATHEXT`; `.cmd`/`.bat` launchers run through `cmd.exe` with cmd-safe escaping (a bare `npx` is not an `.exe`, so naive spawning fails with ENOENT).
+- **MCP** — provided by the bundled `sph-mcp` plugin: stdio, streamable HTTP, and legacy SSE, discovered from five config sources, with lazy reconnect and hot reload. A `url` is HTTP unless `transport = "sse"` or the path ends in `/sse`. On Windows, bare commands (`npx`…) are resolved via `PATH × PATHEXT`; `.cmd`/`.bat` launchers run through `cmd.exe` with cmd-safe escaping (a bare `npx` is not an `.exe`, so naive spawning fails with ENOENT).
 - **Skills** — `SKILL.md` catalogs discovered from four roots.
 
 ## Requirements
 
 - Node.js **>= 22**. Bundled plugins are compiled with sph, so only **third-party** `.ts` plugins need **>= 22.18** (>= 23.6 on the 23 line) — that is when Node's native type stripping became the default. Ship a third-party plugin as `.js`/`.mjs` to support older Node.
-- Windows or Linux for the sandbox. **macOS is not supported** — `sph` refuses to start rather than pretend to confine.
+- Windows, Linux, or macOS. The process starts with the sandbox off. Turning it on uses the host's own file policy and refuses to start that mode if the runner is missing.
 
 ## Install
 
@@ -54,7 +54,7 @@ A minimal `config.toml`:
 provider = "example"           # points at a provider in models.json
 model = "example-model"
 context_window = 256000        # fallback when the model declaration has no contextWindow
-sandbox = "workspace"
+sandbox = "off"               # workspace | read-only turn on same-host file confinement
 ```
 
 Key facts:
@@ -143,7 +143,7 @@ Servers are discovered from five sources. Later ones win on a name clash — a n
 
 | Source | Scope | Notes |
 |---|---|---|
-| `~/.sph/config.toml` `[[mcp_servers]]` | user | native |
+| `~/.sph/config.toml` `[mcp_servers.<name>]` | user | same shape as Codex, including `type` |
 | `<repo>…<cwd>/.sph/config.toml` | project | walked root→cwd, closest wins |
 | `~/.claude.json` | user + project | `mcpServers`, and `projects.<dir>.mcpServers` |
 | `~/.codex/config.toml`, `<dir>/.codex/config.toml` | user + project | `[mcp_servers.<name>]`, incl. `env_vars` |
@@ -181,7 +181,7 @@ Exit codes: `0` ok, `1` error, `2` usage or configuration.
 Three independent layers, all failing closed:
 
 1. **Workspace trust.** A workspace must be trusted before the agent runs — `AGENTS.md` and the tools act inside it. `--trust` remembers it; the TUI asks once. Trust on a parent directory covers descendants, never the other way round.
-2. **Sandbox.** `off` / `workspace` (default) / `read-only`. Filesystem and process confinement come from the OS: a Windows restricted token with ACL write grants, or Linux `bwrap` mounts. **Reads, network, and hardlinks are not confined.** Denials are policy, not bugs — the prompt tells the model not to retry them by another route.
+2. **Sandbox.** `off` (default) / `workspace` / `read-only`. The confined modes are a same-host file policy, not a container: Linux uses `bwrap` (read-only host root, private pid namespace) and falls back to Landlock; macOS uses Seatbelt (`sandbox-exec`); Windows uses a restricted token and ACL write grants. **Reads and network stay on the host.** Windows (and Landlock) enforcement is partial: hardlinks and unconfined reads are known gaps. Denials are policy, not bugs — the prompt tells the model not to retry them by another route.
 3. **Approval.** `ask` (default) prompts per reviewed tool; `auto` sends the call to an LLM reviewer that denies when unsure; `yolo` allows everything. In headless mode `shell`, `web_search`, and `mcp` are denied unless approval is `yolo`. The dialog's two *always allow* options are scoped to **that exact action** — a specific shell command, MCP tool, or path — never the whole tool, so approving `npm test` does not silently approve `rm -rf`. *For this session* lives in memory; *for this project* is written to `[grants]` in config.toml keyed by the git repo root, so a grant made in a subdirectory covers the whole repository. `[permissions]` rules sit above all of this: a `deny` rule is a hard boundary no mode can cross.
 
 Path handling canonicalises through `realpath` and rejects anything escaping the workspace root — including symlinked directories encountered while searching (a symlink is never traversed).
@@ -215,6 +215,7 @@ src/
 ├── permission/  approval policy. This stays in the host: it is the safety check, not a feature
 ├── config/      which plugins are disabled, credentials, models.json
 ├── workspace/   path boundary, root resolution, trust
+├── tui/         terminal widgets. Entry is `src/tui/index.ts`; product UI stays in sph-tui
 └── plugins/     host, loader, seams, and the bundled implementations:
                  sph-llm, sph-tools, sph-skills, sph-session, sph-storage,
                  sph-loop, sph-schedule, sph-tui,
@@ -264,7 +265,7 @@ Notes for contributors:
 
 ## Known limitations
 
-- **Sandbox enforcement is partial.** Windows confines writes via a restricted token and ACLs; reads, network, and hardlinks are not confined. Linux uses `bwrap` bind mounts. macOS is unsupported.
+- **Sandbox enforcement is partial on Windows and on Landlock.** Windows confines writes via a restricted token and ACLs; reads, network, and hardlinks are not confined. Linux `bwrap` covers the promised writes and hides host processes. macOS Seatbelt denies file writes outside the allow-list. The sandbox is off unless `sandbox` is set to `workspace` or `read-only`.
 - **Context windows are not auto-discovered.** Upstream `/models` endpoints generally do not report them, so `context_window` is configured per model; an unconfigured new model falls back to the configured default and may be over-estimated until the provider rejects it.
 - **Windows ACL grants are machine-scoped for `~/.sph`.** The capability SID derives from the path, so it is shared across workspaces; it is revoked on exit unless another `sph` session is still running.
 - **One protocol per process.** `--api` applies to the main model; auxiliary calls follow `[aux].api` or the main protocol.

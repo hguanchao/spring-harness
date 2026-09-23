@@ -26,7 +26,7 @@
 
 理由全部来自实测：
 
-- **沙箱内 git 能跑，bash 不能。** `sandbox=workspace`（默认档位）下 `git.exe log` 实测 exit 0、
+- **沙箱内 git 能跑，bash 不能。** `sandbox=workspace` 下 `git.exe log` 实测 exit 0、
   中文输出完好；而 Git Bash / MSYS 必死于 `CreateFileMapping ... Win32 error 5`。
   即：git 能力在默认配置下目前只有一条走不通的通道。
 - **现在的失败路径就是它。** 模型想跑 `git log` → 走 bash → 解析到 `C:\Windows\System32\bash.exe`

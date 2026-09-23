@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { TuiAltScreen } from '../../src/plugins/sph-tui/screen/tui-alt-screen.js';
-import type { Terminal } from '../../src/plugins/sph-tui/screen/terminal.js';
+import { TuiAltScreen } from '../../src/tui/tui-alt-screen.js';
+import type { Terminal } from '../../src/tui/terminal.js';
 import { showMessageDialog, showSelectDialog } from '../../src/plugins/sph-tui/dialogs.js';
 import { PALETTE } from '../../src/plugins/sph-tui/theme/palettes.js';
 import { theme } from '../../src/plugins/sph-tui/theme/theme.js';

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { showInputDialog, showMessageDialog, showSelectDialog } from '../../src/plugins/sph-tui/dialogs.js';
-import { resolveOverlayWidth, type Component, type OverlayHandle, type OverlayOptions, type TUI } from '../../src/plugins/sph-tui/screen/index.js';
+import { resolveOverlayWidth, type Component, type OverlayHandle, type OverlayOptions, type TUI } from '../../src/tui/index.js';
 
 const handle = {
 	hide: () => {},

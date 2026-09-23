@@ -26,24 +26,26 @@ const EXISTING = [
   'model = "m"',
   '',
   '# 我的 MCP server',
-  '[[mcp_servers]]',
-  'name = "keep"',
+  '[mcp_servers.keep]',
+  'type = "stdio"',
   'command = "npx"          # 冷启动会比较慢',
   'args = ["-y", "keep-mcp"]',
   '',
 ].join('\n');
 
 describe('upsertSphMcpServer', () => {
-  it('新增时插在最后一个 [[mcp_servers]] 块之后，已有注释原样保留', () => {
+  it('新增时插在最后一个 [mcp_servers.<name>] 之后，已有注释原样保留', () => {
     const f = fixture(EXISTING);
     try {
       assert.equal(upsertSphMcpServer(f.path, { name: 'fresh', command: 'node', args: ['s.js'] }).added, true);
       const text = f.read();
       assert.ok(text.includes('# 我的 MCP server'), '块前的注释不能被吃掉');
-      assert.ok(text.indexOf('name = "keep"') < text.indexOf('name = "fresh"'), 'server 们放在一起');
-      const servers = parse(text).mcp_servers as Array<Record<string, unknown>>;
-      assert.deepEqual(servers.map((s) => s.name), ['keep', 'fresh']);
-      assert.deepEqual(servers[1]?.args, ['s.js']);
+      assert.ok(text.indexOf('[mcp_servers.keep]') < text.indexOf('[mcp_servers.fresh]'), 'server 们放在一起');
+      assert.ok(text.includes('type = "stdio"'));
+      const servers = parse(text).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(Object.keys(servers), ['keep', 'fresh']);
+      assert.deepEqual(servers.fresh?.args, ['s.js']);
+      assert.equal(servers.fresh?.type, 'stdio');
     } finally {
       f.cleanup();
     }
@@ -56,19 +58,19 @@ describe('upsertSphMcpServer', () => {
       const text = f.read();
       assert.ok(text.includes('command = "node"          # 冷启动会比较慢'), '对齐与行尾注释都要留下');
       assert.ok(text.includes('args = ["--x"]'));
-      assert.equal((text.match(/\[\[mcp_servers\]\]/g) ?? []).length, 1, '更新不该再造一个块');
+      assert.equal((text.match(/\[mcp_servers\.keep\]/g) ?? []).length, 1, '更新不该再造一个块');
     } finally {
       f.cleanup();
     }
   });
 
   it('块里缺 args 行时补在块尾', () => {
-    const f = fixture('[[mcp_servers]]\nname = "a"\ncommand = "node"\n');
+    const f = fixture('[mcp_servers.a]\ntype = "stdio"\ncommand = "node"\n');
     try {
       upsertSphMcpServer(f.path, { name: 'a', command: 'node', args: ['x'] });
-      const servers = toml(f.path).mcp_servers as Array<Record<string, unknown>>;
-      assert.deepEqual(servers[0]?.args, ['x']);
-      assert.equal((f.read().match(/\[\[mcp_servers\]\]/g) ?? []).length, 1, '补键不该再造一个块');
+      const servers = toml(f.path).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(servers.a?.args, ['x']);
+      assert.equal((f.read().match(/\[mcp_servers\.a\]/g) ?? []).length, 1, '补键不该再造一个块');
     } finally {
       f.cleanup();
     }
@@ -78,26 +80,26 @@ describe('upsertSphMcpServer', () => {
     // 这是整份文件里最容易写错的一处：把 `args = [` 的续行当成表头，就会把块边界算错。
     const f = fixture(
       [
-        '[[mcp_servers]]',
-        'name = "a"',
+        '[mcp_servers.a]',
+        'type = "stdio"',
         'command = "npx"',
         'args = [',
         '  "-y",',
         '  "a-mcp",',
         ']',
         '',
-        '[[mcp_servers]]',
-        'name = "b"',
+        '[mcp_servers.b]',
+        'type = "stdio"',
         'command = "node"',
         '',
       ].join('\n'),
     );
     try {
       upsertSphMcpServer(f.path, { name: 'a', command: 'npx', args: ['-y', 'a2'] });
-      const servers = toml(f.path).mcp_servers as Array<Record<string, unknown>>;
-      assert.deepEqual(servers.map((s) => s.name), ['a', 'b'], 'b 的块必须还在');
-      assert.deepEqual(servers[0]?.args, ['-y', 'a2']);
-      assert.equal(servers[1]?.command, 'node');
+      const servers = toml(f.path).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(Object.keys(servers), ['a', 'b'], 'b 的块必须还在');
+      assert.deepEqual(servers.a?.args, ['-y', 'a2']);
+      assert.equal(servers.b?.command, 'node');
     } finally {
       f.cleanup();
     }
@@ -108,7 +110,7 @@ describe('upsertSphMcpServer', () => {
     const path = join(dir, 'config.toml');
     try {
       upsertSphMcpServer(path, { name: 'a', command: 'node' });
-      assert.equal(readFileSync(path, 'utf8'), '\n[[mcp_servers]]\nname = "a"\ncommand = "node"\n');
+      assert.equal(readFileSync(path, 'utf8'), '\n[mcp_servers.a]\ntype = "stdio"\ncommand = "node"\n');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -117,11 +119,11 @@ describe('upsertSphMcpServer', () => {
 
 describe('removeSphMcpServer', () => {
   it('删掉整个块并吸收空行，不留双空行', () => {
-    const f = fixture(`${EXISTING}\n[[mcp_servers]]\nname = "gone"\ncommand = "x"\n`);
+    const f = fixture(`${EXISTING}\n[mcp_servers.gone]\ntype = "stdio"\ncommand = "x"\n`);
     try {
       assert.equal(removeSphMcpServer(f.path, 'gone'), true);
-      const servers = toml(f.path).mcp_servers as Array<Record<string, unknown>>;
-      assert.deepEqual(servers.map((s) => s.name), ['keep']);
+      const servers = toml(f.path).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(Object.keys(servers), ['keep']);
       assert.ok(!/\n\n\n/.test(f.read()), '不该留下连续空行');
     } finally {
       f.cleanup();
@@ -130,13 +132,13 @@ describe('removeSphMcpServer', () => {
 
   it('删中间那个块时，前后两块都完整', () => {
     const f = fixture(
-      ['[[mcp_servers]]', 'name = "a"', 'command = "1"', '', '[[mcp_servers]]', 'name = "mid"', 'command = "2"', '', '[[mcp_servers]]', 'name = "c"', 'command = "3"', ''].join('\n'),
+      ['[mcp_servers.a]', 'type = "stdio"', 'command = "1"', '', '[mcp_servers.mid]', 'type = "stdio"', 'command = "2"', '', '[mcp_servers.c]', 'type = "stdio"', 'command = "3"', ''].join('\n'),
     );
     try {
       removeSphMcpServer(f.path, 'mid');
-      const servers = toml(f.path).mcp_servers as Array<Record<string, unknown>>;
-      assert.deepEqual(servers.map((s) => s.name), ['a', 'c']);
-      assert.deepEqual(servers.map((s) => s.command), ['1', '3']);
+      const servers = toml(f.path).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(Object.keys(servers), ['a', 'c']);
+      assert.deepEqual([servers.a?.command, servers.c?.command], ['1', '3']);
     } finally {
       f.cleanup();
     }
@@ -158,7 +160,7 @@ describe('removeSphMcpServer', () => {
 describe('listSphMcpServers', () => {
   it('读出名字、命令与参数，含多行数组', () => {
     const f = fixture(
-      ['[[mcp_servers]]', 'name = "a"', 'command = "npx"', 'args = [', '  "-y",', '  "a-mcp",', ']', ''].join('\n'),
+      ['[mcp_servers.a]', 'type = "stdio"', 'command = "npx"', 'args = [', '  "-y",', '  "a-mcp",', ']', ''].join('\n'),
     );
     try {
       assert.deepEqual(listSphMcpServers(f.path), [{ name: 'a', command: 'npx', args: ['-y', 'a-mcp'] }]);
@@ -167,7 +169,7 @@ describe('listSphMcpServers', () => {
     }
   });
 
-  it('没有 [[mcp_servers]] 时返回空表', () => {
+  it('没有 [mcp_servers.<name>] 时返回空表', () => {
     const f = fixture('base_url = "u"\nmodel = "m"\n');
     try {
       assert.deepEqual(listSphMcpServers(f.path), []);
@@ -252,7 +254,7 @@ describe('setSphMcpPreference', () => {
       setSphMcpPreference(f.path, 'keep', { enabled: false, sourceEnabled: true });
       const parsed = toml(f.path);
       assert.deepEqual(parsed.mcp, { disabled_servers: ['keep'], enabled_servers: [] });
-      assert.deepEqual((parsed.mcp_servers as Array<Record<string, unknown>>).map((s) => s.name), ['keep']);
+      assert.deepEqual(Object.keys(parsed.mcp_servers as Record<string, unknown>), ['keep']);
     } finally {
       f.cleanup();
     }

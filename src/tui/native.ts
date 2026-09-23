@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 /**
  * 可选的平台原生助手：剪贴板和修饰键。
  *
- * 找不到和 sph 放在一起的 .node 就退化（剪贴板不可用，修饰键视为没按下）。
- * 不按别的包名去 node_modules 里搜，否则屏幕实现会绑死在外部项目的安装布局上。
+ * 找不到和本模块放在一起的 .node 就退化（剪贴板不可用，修饰键视为没按下）。
+ * 不按别的包名去 node_modules 里搜，否则控件层会绑死在宿主的安装布局上。
  */
 export interface NativeModuleCandidateOptions {
 	moduleUrl?: string;

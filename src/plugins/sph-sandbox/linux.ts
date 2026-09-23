@@ -2,43 +2,13 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { spawnUnrestricted } from '../../sandbox/host-spawn.js';
 import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../../sandbox/types.js';
-import { SandboxError, type SandboxMode } from '../../sandbox/types.js';
+import { SandboxError } from '../../sandbox/types.js';
+import { bwrapProfileArgs, type ConfinedMode } from './profile.js';
 
-export function linuxBwrapArgs(
-  mode: Exclude<SandboxMode, 'off'>,
-  workspaceRoot: string,
-  sphHome: string,
-  tempDir: string,
-): string[] {
-  const bindWs = mode === 'read-only' ? '--ro-bind' : '--bind';
-  const net = mode === 'read-only' || process.env.SPH_SANDBOX_NET === 'off' ? ['--unshare-net'] : [];
-  return [
-    '--die-with-parent',
-    '--unshare-pid',
-    '--unshare-uts',
-    '--hostname', 'sph',
-    ...net,
-    '--dev', '/dev',
-    '--proc', '/proc',
-    '--ro-bind', '/usr', '/usr',
-    '--ro-bind', '/bin', '/bin',
-    '--ro-bind-try', '/lib', '/lib',
-    '--ro-bind-try', '/lib64', '/lib64',
-    '--ro-bind-try', '/etc', '/etc',
-    '--tmpfs', '/tmp',
-    bindWs, workspaceRoot, workspaceRoot,
-    // 配置/密钥在父进程写；子进程只读 ~/.sph，避免 shell 改 api_key。
-    '--ro-bind', sphHome, sphHome,
-    '--bind', tempDir, tempDir,
-    '--chdir', workspaceRoot,
-  ];
-}
+const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/bin/bwrap'];
 
-function resolveBwrap(): string {
-  for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap']) {
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new SandboxError('Linux sandbox requires bwrap; pass --sandbox off');
+export function findBwrap(exists: (path: string) => boolean = existsSync): string | undefined {
+  return BWRAP_CANDIDATES.find((candidate) => exists(candidate));
 }
 
 export class LinuxBwrapSandbox implements SandboxHandle {
@@ -47,22 +17,18 @@ export class LinuxBwrapSandbox implements SandboxHandle {
   private readonly bwrap: string;
 
   constructor(
-    private readonly mode: Exclude<SandboxMode, 'off'>,
+    private readonly mode: ConfinedMode,
     private readonly workspaceRoot: string,
-    private readonly sphHomeDir: string,
     tempDir: string,
+    bwrap: string,
   ) {
-    this.bwrap = resolveBwrap();
+    this.bwrap = bwrap;
     this.tempDir = tempDir;
-    this.status = { mode, enforcement: 'partial' as const, platform: process.platform };
+    this.status = { mode, enforcement: 'full' as const, platform: 'linux' as const };
   }
 
   async init(): Promise<void> {
-    const probe = spawn(this.bwrap, [...linuxBwrapArgs(this.mode, this.workspaceRoot, this.sphHomeDir, this.tempDir), '--', 'true']);
-    const code = await new Promise<number | null>((resolve, reject) => {
-      probe.on('error', reject);
-      probe.on('close', resolve);
-    });
+    const code = await probeExit(this.bwrap, [...this.profile(), '--', '/usr/bin/true']);
     if (code !== 0) throw new SandboxError(`bwrap probe failed (exit ${code})`);
   }
 
@@ -70,14 +36,32 @@ export class LinuxBwrapSandbox implements SandboxHandle {
     return spawnUnrestricted({
       ...options,
       command: this.bwrap,
-      args: [
-        ...linuxBwrapArgs(this.mode, this.workspaceRoot, this.sphHomeDir, this.tempDir),
-        '--',
-        options.command,
-        ...options.args,
-      ],
+      args: [...this.profile(), '--', options.command, ...options.args],
     });
   }
 
   dispose(): void {}
+
+  private profile(): string[] {
+    return bwrapProfileArgs(this.mode, this.workspaceRoot, this.tempDir);
+  }
+}
+
+export function probeExit(command: string, args: string[]): Promise<number | null> {
+  const child = spawn(command, args, { stdio: 'ignore' });
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+}
+
+export async function bwrapUsable(mode: ConfinedMode, workspaceRoot: string, tempDir: string): Promise<boolean> {
+  const bwrap = findBwrap();
+  if (!bwrap) return false;
+  try {
+    const code = await probeExit(bwrap, [...bwrapProfileArgs(mode, workspaceRoot, tempDir), '--', '/usr/bin/true']);
+    return code === 0;
+  } catch {
+    return false;
+  }
 }

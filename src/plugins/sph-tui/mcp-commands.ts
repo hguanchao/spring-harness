@@ -6,10 +6,10 @@
  */
 
 import { removeSphMcpServer, setSphMcpLazy, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../../config/mcp-write.js';
-import type { TUI } from './screen/index.js';
+import type { TUI } from '../../tui/index.js';
 import type { TuiDeps } from './deps.js';
 import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
-import { mcpStateLabel, renderMcpReport, renderMcpTools } from './reports.js';
+import { mcpServerLabel, mcpStateLabel, renderMcpReport, renderMcpTools } from './reports.js';
 import { SERVER_PREFIX } from './commands.js';
 
 /** MCP 命令需要的宿主能力。 */
@@ -63,7 +63,7 @@ export async function commandMcps(host: McpCommandHost): Promise<void> {
         { value: 'add', label: 'Add a server…', description: `append to ${deps.configPath}` },
         ...servers.map((server) => ({
           value: `server:${server.name}`,
-          label: `${server.name} — ${mcpStateLabel(server)}`,
+          label: `${mcpServerLabel(server)} — ${mcpStateLabel(server)}`,
           description: `${server.target} · from ${server.origin.label}`,
         })),
       ],
@@ -177,7 +177,7 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
     items.push({ value: 'remove', label: 'Remove from config', description: server.origin.path });
   }
   const action = await showSelectDialog(ui, {
-    title: `${server.name} — ${mcpStateLabel(server)}`,
+    title: `${mcpServerLabel(server)} — ${mcpStateLabel(server)}`,
     bodyText: `${server.target}\nfrom ${server.origin.label}`,
     items,
     maxVisible: 4,
@@ -201,7 +201,7 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
   }
   if (action === 'tools') {
     await showMessageDialog(ui, {
-      title: `${server.name} tools`,
+      title: `${mcpServerLabel(server)} tools`,
       text: renderMcpTools(server),
       hint: 'Esc close',
     });
@@ -209,7 +209,7 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
   }
   if (action === 'remove') {
     const confirmed = await showConfirmDialog(ui, {
-      title: `Remove ${server.name}?`,
+      title: `Remove ${mcpServerLabel(server)}?`,
       message: `This deletes the entry from ${server.origin.path}. Nothing else is touched.`,
       confirmLabel: 'Remove',
     });

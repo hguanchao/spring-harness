@@ -27,7 +27,12 @@ function sandboxLine(mode: SandboxMode): string {
   if (process.platform === 'win32') {
     return `Sandbox: ${mode} on Windows (partial: restricted token + ACL; reads/network/hardlinks not confined). Nested process creation often fails with spawn EPERM — that is the token, not a broken test command; do not retry the same spawn, and say so if a test runner or compiler cannot start child processes.`;
   }
-  if (process.platform === 'linux') return `Sandbox: ${mode} on Linux (partial: bwrap bind mounts).`;
+  if (process.platform === 'linux') {
+    return `Sandbox: ${mode} on Linux (same-host file policy: bwrap with a read-only host root, or Landlock if bwrap is unavailable). Reads and network stay on the host; writes outside the workspace are denied.`;
+  }
+  if (process.platform === 'darwin') {
+    return `Sandbox: ${mode} on macOS (Seatbelt: file writes denied except the workspace and private temp). Reads and network stay on the host.`;
+  }
   return `Sandbox: ${mode} is unsupported on this OS; startup should have failed.`;
 }
 

@@ -15,7 +15,7 @@ import {
   type ViewportTUI,
   visibleWidth,
   wrapTextWithAnsi,
-} from './screen/index.js';
+} from '../../tui/index.js';
 import { theme } from './theme/theme.js';
 import { readVersion } from '../../version.js';
 

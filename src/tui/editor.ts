@@ -1,7 +1,6 @@
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "./autocomplete.js";
 import { getKeybindings } from "./keybindings.js";
 import { decodePrintableKey, matchesKey } from "./keys.js";
-import { theme } from "../theme/theme.js";
 import { consumeBracketedPaste, findWordBackward, findWordForward, KillRing, UndoStack } from "./editor-support.js";
 import {
 	type Component,
@@ -238,6 +237,8 @@ export interface EditorTheme {
 	/** 聚焦边框；省略则沿用 borderColor。 */
 	focusBorderColor?: (str: string) => string;
 	selectList: SelectListTheme;
+	/** 自动完成菜单标题。省略则沿用 borderColor，控件层不自带强调色。 */
+	menuTitle?: (str: string) => string;
 }
 
 export interface EditorOptions {
@@ -592,8 +593,7 @@ export class Editor implements Component, Focusable {
 					bottomInfo: scrollInfo,
 					infoWidth: scrollInfo.length,
 					frame: (text: string) => this.theme.borderColor(text),
-					// 标题与浮层对话框（RoundedDialogBox）同一套：主色紫加粗，弹窗观感统一。
-					titlePaint: (text: string) => theme.bold(theme.fg('primary', text)),
+					titlePaint: (text: string) => (this.theme.menuTitle ?? this.theme.borderColor)(text),
 				});
 				for (const line of boxed) {
 					result.push(`${leftPadding}${line}${rightPadding}`);

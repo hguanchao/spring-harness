@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import type { EditorTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '../screen/index.js';
+import type { EditorTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '../../../tui/index.js';
 import { overlayPalette, PALETTE, type ThemeColor } from './palettes.js';
 
 export type { ThemeColor };
@@ -364,5 +364,7 @@ export function getEditorTheme(): EditorTheme {
     borderColor: (text: string) => theme.fg('borderMuted', text),
     focusBorderColor: (text: string) => theme.fg('primary', text),
     selectList: getSelectListTheme(),
+    // 菜单标题与浮层对话框同一套：主色加粗。颜色留在主题里，编辑器只接收画笔。
+    menuTitle: (text: string) => theme.bold(theme.fg('primary', text)),
   };
 }

@@ -8,8 +8,8 @@
 
 import type { SteeringInbox } from '../sph-schedule/jobs.js';
 import { flattenWhitespace } from '../../util.js';
-import { visibleWidth } from './screen/utils.js';
-import type { Component, TuiMouseEvent, TuiMouseEventResult } from './screen/index.js';
+import { visibleWidth } from '../../tui/utils.js';
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from '../../tui/index.js';
 import { handleSelectablePress } from './components/selectable-row.js';
 import { theme } from './theme/theme.js';
 import type { CustomEditor } from './components/custom-editor.js';

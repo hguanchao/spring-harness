@@ -93,21 +93,22 @@ export function renderMcpReport(input: {
       '',
       '```toml',
       '# ~/.sph/config.toml (or <repo>/.sph/config.toml, which wins for this repository)',
-      '[[mcp_servers]]',
-      'name = "demo"',
+      '[mcp_servers.demo]',
+      'name = "Demo"',
+      'type = "stdio"',
       'command = "npx"',
       'args = ["-y", "demo-mcp"]',
       '```',
       '',
       'Claude (`~/.claude.json`), Codex (`~/.codex/config.toml`) and `.mcp.json` are read too.',
-      'Only stdio servers can be run; HTTP entries are listed but not started.',
+      'stdio, HTTP, and SSE servers are started. Set `type = "sse"` when the URL is the legacy event stream.',
     );
   } else {
     for (const server of servers) {
-      lines.push(`- **${plain(server.name)}** — ${stateOf(server)}`);
+      lines.push(`- **${plain(mcpServerLabel(server))}** — ${stateOf(server)}`);
       lines.push(`  ${code(server.target)}`);
       const notes = [`from ${code(server.origin.label)}`];
-      if (server.transport === 'http') notes.push('http transport, not started');
+      if (server.transport !== 'stdio') notes.push(server.transport);
       if (server.lazy) notes.push('lazy — connects on first use');
       if (!server.origin.editable) notes.push('read-only source');
       // 不整串过 plain()：那会把 code() 刚包好的反引号又换成单引号，路径就不再是等宽字体了。
@@ -116,7 +117,7 @@ export function renderMcpReport(input: {
 
     for (const server of servers) {
       if (!server.connected) continue;
-      lines.push('', `### ${plain(server.name)}`);
+      lines.push('', `### ${plain(mcpServerLabel(server))}`);
       lines.push('');
       if (server.tools.length === 0) {
         lines.push('Connected, but it exposes no tools.');
@@ -153,9 +154,17 @@ export function renderMcpReport(input: {
   return lines.join('\n');
 }
 
+/** 有显示名时写成 `Title (id)`。调用和启停仍用括号里的 ID。 */
+export function mcpServerLabel(server: { name: string; title?: string }): string {
+  if (server.title !== undefined && server.title !== '' && server.title !== server.name) {
+    return `${server.title} (${server.name})`;
+  }
+  return server.name;
+}
+
 /** 单个 server 的工具清单；`/mcps` 里点「Show tools」用。 */
 export function renderMcpTools(server: McpServerStatus): string {
-  const lines: string[] = [`## ${plain(server.name)}`, '', `from ${code(server.origin.label)}`, ''];
+  const lines: string[] = [`## ${plain(mcpServerLabel(server))}`, '', `from ${code(server.origin.label)}`, ''];
   if (server.tools.length === 0) {
     lines.push('Connected, but it exposes no tools.');
     return lines.join('\n');

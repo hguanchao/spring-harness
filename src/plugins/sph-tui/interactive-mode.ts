@@ -77,7 +77,7 @@ import {
   VStack,
   ScrollView,
   formatKeyText,
-} from './screen/index.js';
+} from '../../tui/index.js';
 import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
 import { showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
@@ -93,6 +93,7 @@ import { UserMessageComponent } from './components/user-message.js';
 import { userMessageBubbleY } from './components/sticky-user-message.js';
 import { RecapMessageComponent } from './components/recap.js';
 import { generateSessionTitle, TITLE_SOURCE_SAMPLE_CHARS } from './session-title.js';
+import { productScreenOptions } from './chrome.js';
 import { getEditorTheme, getMarkdownTheme, theme } from './theme/theme.js';
 import { errorMessage, flattenWhitespace } from '../../util.js';
 import { readVersion } from '../../version.js';
@@ -270,6 +271,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.ui =
       deps.ui ??
       new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot, {
+        ...productScreenOptions(),
         selectionStyle: theme.selectionStyle(),
         onCopyFeedback: (message) => this.showCopyHint(message),
       });

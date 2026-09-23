@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BLOCK_GAP } from '../../../src/plugins/sph-tui/screen/primitives.js';
-import { OSC133_ZONE_START } from '../../../src/plugins/sph-tui/screen/utils.js';
+import { BLOCK_GAP } from '../../../src/tui/primitives.js';
+import { OSC133_ZONE_START } from '../../../src/tui/utils.js';
 import { UserMessageComponent } from '../../../src/plugins/sph-tui/components/user-message.js';
 
 describe('UserMessageComponent OSC 133', () => {

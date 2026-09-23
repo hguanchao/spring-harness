@@ -10,7 +10,7 @@
  * 「正在工作」不再由编辑器承载：它渲染在输入框上方的状态行里（见 InteractiveMode）。
  */
 
-import { Editor, type EditorOptions, type EditorTheme, type TUI } from '../screen/index.js';
+import { Editor, type EditorOptions, type EditorTheme, type TUI } from '../../../tui/index.js';
 import { matchesAppKey, type AppKeybinding } from '../app-keybindings.js';
 
 export class CustomEditor extends Editor {

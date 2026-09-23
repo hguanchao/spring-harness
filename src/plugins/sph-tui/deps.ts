@@ -22,7 +22,7 @@ import type { WorktreePort } from '../services.js';
 import type { SandboxHandle } from '../../sandbox/types.js';
 import type { SessionFactory, SessionPort } from '../../session/types.js';
 import type { ToolRegistry } from '../sph-tools/index.js';
-import type { Terminal, TUI } from './screen/index.js';
+import type { Terminal, TUI } from '../../tui/index.js';
 
 export interface TuiDeps {
   workspaceRoot: string;

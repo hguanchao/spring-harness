@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { contentVisibleWidth, visibleWidth } from '../../../src/plugins/sph-tui/screen/utils.js';
+import { contentVisibleWidth, visibleWidth } from '../../../src/tui/utils.js';
 
 describe('contentVisibleWidth', () => {
   it('行尾铺满的空格不计入内容宽度', () => {

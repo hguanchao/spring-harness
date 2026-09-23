@@ -2,7 +2,7 @@
  * 顶部欢迎头：产品标识 + 工作区/会话/模型等关键上下文 + 键位提示。
  */
 
-import { type Component, truncateToWidth } from '../screen/index.js';
+import { type Component, truncateToWidth } from '../../../tui/index.js';
 import { theme } from '../theme/theme.js';
 import { keyText } from './interaction.js';
 

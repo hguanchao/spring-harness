@@ -23,7 +23,9 @@ disabled = ["sph-mcp"]
 |---|---|
 | `index.ts` | The plugin entry: builds the hub, registers the tool, provides the service, registers cleanup. |
 | `tool.ts` | The model-facing `mcp` tool. |
-| `hub.ts` | stdio JSON-RPC client with lazy reconnect and tool-list sync. |
+| `hub.ts` | JSON-RPC client (stdio, HTTP, SSE) with lazy reconnect and tool-list sync. |
+| `remote.ts` | Streamable HTTP and legacy SSE links. |
+| `transport.ts` | Which of the three transports a server declaration uses. |
 | `sources.ts` | Discovers servers from five config sources and merges them by priority. |
 | `win-command.ts` | Windows command resolution (`PATH × PATHEXT`, `.cmd`/`.bat` via `cmd.exe`). |
 

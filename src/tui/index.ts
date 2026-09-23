@@ -1,7 +1,8 @@
 /**
- * 屏幕实现的内部入口。
+ * 终端控件层入口。
  *
- * 交互模式、对话框、消息块从这里取控件。进程入口不重新导出这些类型。
+ * 组件、输入和备用屏幕都从这里出去。产品自己的命令和消息块留在调用方，
+ * 这一层不引用会话、工具或权限。
  */
 
 export { Marked, type Token, type Tokens } from "marked";
@@ -111,7 +112,13 @@ export {
 	type TuiStopOptions,
 	type ViewportTUI,
 } from "./tui.js";
-export { TuiAltScreen, type SelectionHighlight, type TuiAltScreenOptions } from "./tui-alt-screen.js";
+export {
+	TuiAltScreen,
+	type SelectionHighlight,
+	type TuiAltScreenOptions,
+	type ViewportChrome,
+	type ViewportOverlayRect,
+} from "./tui-alt-screen.js";
 // Utilities
 export {
 	clipLineToWidth,

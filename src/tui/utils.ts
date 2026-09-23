@@ -33,7 +33,7 @@ export function wrapOsc133Zones(lines: string[]): string[] {
 	return lines;
 }
 
-export { escapeRegExp } from "../../../util.js";
+export { escapeRegExp } from "../util.js";
 
 /**
  * Check if a grapheme cluster (after segmentation) could possibly be an RGI emoji.

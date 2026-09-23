@@ -8,7 +8,7 @@ import {
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
-} from '../../../src/plugins/sph-tui/screen/utils.js';
+} from '../../../src/tui/utils.js';
 
 describe('visibleWidth', () => {
   it('纯 ASCII 按字符数', () => {

@@ -147,7 +147,7 @@ export function isFocusable(component: Component | null): component is Component
 /**
  * 光标位置标记：零宽 APC，终端忽略。聚焦控件画在光标处，绘制层剥掉后把硬件光标摆过去。
  */
-export const CURSOR_MARKER = "\x1b_sph:c\x07";
+export const CURSOR_MARKER = "\x1b_tui:c\x07";
 
 export { visibleWidth };
 
@@ -456,7 +456,7 @@ export interface TUI extends Component {
 }
 
 /** 备用屏幕才有的视口能力。模块内 Symbol，不用 Symbol.for。 */
-export const VIEWPORT_TUI = Symbol("sph.screen.viewport");
+export const VIEWPORT_TUI = Symbol("tui.viewport");
 
 export interface ViewportTUI extends TUI {
 	readonly [VIEWPORT_TUI]: true;

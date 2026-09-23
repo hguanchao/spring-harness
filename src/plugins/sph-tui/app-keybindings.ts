@@ -5,7 +5,7 @@
  * 展开工具输出…）由这里定义，不和编辑器的 tui.* 混在一张表里。
  */
 
-import { formatKeyText, type KeyId, matchesKey } from './screen/index.js';
+import { formatKeyText, type KeyId, matchesKey } from '../../tui/index.js';
 
 export { formatKeyText };
 

@@ -1,7 +1,7 @@
 /**
  * TUI 进程入口。
  *
- * 外面只拿到启动交互和信任确认。屏幕控件留在 screen/，不从这里再导出一套通用库。
+ * 外面只拿到启动交互和信任确认。控件在 src/tui，由包导出 `./tui` 提供；这里不再转出。
  * createScreen 是例外：信任页要先占住备用屏幕，主界面接手同一块，所以创建权在调用方。
  */
 
@@ -10,8 +10,9 @@ import { sphSpillRoot } from '../../home.js';
 import type { Runtime } from '../../cli/bootstrap.js';
 import { UI_SERVICE, type UiService } from '../services.js';
 import type { PluginApi } from '../types.js';
+import { productScreenOptions } from './chrome.js';
 import { runTui } from './interactive-mode.js';
-import { ProcessTerminal, TuiAltScreen, type ViewportTUI } from './screen/index.js';
+import { ProcessTerminal, TuiAltScreen, type ViewportTUI } from '../../tui/index.js';
 import { confirmWorkspaceTrust } from './trust.js';
 
 export { runTui, type TuiDeps } from './interactive-mode.js';
@@ -19,7 +20,7 @@ export { confirmWorkspaceTrust } from './trust.js';
 
 /** 信任页与主界面共用的备用屏幕。调用方 start 一次，结束时 stop。 */
 export function createScreen(workspaceRoot: string): ViewportTUI {
-  return new TuiAltScreen(new ProcessTerminal(), false, workspaceRoot);
+  return new TuiAltScreen(new ProcessTerminal(), false, workspaceRoot, productScreenOptions());
 }
 
 const ui: UiService = {

@@ -14,7 +14,7 @@ import { primaryColumnWidthFor } from './commands.js';
 import type { CustomEditor } from './components/custom-editor.js';
 import type { TuiDeps } from './deps.js';
 import { showConfirmDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
-import type { TUI, SelectItem } from './screen/index.js';
+import type { TUI, SelectItem } from '../../tui/index.js';
 
 /** 替换插件优先；没装载时用内置 JSONL，避免界面在测试装配里变成空列表。 */
 function sessionsOf(deps: TuiDeps): SessionService | undefined {

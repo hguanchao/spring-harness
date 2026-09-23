@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { pinReservePad } from '../../../src/plugins/sph-tui/screen/scroll-view.js';
+import { pinReservePad } from '../../../src/tui/scroll-view.js';
 
 describe('pinReservePad', () => {
   it('no pin means no pad', () => {

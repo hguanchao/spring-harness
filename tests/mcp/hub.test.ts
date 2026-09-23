@@ -104,8 +104,8 @@ describe('McpHub 热重载', () => {
     const hub = new McpHub(testHostFacts());
     try {
       await hub.reload([spec('echo')]);
-      const child = (hub as unknown as { connections: Map<string, { child: { pid?: number } }> })
-        .connections.get('echo')?.child;
+      const child = (hub as unknown as { connections: Map<string, { pid?: number }> })
+        .connections.get('echo');
       const result = await hub.reload([]);
       assert.deepEqual(result.removed, ['echo']);
       assert.equal(hub.listServers().length, 0, '条目与连接都要清掉，不留孤儿');
@@ -117,14 +117,15 @@ describe('McpHub 热重载', () => {
     }
   });
 
-  it('禁用与 HTTP 条目不 spawn，但如实出现在 listServers 里', async () => {
+  it('禁用条目不连接；坏传输如实出现，不挡启动', async () => {
     const hub = new McpHub(testHostFacts());
     try {
       const result = await hub.reload([
         spec('off', { enabled: false }),
-        { name: 'remote', url: 'https://mcp.example.com/mcp' },
+        { name: 'remote', url: 'notaurl', transport: 'http' },
+        { name: 'weird', url: 'https://mcp.example.com/mcp', transport: 'websocket' },
       ]);
-      assert.deepEqual(result.warnings, [], '不支持不是错误，启动时不该报警告');
+      assert.deepEqual(result.warnings, []);
       assert.deepEqual(result.added, []);
 
       const byName = new Map(hub.listServers().map((server) => [server.name, server]));
@@ -132,8 +133,9 @@ describe('McpHub 热重载', () => {
       assert.equal(byName.get('off')?.problem, 'disabled');
       assert.equal(byName.get('remote')?.transport, 'http');
       assert.equal(byName.get('remote')?.supported, false);
-      assert.match(byName.get('remote')?.problem ?? '', /stdio only/);
-      assert.equal(byName.get('remote')?.target, 'https://mcp.example.com/mcp');
+      assert.match(byName.get('remote')?.problem ?? '', /valid URL/);
+      assert.equal(byName.get('weird')?.supported, false);
+      assert.match(byName.get('weird')?.problem ?? '', /unknown transport/);
     } finally {
       hub.dispose();
     }

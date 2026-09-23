@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Text, VStack } from '../../../src/plugins/sph-tui/screen/primitives.js';
-import { ScrollView } from '../../../src/plugins/sph-tui/screen/scroll-view.js';
+import { Text, VStack } from '../../../src/tui/primitives.js';
+import { ScrollView } from '../../../src/tui/scroll-view.js';
 import {
   allocateStackSizes,
   contentPaintRight,
   getScrollbarGeometry,
   getScrollViewBox,
   renderLayoutFrame,
-} from '../../../src/plugins/sph-tui/screen/layout.js';
-import { stripTerminalSequences } from '../../../src/plugins/sph-tui/screen/utils.js';
+} from '../../../src/tui/layout.js';
+import { stripTerminalSequences } from '../../../src/tui/utils.js';
 
 describe('allocateStackSizes', () => {
   const leaf = { component: { render: () => ['x'], invalidate() {} } };

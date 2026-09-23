@@ -54,6 +54,13 @@ function setup(registryExtra: object = {}, configExtra = ''): { registryPath: st
   return { registryPath, configPath };
 }
 
+describe('沙箱默认', () => {
+  it('未写 sandbox 时关闭', () => {
+    const { registryPath, configPath } = setup();
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).sandbox, 'off');
+  });
+});
+
 describe('启动校验', () => {
   it('缺 provider 拒绝启动', () => {
     const dir = tempDir();
@@ -96,10 +103,30 @@ describe('启动校验', () => {
   });
 
   it('仅有 url 的 MCP 条目不挡启动', () => {
-    const { registryPath, configPath } = setup({}, '[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"');
+    const { registryPath, configPath } = setup({}, '[mcp_servers.remote]\ntype = "http"\nurl = "https://example.com/mcp"');
     const config = loadConfig({ configPath, registryPath, env: {} });
     assert.equal(config.mcpServers[0]?.name, 'remote');
     assert.equal(config.mcpServers[0]?.url, 'https://example.com/mcp');
+    assert.equal(config.mcpServers[0]?.transport, 'http');
+    assert.equal(config.mcpServers[0]?.title, undefined);
+  });
+
+  it('表内 name 记成显示名，表头仍是 ID', () => {
+    const { registryPath, configPath } = setup(
+      {},
+      '[mcp_servers.tavily]\nname = "Tavily"\ntype = "stdio"\ncommand = "npx"',
+    );
+    const server = loadConfig({ configPath, registryPath, env: {} }).mcpServers[0];
+    assert.equal(server?.name, 'tavily');
+    assert.equal(server?.title, 'Tavily');
+  });
+
+  it('数组形态的 mcp_servers 拒绝启动', () => {
+    const { registryPath, configPath } = setup({}, '[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"');
+    assert.throws(
+      () => loadConfig({ configPath, registryPath, env: {} }),
+      /mcp_servers must be a table of tables/,
+    );
   });
 
   it('端点字段来自 provider 声明，而不是 config.toml', () => {

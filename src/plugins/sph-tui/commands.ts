@@ -6,8 +6,8 @@
  * 注册表是单一事实来源：/help、Ctrl+P 命令面板、编辑器补全都从这里取数。
  */
 
-import { visibleWidth } from './screen/utils.js';
-import type { SelectItem } from './screen/index.js';
+import { visibleWidth } from '../../tui/utils.js';
+import type { SelectItem } from '../../tui/index.js';
 
 export interface CommandItem {
   id: string;

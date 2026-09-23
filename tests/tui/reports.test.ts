@@ -86,12 +86,22 @@ describe('renderSkillsReport', () => {
 });
 
 describe('renderMcpReport', () => {
-  it('未配置时给出一段可直接抄的配置，并说明只支持 stdio', () => {
+  it('未配置时给出一段可直接抄的配置，并说明三种传输都会启动', () => {
     const text = renderMcpReport({ servers: [], warnings: [] });
     assert.match(text, /## MCP servers \(0 connected \/ 0 discovered\)/);
-    assert.match(text, /\[\[mcp_servers\]\]/);
-    assert.match(text, /Only stdio servers can be run/);
+    assert.match(text, /\[mcp_servers\.demo\]/);
+    assert.match(text, /name = "Demo"/);
+    assert.match(text, /type = "stdio"/);
+    assert.match(text, /stdio, HTTP, and SSE servers are started/);
     assert.match(text, /\.codex\/config\.toml/, '空列表时最该告诉用户还有哪些来源');
+  });
+
+  it('显示名和 ID 不同时一起写出来', () => {
+    const text = renderMcpReport({
+      servers: [server({ name: 'tavily', title: 'Tavily', connected: false, problem: 'not connected' })],
+      warnings: [],
+    });
+    assert.match(text, /\*\*Tavily \(tavily\)\*\*/);
   });
 
   it('已连接的 server 标出工具数并逐个列出工具', () => {
@@ -148,24 +158,23 @@ describe('renderMcpReport', () => {
     assert.match(text, /read-only source/);
   });
 
-  it('HTTP server 照实列出并说明不会启动，而不是静默消失', () => {
-    // 「我明明配了却不生效」必须能看见原因——只在读取时跳过它是最糟的处理。
+  it('HTTP server 照实列出传输和失败原因，而不是静默消失', () => {
     const text = renderMcpReport({
       servers: [
         server({
           name: 'remote',
           transport: 'http',
-          supported: false,
+          supported: true,
           connected: false,
           target: 'https://mcp.example.com/mcp',
-          problem: 'http transport is not supported yet (stdio only)',
+          problem: 'HTTP 500: boom',
         }),
       ],
       warnings: [],
     });
-    assert.match(text, /\*\*remote\*\* — \*\*not connected\*\* — http transport is not supported yet/);
+    assert.match(text, /\*\*remote\*\* — \*\*not connected\*\* — HTTP 500: boom/);
     assert.match(text, /https:\/\/mcp\.example\.com\/mcp/);
-    assert.match(text, /http transport, not started/);
+    assert.match(text, / · http$/m);
   });
 
   it('被禁用的 server 与「连不上」区分开：前者不是故障', () => {

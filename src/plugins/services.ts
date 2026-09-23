@@ -5,26 +5,30 @@
  * 经插件系统装载后以服务名 `sph-mcp` 暴露给宿主界面与其它插件。
  *
  * 为什么 core 还要留着这些类型：宿主界面（`/mcps` 弹窗、上报文本）与核心配置解析
- * （`[[mcp_servers]]`、`[mcp]`）都要说这套数据结构。让它们 import 插件实现就等于把
+ * （`[mcp_servers.<name>]`、`[mcp]`）都要说这套数据结构。让它们 import 插件实现就等于把
  * MCP 重新焊回核心——插件被禁用时那些模块连编译都过不去。dsh 用的是同一套切法：
  * 能力接缝留在核心，实现由插件提供（`@deepseek-ai/dsh-mcp-client` 之于 `ctx.mcp`）。
  */
 
-/** `[[mcp_servers]]` 的一条声明。 */
+/** `[mcp_servers.<id>]` 的一条声明。表头是 ID；`title` 来自表内可选的 `name`。 */
 export interface McpServerConfig {
+  /** 表头上的 ID。`mcp` 工具的 `server`、启停偏好都用它。 */
   name: string;
+  /** 表内 `name`。省略或与 ID 相同时界面只显示 ID。 */
+  title?: string;
   /** stdio 启动命令。与 `url` 二选一；都没有的条目无效。 */
   command?: string;
   args?: string[];
   /** 追加到子进程环境之上。来源文件（Claude / Codex）里的 env 表直接落到这里。 */
   env?: Record<string, string>;
   /**
-   * 远程端点（streamable HTTP）。sph 目前只实现 stdio。
-   *
-   * 带 url 的条目**必须能被发现并如实上报**，而不是在读取时静默丢掉——Claude / Codex 配置里
-   * HTTP server 很常见，「我明明配了却不生效」是必须能看见原因的一类问题。
+   * 远程端点。`transport` 省略时，路径以 `/sse` 结尾走 SSE，否则走可流式 HTTP。
    */
   url?: string;
+  /** 显式传输。省略则按 command / url 推断。 */
+  transport?: 'stdio' | 'http' | 'sse';
+  /** 远程请求头。stdio 不用。 */
+  headers?: Record<string, string>;
 }
 
 /** 一个定义的出处：展示标签 + 可否就地改写。 */
@@ -69,7 +73,9 @@ export interface McpTool {
 /** 一个 server 的现状，供 `/mcps` 之类的展示用。 */
 export interface McpServerStatus {
   name: string;
-  transport: 'stdio' | 'http';
+  /** 表内 `name`。与 ID 不同时界面写成 `Title (id)`。 */
+  title?: string;
+  transport: 'stdio' | 'http' | 'sse';
   /** false = sph 跑不了这个传输，或定义本身无效。 */
   supported: boolean;
   enabled: boolean;
@@ -244,7 +250,7 @@ export const PLAN_MODE_SERVICE = 'sph-plan';
 // write/edit）由核心工具在每次执行时调用，插件缺席时 fail-open 等于放开写权限，fail-closed
 // 等于整个 sph 不能写文件——安全约束不能有「缺席」状态。
 //
-// 可插件化的是**引擎**：Windows restricted-token / Linux bwrap 是机制不是策略。核心保留
+// 可插件化的是**引擎**：Windows 受限令牌、Linux bwrap/Landlock、macOS Seatbelt 是机制不是策略。核心保留
 // `SandboxHandle` 接口与 fail-closed 分派（`--sandbox off` 之外的模式必须有后端，否则拒绝
 // 启动），插件按注册名提供后端。dsh 也是这么切的：`dsh-sandbox` 是接缝，`dsh-sandbox-local`
 // / `dsh-sandbox-windows-acl` / `e2b` 是插件提供的后端。

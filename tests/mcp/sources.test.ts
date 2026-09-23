@@ -57,7 +57,7 @@ function byName(discovery: McpDiscovery): Map<string, McpDiscovery['servers'][nu
 
 function sphConfig(...servers: Array<{ name: string; command: string }>): string {
   return servers
-    .map((server) => `[[mcp_servers]]\nname = "${server.name}"\ncommand = "${server.command}"\n`)
+    .map((server) => `[mcp_servers.${server.name}]\ntype = "stdio"\ncommand = "${server.command}"\n`)
     .join('\n');
 }
 
@@ -147,6 +147,46 @@ describe('discoverMcpServers 来源优先级', () => {
 });
 
 describe('discoverMcpServers 特殊字段', () => {
+  it('sph 自己的配置按 [mcp_servers.<name>] 读取 type', () => {
+    const s = scaffold();
+    try {
+      writeFileSync(join(s.sphHome, 'config.toml'), [
+        '[mcp_servers.context7]',
+        'type = "stdio"',
+        'command = "npx"',
+        'args = ["-y", "@upstash/context7-mcp"]',
+        '',
+      ].join('\n'), 'utf8');
+      const server = byName(discoverMcpServers(s.options())).get('context7');
+      assert.equal(server?.command, 'npx');
+      assert.deepEqual(server?.args, ['-y', '@upstash/context7-mcp']);
+      assert.equal(server?.transport, 'stdio');
+      assert.equal(server?.title, undefined);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it('表内 name 是显示名，表头仍是 ID', () => {
+    const s = scaffold();
+    try {
+      writeFileSync(join(s.sphHome, 'config.toml'), [
+        '[mcp_servers.tavily]',
+        'name = "Tavily"',
+        'type = "stdio"',
+        'command = "npx"',
+        'args = ["-y", "tavily-mcp"]',
+        '',
+      ].join('\n'), 'utf8');
+      const server = byName(discoverMcpServers(s.options())).get('tavily');
+      assert.equal(server?.name, 'tavily');
+      assert.equal(server?.title, 'Tavily');
+      assert.equal(server?.command, 'npx');
+    } finally {
+      s.cleanup();
+    }
+  });
+
   it('HTTP 条目被发现并带上 url，而不是在读取时被静默丢掉', () => {
     const s = scaffold();
     try {
@@ -154,6 +194,25 @@ describe('discoverMcpServers 特殊字段', () => {
       const server = byName(discoverMcpServers(s.options())).get('remote');
       assert.equal(server?.url, 'https://mcp.example.com/mcp');
       assert.equal(server?.command, undefined);
+      assert.equal(server?.transport, undefined);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it('Claude 的 type 与 headers 被收下', () => {
+    const s = scaffold();
+    try {
+      s.write('.mcp.json', JSON.stringify({
+        mcpServers: {
+          linear: { type: 'sse', url: 'https://mcp.linear.app/sse', headers: { Authorization: 'Bearer t' } },
+          sentry: { type: 'streamable-http', url: 'https://mcp.sentry.dev/mcp' },
+        },
+      }));
+      const found = byName(discoverMcpServers(s.options()));
+      assert.equal(found.get('linear')?.transport, 'sse');
+      assert.equal(found.get('linear')?.headers?.Authorization, 'Bearer t');
+      assert.equal(found.get('sentry')?.transport, 'http');
     } finally {
       s.cleanup();
     }

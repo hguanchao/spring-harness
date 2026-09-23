@@ -1,5 +1,6 @@
 export type SandboxMode = 'off' | 'workspace' | 'read-only';
-export type SandboxEnforcement = 'none' | 'partial';
+/** `full` 覆盖该档承诺的写效果；`partial` 是旧 Landlock ABI 或 Windows ACL 的已知缺口。 */
+export type SandboxEnforcement = 'none' | 'partial' | 'full';
 
 export interface SandboxStatus {
   mode: SandboxMode;

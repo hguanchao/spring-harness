@@ -1,7 +1,7 @@
 /**
  * MCP server 的多来源发现。
  *
- * 此前 sph 只有一个来源：`~/.sph/config.toml` 的 `[[mcp_servers]]`。用户在 Claude Code /
+ * sph 自己的配置与 Codex 同一套：`[mcp_servers.<name>]`。用户在 Claude Code /
  * Codex 里已经配好的 server 必须先手工抄一遍，而「抄漏一个字段」导致的静默失败最难查。
  * 这里把同一台机器上其他 agent 的配置读进来，按工具优先级合并。
  *
@@ -12,7 +12,7 @@
  *    而「读了却不改」也让整个发现过程可随时撤销。
  * 2. **坏条目降级为警告，不炸启动。** 外部来源尤其如此：别人的配置文件格式演进不该让
  *    sph 起不来。只有 sph 自己的用户级配置仍走 `config/load.ts` 的严格校验。
- * 3. **发现 ≠ 可用。** HTTP 传输、被禁用的条目都会出现在结果里并被如实标注。把
+ * 3. **发现 ≠ 已连上。** 坏 URL、未知 transport、被禁用的条目都会出现在结果里并被如实标注。把
  *    「我配了却不生效」变成一条能看见的原因，比读的时候静默跳过它有用得多。
  *
  * 优先级（低 → 高，同名整条替换、不做字段合并）：
@@ -27,6 +27,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import type { McpOrigin } from './hub.js';
+import { normalizeTransport } from './transport.js';
 import type { PluginHostFacts } from '../types.js';
 
 /**
@@ -59,6 +60,11 @@ export interface DiscoveredMcpServer {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  /** 来源里的 `transport` 或 `type`，已经归一成 stdio / http / sse。 */
+  transport?: 'stdio' | 'http' | 'sse';
+  headers?: Record<string, string>;
+  /** 表内 `name`。与表头 ID 相同时不记。 */
+  title?: string;
   /** **来源声明**的启用态（叠加本地偏好之前）。 */
   sourceEnabled: boolean;
   /** 叠加本地偏好之后最终生效的启用态。 */
@@ -228,7 +234,7 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
     paths: [join(sphHomeDir, 'config.toml')],
     reports,
     warnings,
-    read: (path, text) => sphMcpServers(text, path, warnings),
+    read: (path, text) => tomlMcpTable(text, path, warnings, env),
     toSpec: (name, entry, path) => ({
       ...entry,
       name,
@@ -242,7 +248,7 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
     paths: chain.map((dir) => join(dir, '.sph', 'config.toml')),
     reports,
     warnings,
-    read: (path, text) => sphMcpServers(text, path, warnings),
+    read: (path, text) => tomlMcpTable(text, path, warnings, env),
     toSpec: (name, entry, path) => ({
       ...entry,
       name,
@@ -397,46 +403,8 @@ type RawEntry = Omit<
   'name' | 'kind' | 'origin' | 'projectRoot' | 'sourceEnabled' | 'lazy'
 >;
 
-/** sph 自己的 `[[mcp_servers]]` 数组表。坏条目跳过并告警，不炸启动。 */
-function sphMcpServers(text: string, path: string, warnings: string[]): Map<string, RawEntry> {
-  const root = asRecord(parseToml(text), path);
-  const raw = root.mcp_servers;
-  const out = new Map<string, RawEntry>();
-  if (raw === undefined) return out;
-  if (!Array.isArray(raw)) {
-    warnings.push(`${path}: mcp_servers must be an array of tables`);
-    return out;
-  }
-  raw.forEach((row, index) => {
-    const where = `${path}: mcp_servers[${index}]`;
-    if (!isRecord(row)) {
-      warnings.push(`${where} must be a table`);
-      return;
-    }
-    const name = nonEmptyString(row.name);
-    if (name === undefined) {
-      warnings.push(`${where} needs a non-empty name`);
-      return;
-    }
-    const command = nonEmptyString(row.command);
-    const url = nonEmptyString(row.url);
-    if (command === undefined && url === undefined) {
-      warnings.push(`${where} (${name}) needs a command or a url`);
-      return;
-    }
-    out.set(name, {
-      command,
-      args: stringArray(row.args),
-      env: stringMap(row.env),
-      url,
-      enabled: row.enabled === undefined ? true : row.enabled === true,
-    });
-  });
-  return out;
-}
-
 /**
- * Codex 的 `[mcp_servers.<name>]` 表。
+ * `[mcp_servers.<name>]`。sph 自己的配置和 Codex 都是这一种，名字在表头上，不在 `name` 字段里。
  *
  * `env_vars`（要继承的父进程环境变量名列表）在这里就地展开成具体值：sph 的 spawn 只接受
  * 一张现成的环境表，把「继承」留到 spawn 时会让签名比较也变复杂。
@@ -476,6 +444,8 @@ function tomlMcpTable(
       args: stringArray(value.args),
       env: Object.keys(merged).length === 0 ? undefined : merged,
       url,
+      ...remoteFields(value, `${path}: mcp_servers.${name}`, warnings),
+      ...displayTitle(value.name, name),
       enabled: value.enabled === undefined ? true : value.enabled === true,
     });
   }
@@ -540,6 +510,8 @@ function normalizeJsonServers(value: unknown, where: string, warnings: string[])
       args: stringArray(raw.args),
       env,
       url,
+      ...remoteFields(raw, `${where}: mcpServers.${name}`, warnings),
+      ...displayTitle(raw.name, name),
       // `disabled` 是 Claude 的字段名；`enabled` 在 Codex 里。两者都认。
       enabled: raw.disabled === true ? false : raw.enabled === undefined ? true : raw.enabled === true,
     });
@@ -554,6 +526,31 @@ function asRecord(value: unknown, path: string): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `transport` 与 Claude 的 `type` 是同一个意思。写错了不丢掉整条 server：
+ * 留下 url，让 hub 按默认传输去连，并在发现警告里说明原词。
+ */
+function remoteFields(
+  row: Record<string, unknown>,
+  where: string,
+  warnings: string[],
+): { transport?: 'stdio' | 'http' | 'sse'; headers?: Record<string, string> } {
+  const declared = nonEmptyString(row.transport) ?? nonEmptyString(row.type);
+  const normalized = normalizeTransport(declared);
+  if (normalized === 'invalid') warnings.push(`${where}: unknown transport "${declared}"`);
+  return {
+    ...(normalized === 'stdio' || normalized === 'http' || normalized === 'sse' ? { transport: normalized } : {}),
+    headers: stringMap(row.headers),
+  };
+}
+
+/** 表内 `name` 是给人看的。与表头 ID 相同就不单记一份。 */
+function displayTitle(value: unknown, id: string): { title: string } | undefined {
+  const title = nonEmptyString(value);
+  if (title === undefined || title === id) return undefined;
+  return { title };
 }
 
 function nonEmptyString(value: unknown): string | undefined {

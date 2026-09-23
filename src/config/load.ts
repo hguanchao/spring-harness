@@ -117,8 +117,12 @@ export interface SphConfig {
   disabledPlugins: string[];
 }
 
+/**
+ * 省略即关。同机围栏要显式打开：没装 bwrap / sandbox-exec 的机器也能启动，
+ * 打开之后后端缺失则拒绝启动，而不是悄悄无围栏跑。
+ */
 export function parseSandboxMode(value: string | undefined): SandboxMode {
-  if (value === undefined || value === '') return 'workspace';
+  if (value === undefined || value === '') return 'off';
   if (value === 'off' || value === 'workspace' || value === 'read-only') return value;
   throw new ConfigError(`unknown sandbox mode: ${value} (off | workspace | read-only)`);
 }
@@ -412,22 +416,64 @@ export function readMcpPreferences(path: string): McpPreferences | undefined {
   }
 }
 
+function parseMcpTransport(value: unknown, key: string): 'stdio' | 'http' | 'sse' | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new ConfigError(`${key} must be a string`);
+  switch (value.trim().toLowerCase()) {
+    case 'stdio':
+      return 'stdio';
+    case 'http':
+    case 'streamable-http':
+    case 'streamable_http':
+      return 'http';
+    case 'sse':
+      return 'sse';
+    default:
+      throw new ConfigError(`${key} must be stdio, http, or sse`);
+  }
+}
+
+function parseStringMap(value: unknown, key: string): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError(`${key} must be a table of strings`);
+  }
+  const out: Record<string, string> = {};
+  for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item !== 'string') throw new ConfigError(`${key}.${name} must be a string`);
+    out[name] = item;
+  }
+  return out;
+}
+
 function parseMcpServers(value: unknown): McpServerConfigFile[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new ConfigError('mcp_servers must be an array');
-  return value.map((row, i) => {
-    if (!row || typeof row !== 'object') throw new ConfigError(`mcp_servers[${i}] must be a table`);
-    const rec = row as Record<string, unknown>;
-    const name = requireNonEmptyString(rec.name, `mcp_servers[${i}].name`);
-    const command = asString(rec.command, `mcp_servers[${i}].command`);
-    const url = asString(rec.url, `mcp_servers[${i}].url`);
-    if (!name || (!command && !url)) {
-      throw new ConfigError(`mcp_servers[${i}] needs name and a command or url`);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('mcp_servers must be a table of tables ([mcp_servers.<name>])');
+  }
+  return Object.entries(value as Record<string, unknown>).map(([name, row]) => {
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+      throw new ConfigError(`mcp_servers.${name} must be a table`);
     }
+    const rec = row as Record<string, unknown>;
+    const command = asString(rec.command, `mcp_servers.${name}.command`);
+    const url = asString(rec.url, `mcp_servers.${name}.url`);
+    if (!command && !url) throw new ConfigError(`mcp_servers.${name} needs a command or a url`);
     const args = rec.args;
     if (args !== undefined && (!Array.isArray(args) || args.some((item) => typeof item !== 'string'))) {
-      throw new ConfigError(`mcp_servers[${i}].args must be a string array`);
+      throw new ConfigError(`mcp_servers.${name}.args must be a string array`);
     }
-    return { name, command, args: args as string[] | undefined, url };
+    const transport = parseMcpTransport(rec.type ?? rec.transport, `mcp_servers.${name}.type`);
+    const headers = parseStringMap(rec.headers, `mcp_servers.${name}.headers`);
+    const title = asString(rec.name, `mcp_servers.${name}.name`);
+    return {
+      name,
+      ...(title !== undefined && title !== name ? { title } : {}),
+      command,
+      args: args as string[] | undefined,
+      url,
+      transport,
+      headers,
+    };
   });
 }

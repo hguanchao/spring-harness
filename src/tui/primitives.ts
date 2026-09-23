@@ -17,8 +17,7 @@ import {
 	type TuiMouseEventResult,
 } from "./tui.js";
 import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";
-import { formatStatusElapsed, formatStatusTokens } from "../../../util.js";
-import { theme } from "../theme/theme.js";
+import { formatStatusElapsed, formatStatusTokens } from "../util.js";
 
 
 type RenderCache = {
@@ -190,7 +189,7 @@ export class Box implements Component {
  * 转录块之间的统一间距行数。
  *
  * 参考实现按「相邻两块」算间隔（`gap_after_between`）：默认 1 行空白，只有连续折叠的
- * 工具行之间不留空。sph 的成员行都收在工具分组内部，对外退化成一条更简单的规则——
+ * 工具行之间不留空。成员行收在分组内部，对外退化成一条更简单的规则——
  * **每个块前面固定 1 行空白，块自己不留尾随空行**。用户消息、助手正文、工具汇总、
  * 提示/错误行共用这一条；各块在「有内容时」自行加，空块渲染 0 行、不占位。
  */
@@ -479,6 +478,10 @@ export class Loader extends Text {
 	private message: string = "Loading...";
 	/** 状态文案从左到右扫光；警告色时关掉，避免黄字再叠高光。 */
 	private shimmerMessage = false;
+	/**
+	 * 扫光画笔。控件层没有色板，由调用方注入；没注入时 setShimmer 不改变文字颜色。
+	 */
+	shimmer?: (text: string, nowMs: number) => string;
 	private readonly startedAt = Date.now();
 	private phaseStartedAt = Date.now();
 	private tokens?: number;
@@ -545,7 +548,8 @@ export class Loader extends Text {
 		const shownPhaseW = showPhase ? phaseW : 0;
 		const bodyBudget = Math.max(0, leftBudget - leadW - suffixW - shownPhaseW);
 		const clippedBody = truncateToWidth(body, bodyBudget, "…");
-		const paintedBody = this.shimmerMessage ? theme.shimmer(clippedBody, now) : this.messageColorFn(clippedBody);
+		const paintedBody =
+			this.shimmerMessage && this.shimmer ? this.shimmer(clippedBody, now) : this.messageColorFn(clippedBody);
 		const left =
 			lead
 			+ paintedBody

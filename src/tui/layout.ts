@@ -10,7 +10,7 @@ import {
 } from "./utils.js";
 
 /** 布局节点取值。模块内 Symbol，不注册到全局，避免和别的运行时撞名。 */
-export const LAYOUT_NODE = Symbol("sph.screen.layout-node");
+export const LAYOUT_NODE = Symbol("tui.layout-node");
 
 export interface LayoutViewport {
 	width: number;

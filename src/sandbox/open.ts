@@ -36,7 +36,7 @@ class OffSandbox implements SandboxHandle {
  * `off` 档位核心自理（无约束）。confine 档位（workspace / read-only）**必须由插件提供
  * 后端**：核心只负责 fail-closed——插件缺席时拒绝启动，而不是放开约束。
  *
- * 后端是机制（Windows restricted-token / Linux bwrap 都是「怎么关」），策略是「关到什么
+ * 后端是机制（Windows 受限令牌、Linux bwrap/Landlock、macOS Seatbelt），策略是「关到什么
  * 程度」（read-only 下拒绝 write/edit，见 policy.ts）。机制插件化，策略留在核心。
  */
 export async function openSandbox(

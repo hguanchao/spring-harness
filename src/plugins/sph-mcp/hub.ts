@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { join } from 'node:path';
 import type { PluginHostFacts } from '../types.js';
+import { openHttpLink, openSseLink, type JsonRpcMessage, type RemoteLink } from './remote.js';
+import { resolveTransport, type McpTransportName } from './transport.js';
 import { cmdArgumentLine, resolveWindowsCommand } from './win-command.js';
 
 /**
@@ -12,19 +14,24 @@ function describeError(error: unknown): string {
 }
 
 export interface McpServerConfig {
+  /** 表头上的 ID。调用与启停都用它，不用来自表内的 `name`。 */
   name: string;
+  /** 表内可选的 `name`，只用于展示。 */
+  title?: string;
   /** stdio 启动命令。与 `url` 二选一；都没有的条目无效。 */
   command?: string;
   args?: string[];
   /** 追加到子进程环境之上。来源文件（Claude / Codex）里的 env 表直接落到这里。 */
   env?: Record<string, string>;
   /**
-   * 远程端点（streamable HTTP）。sph 目前只实现 stdio。
-   *
-   * 带 url 的条目**必须能被发现并如实上报**，而不是在读取时静默丢掉——Claude / Codex 配置里
-   * HTTP server 很常见，「我明明配了却不生效」是必须能看见原因的一类问题。
+   * 远程端点。`transport` 省略时路径以 `/sse` 结尾走 SSE，否则走可流式 HTTP。
+   * 带 url 的条目必须被发现：配了却连不上，要比静默丢掉好查。
    */
   url?: string;
+  /** 显式传输。外部配置里的 `type` 也归一到这里；写错的词留在这里，连之前就能报出来。 */
+  transport?: string;
+  /** 远程请求头。stdio 不用。 */
+  headers?: Record<string, string>;
 }
 
 /** 一个定义的出处：展示标签 + 可否就地改写。 */
@@ -69,7 +76,8 @@ export interface McpTool {
 /** 一个 server 的现状，供 `/mcps` 之类的展示用。 */
 export interface McpServerStatus {
   name: string;
-  transport: 'stdio' | 'http';
+  title?: string;
+  transport: McpTransportName;
   /** false = sph 跑不了这个传输，或定义本身无效。 */
   supported: boolean;
   enabled: boolean;
@@ -110,15 +118,21 @@ interface JsonRpc {
   error?: { message?: string };
 }
 
-type TaggedChild = ChildProcessWithoutNullStreams & { sphName: string };
+interface Wire {
+  write(message: JsonRpc): void;
+  close(): void;
+  alive(): boolean;
+}
 
 interface Connection {
-  child: TaggedChild;
+  /** stdio 子进程 pid，供测试确认关掉后进程真的没了。远程传输没有。 */
+  pid?: number;
+  wire: Wire;
   /** initialize + tools/list 都完成了。未就绪的连接只等待，不发业务请求。 */
   ready: boolean;
   tools: McpTool[];
   pending: Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>;
-  /** 未收全的行：stdout 的 chunk 边界与 JSON-RPC 行边界无关，半行必须留到下一块再拼。 */
+  /** stdio 未收全的行。远程传输不走这个缓冲。 */
   buffer: string;
 }
 
@@ -135,7 +149,7 @@ interface Entry {
 const NEUTRAL_ORIGIN: McpOrigin = { label: 'inline', path: '', editable: false };
 
 /**
- * stdio MCP 客户端。连接具备懒重连与工具列表变更同步。
+ * MCP 客户端（stdio / HTTP / SSE）。连接具备懒重连与工具列表变更同步。
  *
  * `reload()` 是唯一的装载入口（`connect()` 是它的首次调用）：热重载与首次启动走同一条
  * 路径，两者的差异不会各自漂移——「改了配置按 r 刷新」和「冷启动」本该是同一件事。
@@ -266,7 +280,7 @@ export class McpHub {
       const conn = this.connections.get(spec.name);
       // connected = 握手完成（含 tools/list）且进程还活着。spawn 成功但仍在握手的算
       // connecting——「进程活着但工具还没就绪」对使用者就是还没连上。
-      const connected = conn?.ready === true && conn.child.exitCode === null;
+      const connected = conn?.ready === true && conn.wire.alive();
       const lazy = spec.lazy === true;
       // 懒而未连接不是问题：它是设计好的状态，报成 problem 会在 /mcps 里看起来像故障。
       // 失败仍会进 problems，所以 lazy 只掩盖「还没轮到它启动」这一种情形。
@@ -276,7 +290,8 @@ export class McpHub {
       const connecting = this.inFlight.has(spec.name);
       return {
         name: spec.name,
-        transport: spec.url !== undefined ? 'http' : 'stdio',
+        ...(spec.title === undefined ? {} : { title: spec.title }),
+        transport: resolveTransport(spec).transport,
         supported: spawnable,
         enabled: spec.enabled,
         // 没给来源态就退化成最终态：调用方（测试、内部构造）不必为此多填一个字段。
@@ -341,12 +356,12 @@ export class McpHub {
   /** 连接就绪保障：未就绪时拉起并等握手（按名字去重），仍不可用按原因抛。 */
   private async ensureReady(server: string, entry: Entry): Promise<Connection> {
     let conn = this.connections.get(server);
-    if (conn === undefined || !conn.ready || conn.child.exitCode !== null) {
+    if (conn === undefined || !conn.ready || !conn.wire.alive()) {
       // 未就绪才拉起：launch 按名字去重——在途握手就等它，落定后仍不可用按原因抛。
-      // 连接健康时绝不走到这里，否则热重载复用的连接会被多余spawn顶掉。
+      // 连接健康时绝不走到这里，否则热重载复用的连接会被多余 spawn 顶掉。
       await this.launch(entry.spec);
       conn = this.connections.get(server);
-      if (conn === undefined || !conn.ready || conn.child.exitCode !== null) {
+      if (conn === undefined || !conn.ready || !conn.wire.alive()) {
         throw new Error(this.problems.get(server) ?? `MCP server not connected: ${server}`);
       }
     }
@@ -356,7 +371,7 @@ export class McpHub {
   dispose(): void {
     for (const [name, conn] of this.connections) {
       this.failPending(conn, `MCP server ${name} disposed`);
-      this.safeKill(conn.child);
+      conn.wire.close();
     }
     this.connections.clear();
     this.entries.clear();
@@ -368,7 +383,7 @@ export class McpHub {
 
   private isAlive(name: string): boolean {
     const conn = this.connections.get(name);
-    return conn !== undefined && conn.child.exitCode === null && conn.child.pid !== undefined;
+    return conn !== undefined && conn.wire.alive();
   }
 
   private close(name: string, reason: string): void {
@@ -376,11 +391,65 @@ export class McpHub {
     const conn = this.connections.get(name);
     if (conn === undefined) return;
     this.failPending(conn, `MCP server ${name} ${reason}`);
-    this.safeKill(conn.child);
+    conn.wire.close();
     this.connections.delete(name);
   }
 
   private async attach(spec: McpServerSpec & { enabled: boolean; origin: McpOrigin }): Promise<Connection> {
+    const { transport } = resolveTransport(spec);
+    if (transport === 'http' || transport === 'sse') return this.attachRemote(spec, transport);
+    return this.attachStdio(spec);
+  }
+
+  private async attachRemote(
+    spec: McpServerSpec & { enabled: boolean; origin: McpOrigin },
+    transport: 'http' | 'sse',
+  ): Promise<Connection> {
+    let link: RemoteLink | undefined;
+    const conn: Connection = {
+      wire: {
+        write: (message) => link?.write(message),
+        close: () => link?.close(),
+        alive: () => link?.alive() ?? false,
+      },
+      ready: false,
+      tools: [],
+      pending: new Map(),
+      buffer: '',
+    };
+    const options = {
+      url: spec.url ?? '',
+      headers: spec.headers,
+      onMessage: (message: JsonRpcMessage) => this.onRpc(conn, spec.name, message as JsonRpc),
+      onRequestError: (id: number | undefined, error: Error) => this.rejectId(conn, id, error),
+      onClose: (reason: string) => {
+        this.problems.set(spec.name, reason);
+        this.failPending(conn, `MCP server ${spec.name} ${reason}`);
+      },
+    };
+    link = transport === 'sse' ? openSseLink(options) : openHttpLink(options);
+    this.connections.set(spec.name, conn);
+    try {
+      await link.open();
+      await this.request(conn, 'initialize', {
+        protocolVersion: transport === 'sse' ? '2024-11-05' : '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'sph', version: '0.1.0' },
+      });
+      conn.wire.write({ jsonrpc: '2.0', method: 'notifications/initialized' });
+      await this.refreshTools(spec.name, conn);
+      conn.ready = true;
+    } catch (error) {
+      link.close();
+      this.connections.delete(spec.name);
+      this.problems.set(spec.name, describeError(error));
+      throw error;
+    }
+    this.problems.delete(spec.name);
+    return conn;
+  }
+
+  private async attachStdio(spec: McpServerSpec & { enabled: boolean; origin: McpOrigin }): Promise<Connection> {
     // Windows：裸命令名按 PATH × PATHEXT 解析（CreateProcess 只补 .exe，npx 这类
     // 批处理启动器会 ENOENT）；解析到 .cmd/.bat 再经 cmd.exe 启动（Node 因
     // CVE-2024-27980 拒绝直接 spawn 批处理）。见 win-command.ts。
@@ -406,12 +475,32 @@ export class McpHub {
         launchCommand = resolved.file;
       }
     }
-    const child = spawn(launchCommand, launchArgs as string[], spawnOptions) as TaggedChild;
-    child.sphName = spec.name;
+    // stdio 三端都是 pipe，stdout/stdin 不会是 null。类型上 spawn 仍标成可空。
+    const child = spawn(launchCommand, launchArgs as string[], spawnOptions) as ChildProcessWithoutNullStreams;
     child.stdout.setEncoding('utf8');
-    const conn: Connection = { child, ready: false, tools: [], pending: new Map(), buffer: '' };
-    child.stdout.on('data', (chunk: string) => this.onData(conn, chunk));
+    let dead = false;
+    const conn: Connection = {
+      pid: child.pid,
+      wire: {
+        write: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
+        close: () => {
+          dead = true;
+          try {
+            child.kill();
+          } catch {
+            // 进程从未成功启动或已退出——没有需要清理的东西。
+          }
+        },
+        alive: () => !dead && child.exitCode === null && child.pid !== undefined,
+      },
+      ready: false,
+      tools: [],
+      pending: new Map(),
+      buffer: '',
+    };
+    child.stdout.on('data', (chunk: string) => this.onData(conn, spec.name, chunk));
     child.on('exit', () => {
+      dead = true;
       if (child.exitCode !== null || child.signalCode !== null) {
         this.problems.set(spec.name, `exited (code ${child.exitCode ?? child.signalCode})`);
       }
@@ -422,6 +511,7 @@ export class McpHub {
     // 「配置里把命令名写错/该命令没装」正是这个文件最常见的配置事故，它该变成一条警告
     // （connect 的返回值、TUI 的 mcpWarnings 通道都为此准备着），不该让 sph 起不来。
     child.on('error', (error: Error) => {
+      dead = true;
       this.problems.set(spec.name, `failed to start: ${error.message}`);
       this.failPending(conn, `MCP server ${spec.name} failed to start: ${error.message}`);
     });
@@ -435,26 +525,17 @@ export class McpHub {
         capabilities: {},
         clientInfo: { name: 'sph', version: '0.1.0' },
       });
-      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+      conn.wire.write({ jsonrpc: '2.0', method: 'notifications/initialized' });
       await this.refreshTools(spec.name, conn);
       conn.ready = true;
     } catch (error) {
-      this.safeKill(child);
+      conn.wire.close();
       this.connections.delete(spec.name);
       this.problems.set(spec.name, describeError(error));
       throw error;
     }
     this.problems.delete(spec.name);
     return conn;
-  }
-
-  /** kill 对 spawn 失败/已退出的子进程会抛 EINVAL：清理路径不允许再炸一次。 */
-  private safeKill(child: TaggedChild): void {
-    try {
-      child.kill();
-    } catch {
-      // 进程从未成功启动或已退出——没有需要清理的东西。
-    }
   }
 
   private async refreshTools(serverName: string, conn: Connection): Promise<void> {
@@ -476,8 +557,7 @@ export class McpHub {
     conn.buffer = '';
   }
 
-  private onData(conn: Connection, chunk: string): void {
-    // 先拼上上次残留的半行，再把最后一段不完整的行留回缓冲。
+  private onData(conn: Connection, name: string, chunk: string): void {
     const lines = (conn.buffer + chunk).split('\n');
     conn.buffer = lines.pop() ?? '';
     for (const line of lines) {
@@ -489,22 +569,33 @@ export class McpHub {
       } catch {
         continue;
       }
-      if (msg.id !== undefined) {
-        const entry = conn.pending.get(msg.id);
-        if (entry) {
-          conn.pending.delete(msg.id);
-          if (msg.error) entry.reject(new Error(msg.error.message ?? 'MCP error'));
-          else entry.resolve(msg.result);
-          continue;
-        }
-      }
-      if (msg.method === 'notifications/tools/list_changed') {
-        const name = conn.child.sphName;
-        void this.refreshTools(name, conn).catch(() => {
-          // 变更同步失败保持旧列表；下次 call 的懒重连会兜底。
-        });
+      this.onRpc(conn, name, msg);
+    }
+  }
+
+  private onRpc(conn: Connection, name: string, msg: JsonRpc): void {
+    if (msg.id !== undefined) {
+      const entry = conn.pending.get(msg.id);
+      if (entry) {
+        conn.pending.delete(msg.id);
+        if (msg.error) entry.reject(new Error(msg.error.message ?? 'MCP error'));
+        else entry.resolve(msg.result);
+        return;
       }
     }
+    if (msg.method === 'notifications/tools/list_changed') {
+      void this.refreshTools(name, conn).catch(() => {
+        // 变更同步失败保持旧列表；下次 call 的懒重连会兜底。
+      });
+    }
+  }
+
+  private rejectId(conn: Connection, id: number | undefined, error: Error): void {
+    if (id === undefined) return;
+    const entry = conn.pending.get(id);
+    if (entry === undefined) return;
+    conn.pending.delete(id);
+    entry.reject(error);
   }
 
   private request(conn: Connection, method: string, params: unknown): Promise<unknown> {
@@ -524,7 +615,7 @@ export class McpHub {
           reject(error);
         },
       });
-      conn.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      conn.wire.write({ jsonrpc: '2.0', id, method, params });
     });
   }
 }
@@ -590,21 +681,43 @@ function redactUrl(raw: string): string {
   return url.toString();
 }
 
-/** 不能 spawn 的原因；undefined 表示可以拉起。 */
+/** 不能拉起的原因；undefined 表示这个传输可以连。 */
 function blockedReason(spec: McpServerSpec & { enabled: boolean }): string | undefined {
   if (!spec.enabled) return 'disabled';
-  if (spec.url !== undefined) return 'http transport is not supported yet (stdio only)';
+  const resolved = resolveTransport(spec);
+  if (resolved.invalid !== undefined) return `unknown transport: ${resolved.invalid}`;
+  if (resolved.transport === 'http' || resolved.transport === 'sse') {
+    if (spec.url === undefined || spec.url === '') return 'no url given';
+    let url: URL;
+    try {
+      url = new URL(spec.url);
+    } catch {
+      return 'url is not a valid URL';
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return 'url must be http or https';
+    return undefined;
+  }
   if (spec.command === undefined || spec.command === '') return 'no command given';
   return undefined;
 }
 
-/** 决定连接能否复用的签名：只有真正影响子进程形态的字段参与。 */
+/** 决定连接能否复用的签名：传输、命令、url、头和环境都算。 */
 function spawnableSignature(spec: McpServerSpec): string {
-  const env = Object.entries(spec.env ?? {})
+  const joined = (record: Record<string, string> | undefined) => Object.entries(record ?? {})
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}=${value}`)
     .join('\u0000');
-  return [spec.command ?? '', ...(spec.args ?? []), '\u0001', env].join('\u0000');
+  return [
+    resolveTransport(spec).transport,
+    spec.command ?? '',
+    ...(spec.args ?? []),
+    '\u0001',
+    spec.url ?? '',
+    '\u0001',
+    joined(spec.headers),
+    '\u0001',
+    joined(spec.env),
+  ].join('\u0000');
 }
 
 /**

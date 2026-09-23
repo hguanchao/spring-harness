@@ -1,7 +1,5 @@
 import { AltScreenFlashContainer } from "./alt-screen-flash.js";
 import { ScrollView } from "./scroll-view.js";
-import { compositeRowSelection, isSelectableRow, selectRow } from "../components/selectable-row.js";
-import { compositeStickyUserMessages, stickyOverlayRects } from "../components/sticky-user-message.js";
 import { getKeybindings } from "./keybindings.js";
 import { isKeyRelease } from "./keys.js";
 import {
@@ -46,7 +44,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils.js";
-import { oscResetCanvasBackground, oscSetCanvasBackground } from "../theme/theme.js";
+
 
 const ENTER_ALT_SCREEN = "\x1b[?1049h";
 const EXIT_ALT_SCREEN = "\x1b[?1049l";
@@ -132,6 +130,27 @@ interface ScrollToEndIndicatorRect {
 	width: number;
 }
 
+export interface ViewportOverlayRect {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+/**
+ * 产品画在备用屏幕上的叠层。
+ *
+ * 行选中和吸顶气泡都认识具体消息块，控件层只在进屏、命中、点空白和合成这四个点调用。
+ * 不注入时这些行为不存在，备用屏幕仍能滚动和划词。
+ */
+export interface ViewportChrome {
+	reset(): void;
+	hitRects(frame: LayoutFrame): readonly ViewportOverlayRect[];
+	/** 点在组件未接管的区域。返回 true 表示选中变了，需要重绘。 */
+	pressEmpty(components: readonly Component[]): boolean;
+	composite(screen: string[], frame: LayoutFrame, width: number): string[];
+}
+
 export interface TuiAltScreenOptions {
 	/** Number of logical lines moved for each mouse-wheel event. */
 	wheelScrollLines?: number;
@@ -162,6 +181,13 @@ export interface TuiAltScreenOptions {
 	 * 与 Windows Terminal 一致（块底=终端默认前景，字色按块底明度取黑/白）。
 	 */
 	selectionStyle?: SelectionHighlight;
+	/**
+	 * 备用屏幕进出时写在 1049 前后的画布序列。缺省不改终端底色。
+	 * 用函数是因为配色可能在启动后才定，进屏时再取。
+	 */
+	canvas?: { set(): string; reset(): string };
+	/** 产品叠层。见 ViewportChrome。 */
+	chrome?: ViewportChrome;
 }
 
 /** 划词高亮的一组 SGR：块底，以及块内被迫替换的文字色。 */
@@ -280,6 +306,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly copySelection?: (text: string) => Promise<boolean>;
 	private readonly onCopyFeedback?: (message: string) => void;
 	private readonly selectionStyle?: SelectionHighlight;
+	private readonly canvas?: { set(): string; reset(): string };
+	private readonly chrome?: ViewportChrome;
 	/** 转录内容世代：滚动不递增，避免每帧重排整份对话。 */
 	private contentGeneration = 0;
 	/** 鼠标移动观察者：每个 move/drag 事件在组件分发前触发一次（见 TUI 接口说明）。 */
@@ -308,6 +336,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.copySelection = options.copySelection;
 		this.onCopyFeedback = options.onCopyFeedback;
 		this.selectionStyle = options.selectionStyle;
+		this.canvas = options.canvas;
+		this.chrome = options.chrome;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -339,7 +369,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.altScreenActive = true;
 		this.lastDocument = [];
 		this.clearSelectionState();
-		selectRow(undefined);
+		this.chrome?.reset();
 		this.lastClick = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
@@ -358,7 +388,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? ENABLE_BUTTON_MOTION_MOUSE
 				: ENABLE_ALL_MOTION_MOUSE;
 		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}${oscSetCanvasBackground()}\x1b[49m\x1b[2J\x1b[H\x1b[?25l`,
+			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}${this.canvas?.set() ?? ""}\x1b[49m\x1b[2J\x1b[H\x1b[?25l`,
 		);
 	}
 
@@ -380,7 +410,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.altScreenActive = false;
 		if (options.preserveScreen) {
 			this.terminal.write(
-				`${BEGIN_SYNCHRONIZED_OUTPUT}${oscResetCanvasBackground()}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`,
+				`${BEGIN_SYNCHRONIZED_OUTPUT}${this.canvas?.reset() ?? ""}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`,
 			);
 		} else {
 			const width = Math.max(1, this.terminal.columns);
@@ -388,7 +418,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.lastDocument = this.applyLineResets(documentLines.map((line) => line.replaceAll(CURSOR_MARKER, ""))).map(
 				(line) => clipLineToWidth(line, width),
 			);
-			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${oscResetCanvasBackground()}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
+			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${this.canvas?.reset() ?? ""}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
 			for (let row = 0; row < this.lastDocument.length; row++) {
 				if (row > 0) buffer += "\r\n";
 				buffer += `\r\x1b[2K${this.lastDocument[row] ?? ""}`;
@@ -580,7 +610,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// 放行的话点它会点穿到气泡底下的转录行——双击吸顶气泡会误触底下工具行的开合。
 		// 按下/点击/拖拽在气泡占据的矩形内一律不下发；滚轮与纯移动放行，滚动与划选不受影响。
 		if (event.type === "press" || event.type === "click" || event.type === "drag") {
-			const insideSticky = stickyOverlayRects(this.currentLayout).some(
+			const insideSticky = (this.chrome?.hitRects(this.currentLayout) ?? []).some(
 				(rect) =>
 					event.screenX >= rect.x &&
 					event.screenX < rect.x + rect.width &&
@@ -737,8 +767,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// 会把刚钉上的选中条 ❙ 误清掉；真点在空白处时 selectable 为 undefined，
 			// selectRow(undefined) 维持「点空白取消选中」的原语义。
 			const boxes = this.currentLayout ? getLayoutBoxesAt(this.currentLayout, raw.x, raw.y) : [];
-			const selectable = boxes.map((box) => box.component).find(isSelectableRow);
-			if (selectRow(selectable)) this.requestRender();
+			if (this.chrome?.pressEmpty(boxes.map((box) => box.component))) this.requestRender();
 		}
 		this.handleSelectionMouseEvent(raw);
 	}
@@ -824,7 +853,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	 * 右键：复制当前选区。
 	 *
 	 * Windows 上右键默认是粘贴（Windows Terminal 的约定），但那个约定只在「选区归终端所有」
-	 * 时成立——sph 的选区是应用内自绘的，右键粘贴等于用系统剪贴板覆盖刚选中的内容。所以这里
+	 * 时成立。这里的选区是应用内自绘的，右键粘贴等于用系统剪贴板覆盖刚选中的内容。所以这里
 	 * 把右键定为复制：有选区就复制并 flash 反馈，没有选区不拦截，交回终端。
 	 */
 	private handleRightClickCopy(event: SgrMouseEvent): boolean {
@@ -1413,8 +1442,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// 叠层从底到顶：layout 正文（含滚动条）已经在 nextLayout.lines 里。
 		// 内容装饰不得盖住视口 chrome / 浮层 / flash，否则选区会染上对话框、│ 会穿出吸顶气泡。
 		screen = this.applySelection(screen, nextLayout);
-		screen = compositeRowSelection(screen, nextLayout, width);
-		screen = compositeStickyUserMessages(screen, nextLayout, width);
+		screen = this.chrome?.composite(screen, nextLayout, width) ?? screen;
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		// 吸顶与正文气泡同宽，滑块最后盖回右缘，避免气泡短一列、滑块被灰底吃掉。
 		screen = compositeScrollbars(screen, nextLayout, width);

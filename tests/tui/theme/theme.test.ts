@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Markdown } from '../../../src/plugins/sph-tui/screen/markdown.js';
+import { Markdown } from '../../../src/tui/markdown.js';
 import { PALETTE } from '../../../src/plugins/sph-tui/theme/palettes.js';
 import {
   getMarkdownTheme,

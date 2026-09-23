@@ -52,7 +52,7 @@ Usage:
   sph --approval MODE       ask | auto | yolo (default: ask; LLM reviews in auto)
   sph --yolo                Shortcut for --approval yolo
   sph --trust               Remember this workspace as trusted (required for untrusted -p)
-  sph --sandbox MODE        off | workspace | read-only  (default: workspace)
+  sph --sandbox MODE        off | workspace | read-only  (default: off)
   sph -p "<prompt>" --output-format json        Emit one JSON event per line
                                                 (NDJSON) on stdout instead of text;
                                                 the last line is {"type":"result",...}
@@ -83,9 +83,12 @@ MCP sources: ~/.sph/config.toml, <repo>/.sph/config.toml (closest to cwd wins),
              Later tools in that list lose to earlier ones on a name clash.
              External files are never written to: enable/disable is recorded in
              [mcp] disabled_servers / enabled_servers in ~/.sph/config.toml.
-             Only stdio servers run; HTTP entries are listed but not started.
+             MCP transports: stdio, HTTP, and SSE. A url uses HTTP unless transport = "sse"
+             or the path ends in /sse.
 
-OS sandbox: Windows restricted token + ACL, or Linux bwrap. macOS is unsupported.
+OS sandbox: off by default. workspace | read-only use a same-host file policy
+             (Linux bwrap, else Landlock; macOS Seatbelt; Windows restricted token + ACL).
+             Reads and network stay on the host. Windows enforcement is partial.
 Enforcement is PARTIAL. Headless shell/web/mcp is denied unless --yolo is set.
 Untrusted workspaces: -p requires --trust; the TUI asks once interactively.
 --yolo does not imply --trust.

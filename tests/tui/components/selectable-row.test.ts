@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { LayoutBox, LayoutFrame } from '../../../src/plugins/sph-tui/screen/layout.js';
-import type { Component } from '../../../src/plugins/sph-tui/screen/tui.js';
+import type { LayoutBox, LayoutFrame } from '../../../src/tui/layout.js';
+import type { Component } from '../../../src/tui/tui.js';
 import {
   asSelectableRow,
   compositeRowSelection,

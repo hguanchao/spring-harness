@@ -1,4 +1,4 @@
-import { type Component, Loader, type TUI, visibleWidth } from "../screen/index.js";
+import { type Component, Loader, type TUI, visibleWidth } from "../../../tui/index.js";
 import { appKeyText, type AppKeybinding } from "../app-keybindings.js";
 import { theme } from "../theme/theme.js";
 import { flattenWhitespace } from "../../../util.js";
@@ -230,6 +230,7 @@ export class WorkingStatusIndicator extends StatusIndicator {
       indicator,
     );
     this.setTimerColor((text) => theme.fg('muted', text));
+    this.shimmer = (text, now) => theme.shimmer(text, now);
     this.setShimmer(true);
   }
 }

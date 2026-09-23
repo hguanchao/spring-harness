@@ -2,7 +2,7 @@
  * MCP 配置的写回。
  *
  * 两件事：
- *   1. `[[mcp_servers]]` 数组表的新增 / 更新 / 删除；
+ *   1. `[mcp_servers.<name>]` 的新增 / 更新 / 删除（与 Codex 同一套表头）；
  *   2. `[mcp]` 段的 `disabled_servers` / `enabled_servers` 本地启停偏好。
  *
  * 为什么不用「解析成对象 → 序列化整份重写」：与 `config/save.ts` 同一理由——这是用户手改
@@ -130,30 +130,39 @@ interface Block {
   name?: string;
 }
 
-/** 找出 `[[mcp_servers]]` 的全部块，`name` 从块内的 `name = "..."` 取出。 */
+/** `[mcp_servers.context7]` 的名字。子表（`mcp_servers.context7.headers`）不是一条 server。 */
+function serverNameOf(header: TomlHeader): string | undefined {
+  if (header.array || !header.name.startsWith('mcp_servers.')) return undefined;
+  let rest = header.name.slice('mcp_servers.'.length).trim();
+  if (rest.startsWith('"') && rest.endsWith('"') && rest.length >= 2) {
+    rest = rest.slice(1, -1).replace(/\\"/g, '"');
+  }
+  if (rest === '' || rest.includes('.')) return undefined;
+  return rest;
+}
+
+function blockEnd(lines: readonly string[], headers: readonly (TomlHeader | undefined)[], headerLine: number): number {
+  for (let j = headerLine + 1; j < lines.length; j++) {
+    if (headers[j] !== undefined) return j;
+  }
+  return lines.length;
+}
+
+/** 找出 `[mcp_servers.<name>]` 的全部块。名字在表头上。 */
 function mcpServerBlocks(lines: readonly string[], headers: readonly (TomlHeader | undefined)[]): Block[] {
   const blocks: Block[] = [];
   for (let i = 0; i < lines.length; i++) {
     const header = headers[i];
-    if (header === undefined || !header.array || header.name !== 'mcp_servers') continue;
-    let end = lines.length;
-    for (let j = i + 1; j < lines.length; j++) {
-      if (headers[j] !== undefined) {
-        end = j;
-        break;
-      }
-    }
-    blocks.push({ headerLine: i, start: i, end, name: readEntryName(lines, i + 1, end) });
+    if (header === undefined) continue;
+    const name = serverNameOf(header);
+    if (name === undefined) continue;
+    blocks.push({ headerLine: i, start: i, end: blockEnd(lines, headers, i), name });
   }
   return blocks;
 }
 
-function readEntryName(lines: readonly string[], from: number, to: number): string | undefined {
-  for (let i = from; i < to; i++) {
-    const match = /^\s*name\s*=\s*(.+)$/.exec(codeOf(lines[i]!));
-    if (match !== null) return parseTomlString(match[1]!.trim());
-  }
-  return undefined;
+function tomlServerHeader(name: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(name) ? `[mcp_servers.${name}]` : `[mcp_servers.${tomlString(name)}]`;
 }
 
 function parseTomlString(text: string): string | undefined {
@@ -167,7 +176,7 @@ function parseTomlString(text: string): string | undefined {
   return undefined;
 }
 
-/** 纯读取：列出 `[[mcp_servers]]` 里的条目。解析失败时返回空表，交给调用方决定怎么报。 */
+/** 纯读取：列出 `[mcp_servers.<name>]`。解析失败时返回空表，交给调用方决定怎么报。 */
 export function listSphMcpServers(path: string): SphMcpEntry[] {
   const doc = open(path);
   const headers = scanHeaders(doc.lines);
@@ -213,11 +222,10 @@ function readArray(lines: readonly string[], from: number, to: number, key: stri
 }
 
 /**
- * 新增或更新一条 `[[mcp_servers]]`。
+ * 新增或更新一条 `[mcp_servers.<name>]`。
  *
- * 已存在时只替换 `command` / `args` 两行，块内的注释与其它键原样保留；缺少这两行就插在
- * `name` 之后。不存在时新建一个块，插在最后一个 `[[mcp_servers]]` 块之后——把 server
- * 们放在一起，比散落在文件各处好读。
+ * 已存在时只替换 `command` / `args`，块内的 `type`、注释和其它键原样保留。
+ * 不存在时新建一块，带上 `type = "stdio"`，插在最后一个 server 块之后。
  */
 export function upsertSphMcpServer(path: string, entry: SphMcpEntry): { added: boolean } {
   const doc = open(path);
@@ -228,7 +236,7 @@ export function upsertSphMcpServer(path: string, entry: SphMcpEntry): { added: b
   if (block === undefined) {
     const last = blocks.at(-1);
     const at = last === undefined ? trailingInsertAt(doc.lines) : last.end;
-    const fresh = [`[[mcp_servers]]`, `name = ${tomlString(entry.name)}`, `command = ${tomlString(entry.command)}`];
+    const fresh = [tomlServerHeader(entry.name), 'type = "stdio"', `command = ${tomlString(entry.command)}`];
     if (entry.args !== undefined) fresh.push(`args = ${tomlArray(entry.args)}`);
     const lines = [...doc.lines.slice(0, at), '', ...fresh, ...doc.lines.slice(at)];
     commit(path, doc, lines);

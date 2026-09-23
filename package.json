@@ -8,7 +8,8 @@
     "sph": "./dist/cli/index.js"
   },
   "exports": {
-    ".": "./dist/sdk.js"
+    ".": "./dist/sdk.js",
+    "./tui": "./dist/tui/index.js"
   },
   "files": [
     "dist"
