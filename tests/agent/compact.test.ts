@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import type { ChatMessage } from '../../src/plugins/sph-llm/openai.js';
 import type { SessionMessage } from '../../src/session/types.js';
+import { jsonlSessionFactory } from '../../src/plugins/sph-session/store.js';
 import {
   estimateTokens,
   emptyWire,
   flushWireImages,
+  openCompactedSession,
   pairingBalancedCut,
   pushSessionMessage,
   toChatMessages,
@@ -342,5 +347,44 @@ describe('user 附件投影', () => {
     const state = emptyWire();
     for (const row of rows) pushSessionMessage(state, row);
     assert.deepEqual(state.messages, full);
+  });
+});
+
+describe('压缩新开会话', () => {
+  it('原会话消息不变，新会话以摘要开头并带上未覆盖的尾部', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-fork-'));
+    try {
+      const from = jsonlSessionFactory.create(root, root, true);
+      for (let i = 1; i <= 4; i++) from.appendMessage({ role: 'user', content: `turn ${i}` });
+      from.appendEvent('goal', { text: 'ship the fix' });
+      const before = from.readMessages().map((row) => row.content);
+      const opened = openCompactedSession({
+        factory: jsonlSessionFactory,
+        from,
+        workspaceRoot: root,
+        makeCurrent: true,
+        summary: 'checkpoint body',
+        covered: 2,
+        depth: 0,
+      });
+      assert.deepEqual(from.readMessages().map((row) => row.content), before, '原会话的消息一个字不能改');
+      assert.equal(
+        from.readAll().some((record) => record.type === 'event' && record.kind === 'compaction'),
+        false,
+      );
+      assert.equal(
+        from.readAll().some((record) => record.type === 'event' && record.kind === 'session_fork' && record.data.to === opened.session.id),
+        true,
+      );
+      const messages = opened.session.readMessages();
+      assert.match(messages[0]?.content ?? '', /compacted earlier context/);
+      assert.match(messages[0]?.content ?? '', /checkpoint body/);
+      assert.deepEqual(messages.slice(1).map((row) => row.content), ['turn 3', 'turn 4']);
+      const goal = opened.session.readAll().find((record) => record.type === 'event' && record.kind === 'goal');
+      assert.equal(goal && goal.type === 'event' ? goal.data.text : undefined, 'ship the fix');
+      assert.notEqual(opened.session.id, from.id);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

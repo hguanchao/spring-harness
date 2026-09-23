@@ -1,3 +1,4 @@
+import { stableValue } from '../util.js';
 import type { ToolSpec } from './types.js';
 
 export interface OpenAiTool {
@@ -29,8 +30,14 @@ export class ToolRegistry {
     return this.byName.get(name);
   }
 
+  /**
+   * 发给接口的工具声明。
+   *
+   * 按名字排序、参数键递归排序：注册顺序和 schema 字面量的键序都不该进请求字节，
+   * 否则前缀缓存从工具段起整段重算。
+   */
   schemas(allowed?: ReadonlySet<string>): OpenAiTool[] {
-    return this.list()
+    const listed = this.list()
       .filter((tool) => !allowed || allowed.has(tool.name))
       .map((tool) => ({
         type: 'function' as const,
@@ -39,7 +46,9 @@ export class ToolRegistry {
           description: tool.description,
           parameters: tool.schema,
         },
-      }));
+      }))
+      .sort((a, b) => (a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0));
+    return stableValue(listed) as OpenAiTool[];
   }
 
   /** 未知名字 fail-closed：不当成只读。 */

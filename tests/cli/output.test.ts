@@ -60,6 +60,18 @@ describe('createJsonOutput', () => {
     assert.equal(out.split('\n').filter((line) => line !== '').length, 1);
   });
 
+  it('session_fork 之后 result 指向新会话', () => {
+    const output = createJsonOutput({ sessionId: 's1' });
+    const out = captureStdout(() => {
+      output.listener({ type: 'session_fork', sessionId: 's2', fromSessionId: 's1', covered: 4 });
+      output.listener({ type: 'text', text: '继续' });
+      process.stdout.write(output.finalLine());
+    });
+    const result = JSON.parse(out.trim().split('\n').at(-1) ?? '{}') as { sessionId: string; text: string };
+    assert.equal(result.sessionId, 's2');
+    assert.equal(result.text, '继续');
+  });
+
   it('subagent_event 这类嵌套事件也照原样输出', () => {
     const output = createJsonOutput({ sessionId: 's1' });
     const out = captureStdout(() => output.listener({ type: 'subagent_event', id: 'sub-1', event: { type: 'text', text: 'x' } }));

@@ -107,6 +107,10 @@ const SYNTHETIC_USER_PREFIXES = [
   '[background task ',
   '[message from parent session]',
   '[instructions from ',
+  // 尾部快照和压缩摘要都是运行时写的。算成用户发言会让自动 recap 把「目录变了」当成新一轮。
+  '[context — ',
+  '[session state — ',
+  '[compacted earlier context]',
 ] as const;
 
 /** 这条 user 消息是否由运行时注入（而非用户真实发言）。 */

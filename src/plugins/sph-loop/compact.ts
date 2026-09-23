@@ -1,6 +1,7 @@
+import { foldSessionState, sessionEventData } from '../../session/fold.js';
+import type { SessionFactory, SessionMessage, SessionPort } from '../../session/types.js';
 import { attachmentWireSuffix } from './attachments.js';
 import type { LlmClient, ChatMessage, TokenUsage } from '../sph-llm/openai.js';
-import type { SessionMessage, SessionPort } from '../../session/types.js';
 
 /** 最近 K 轮原文不动。一轮 = 一对 user/assistant（含其间 tool）。 */
 const KEEP_RECENT_TURNS = 4;
@@ -112,7 +113,10 @@ function isOverPressure(tokens: number, contextWindow: number): boolean {
 
 export interface ProjectionResult {
   messages: ChatMessage[];
-  /** 压缩后的最新状态；loop 负责持久化为 compaction event 并在内存中续用。 */
+  /**
+   * 新摘要。调用方据此新开一个会话，不把 compaction 事件写回原会话——
+   * 原会话的发送投影必须和上次请求逐字节相同，缓存才还在。
+   */
   compaction?: CompactionEvent;
   /**
    * 本次投影实际应用的 stub 边界（session 坐标，readMessages 序）。
@@ -303,12 +307,103 @@ export interface WireState {
   pendingImages: string[];
 }
 
+/** 摘要作为新会话的第一条 user 消息。旧会话上的 compaction 事件仍走同一段文本，两边读到的字节一致。 */
+export function compactedContextText(summary: string): string {
+  return `[compacted earlier context]\n${CHECKPOINT_PREAMBLE}\n\n${summary}`;
+}
+
+/**
+ * 复制到另一份会话时去掉身份字段。
+ *
+ * 原样带上 id / parentId 会把新文件的父链指回旧文件里不存在的记录，
+ * 分支回放就只剩最后一条。
+ */
+export function appendableMessage(row: SessionMessage): Omit<SessionMessage, 'type' | 'ts' | 'id' | 'parentId'> {
+  const body: Omit<SessionMessage, 'type' | 'ts' | 'id' | 'parentId'> = {
+    role: row.role,
+    content: row.content,
+  };
+  if (row.toolCallId !== undefined) body.toolCallId = row.toolCallId;
+  if (row.toolName !== undefined) body.toolName = row.toolName;
+  if (row.toolCalls !== undefined) body.toolCalls = row.toolCalls;
+  if (row.images !== undefined) body.images = row.images;
+  if (row.attachments !== undefined) body.attachments = row.attachments;
+  if (row.reasoning !== undefined) body.reasoning = row.reasoning;
+  if (row.thinking !== undefined) body.thinking = row.thinking;
+  if (row.thinkingSignature !== undefined) body.thinkingSignature = row.thinkingSignature;
+  return body;
+}
+
+export interface ForkedSession {
+  session: SessionPort;
+  /** 摘要在前，未被覆盖的尾部按原顺序跟在后面。 */
+  mirror: SessionMessage[];
+}
+
+/**
+ * 压缩落地：新开会话，而不是在原会话上写一条会改写发送投影的 compaction 事件。
+ *
+ * 原会话的消息一个字不动，之后若还从它接着聊，前缀和上次请求一致。
+ * 新会话的第一条是摘要，后面只留未被覆盖的尾部；缓存从这里重新建立，只冷启动一次。
+ * `session_fork` 记在原会话上，它是事件不是消息，不进入发送投影。
+ */
+export function openCompactedSession(options: {
+  factory: SessionFactory;
+  from: SessionPort;
+  workspaceRoot: string;
+  /** 顶层对话才改 current。子代理的压缩不能把用户的当前会话抢走。 */
+  makeCurrent: boolean;
+  summary: string;
+  covered: number;
+  /** 切尾部用的消息序列。省略则读 `from`。进行中的轮次要传内存镜像，里面有还没落盘的行。 */
+  messages?: readonly SessionMessage[];
+  /** 代理深度下限。resume 靠它认出子代理，避免被当成顶层继续派生。 */
+  depth: number;
+  /**
+   * 预算用的累计 token。省略则折叠原会话里已经落盘的 usage。
+   * 进行中的轮次要把还没写进文件的消耗传进来，否则新会话的预算从零重算。
+   */
+  tokensUsed?: number;
+}): ForkedSession {
+  const source = options.messages ?? options.from.readMessages();
+  const folded = foldSessionState(options.from.readAll());
+  const next = options.factory.create(options.from.dir, options.workspaceRoot, options.makeCurrent);
+  const summaryRow: SessionMessage = {
+    type: 'message',
+    ts: new Date().toISOString(),
+    role: 'user',
+    content: compactedContextText(options.summary),
+  };
+  next.appendMessage(appendableMessage(summaryRow));
+  const tail = source.slice(options.covered);
+  for (const row of tail) next.appendMessage(appendableMessage(row));
+  // 消息投影不靠这些事件，但 resume 要折叠出 goal / 计划模式 / 待办 / 预算。
+  if (folded.model) {
+    next.appendEvent('model_selection', sessionEventData.modelSelection({
+      model: folded.model,
+      contextWindow: folded.contextWindow,
+      maxTokens: folded.maxTokens,
+    }));
+  }
+  if (folded.goal) next.appendEvent('goal', sessionEventData.goal(folded.goal));
+  if (folded.planMode) next.appendEvent('plan_mode', sessionEventData.planMode(true));
+  if (folded.todos.length > 0) next.appendEvent('todo', { items: folded.todos.map((item) => ({ ...item })) });
+  for (const failure of folded.failures) {
+    next.appendEvent('tool_result', { tool: failure.tool, ok: false, excerpt: failure.excerpt });
+  }
+  const carried = options.tokensUsed ?? folded.tokensUsed;
+  if (carried > 0) next.appendEvent('usage', { promptTokens: carried, completionTokens: 0, carried: true });
+  next.appendEvent('turn_start', { depth: options.depth });
+  options.from.appendEvent('session_fork', { to: next.id, covered: options.covered });
+  return { session: next, mirror: [summaryRow, ...tail] };
+}
+
 export function emptyWire(compaction?: CompactionEvent): WireState {
   const messages: ChatMessage[] = [];
   if (compaction && compaction.covered > 0) {
     messages.push({
       role: 'user',
-      content: `[compacted earlier context]\n${CHECKPOINT_PREAMBLE}\n\n${compaction.summary}`,
+      content: compactedContextText(compaction.summary),
     });
   }
   return { messages, pendingImages: [] };
@@ -436,7 +531,7 @@ function estimatePromptTokens(
  * 把会话镜像投影为可发送的上下文：超过水位线时先 stub 工具结果，
  * 再用 LLM 增量摘要旧轮次；失败回退到零成本机械压缩。
  * 真实 usage（上一轮 prompt tokens + 之后的增量）优先于纯字符估算。
- * 摘要状态由调用方持久化（compaction event）并在内存中续用。
+ * 新摘要由调用方开一个新会话续用。原会话只追加一条 session_fork，发送投影不变。
  *
  * `force` 用于 provider 已确认超窗之后的补救：此时水位线估算不再可信（可能是分词口径不同，
  * 也可能单条工具结果就顶满窗口），必须无条件瘦身，且允许整轮丢弃。

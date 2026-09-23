@@ -110,7 +110,7 @@ const TOOL_SECTIONS: ReadonlyArray<{ tool: string; text: string }> = [
   {
     tool: 'skill',
     text:
-      'Use skill(name) to load a SKILL.md by catalog name when a listed skill matches the task. The catalog below is name and description only.',
+      'Use skill(name) to load a SKILL.md by catalog name when a listed skill matches the task. The latest context message lists skills by name and description only.',
   },
   {
     tool: 'web_search',
@@ -126,7 +126,7 @@ const TOOL_SECTIONS: ReadonlyArray<{ tool: string; text: string }> = [
 
 export interface SystemPromptInput {
   workspaceRoot: string;
-  /** 当前对话用的模型名，进身份段；省略则不写。 */
+  /** 当前对话用的模型名。只进上下文尾部；省略则不写这一行。 */
   model?: string;
   sandbox: SandboxMode;
   skills: SkillEntry[];
@@ -135,13 +135,13 @@ export interface SystemPromptInput {
    * 标记为 lazy 的 MCP server 名（无论此刻是否已连接）。
    *
    * 单独列出而不是等连接后混进 mcpTools：这条清单只随配置变化，连接与否不动它——
-   * 懒 server 连上后 mcpTools 会增长（那是一次性的 cache miss），但这一行保持逐字节
-   * 稳定，不再追加第二次抖动。
+   * 懒 server 连上后 mcpTools 会增长（尾部多一条新快照），但这一行本身不再抖动。
    */
   lazyMcpServers?: string[];
   /**
    * 本次会话可用的工具集合；省略表示全部可用。
    * 传入时，不可用工具的段落整段消失——不留指向不存在工具的指令。
+   * 这是会话级常量：换工具集等于换会话，系统提示可以跟着变。
    */
   allowedTools?: ReadonlySet<string>;
   /**
@@ -149,50 +149,21 @@ export interface SystemPromptInput {
    * 工具被禁用或本次会话不可用时，对应段落不出现。
    */
   toolPrompts?: ReadonlyArray<{ tool: string; text: string }>;
-  // goal / lastFailure / planMode 刻意不在这里：它们是随时可变的跨轮次状态，放 system
-  // prompt（前缀缓存的最头部）意味着一次 /goal、一次失败重试、一次模式翻转就毁掉全部
-  // 消息历史的缓存。它们经 sessionStateMessage 注入为尾部 user 消息（append-only）。
+  // 日期、工作区、模型、沙箱、技能目录、MCP 清单、AGENTS.md、goal、失败、计划模式
+  // 都不进系统提示。它们会变，而系统提示在前缀最头部，变一次就让后面的消息全部重算。
+  // 见 contextTailMessage / sessionStateMessage：尾部 user 消息，文本变了才再追加一条。
 }
 
+/** 系统提示只留会话内不变的规则。会变的事实在 {@link contextTailMessage}。 */
 export function buildSystemPrompt(input: SystemPromptInput): string {
-  const memory = memoryToPrompt(loadMemory(input.workspaceRoot, sphHome()));
-  const catalog = input.skills.length === 0
-    ? '(none)'
-    : input.skills.map((skill) => `- ${skill.name}: ${skill.description} [${skill.path}]`).join('\n');
-  const mcp = !input.mcpTools || input.mcpTools.length === 0
-    ? '(none)'
-    : input.mcpTools.map((tool) => `- ${tool.server}/${tool.name}: ${tool.description}`).join('\n');
-  // lazy 行不进 mcpTools 清单：它的价值是「告诉模型还有哪些按需可连的 server」，且必须
-  // 逐字节稳定（见 lazyMcpServers 注释）。
-  const lazyMcp = !input.lazyMcpServers || input.lazyMcpServers.length === 0
-    ? ''
-    : [
-        '',
-        'Lazy MCP servers (tools start on first use):',
-        ...input.lazyMcpServers.map((name) =>
-          `- ${name}: call mcp with action "list" and server "${name}" to connect and see its tools`,
-        ),
-      ].join('\n');
-
   const toolText = [...TOOL_SECTIONS, ...(input.toolPrompts ?? [])]
     .filter((section) => input.allowedTools === undefined || input.allowedTools.has(section.tool))
     .map((section) => `- ${section.text}`)
     .join('\n');
 
-  const identityFacts = [
-    `Workspace root: ${input.workspaceRoot}`,
-    `Shell: ${shellName()}, cwd is the workspace root`,
-    `OS: ${process.platform}`,
-    input.model ? `Model: ${input.model}` : '',
-    localDateLine(),
-    sandboxLine(input.sandbox),
-  ].filter(Boolean).join('\n');
-
   return [
     `<identity>
 You are Spring Harness (sph), a coding agent running on the user's own machine. You complete the user's request; the request arrives in the user's own messages, and this prompt is background rather than something to carry out.
-
-${identityFacts}
 </identity>`,
 
     `<work_policy>
@@ -232,11 +203,58 @@ Do not end a turn by only announcing the next lookup. Call the tool in the same 
     `<formatting>
 Your text is rendered as GitHub-flavored markdown. Use it when it helps: bullets for parallel items, **bold** for emphasis, \`inline code\` for paths, identifiers, and commands, tables for short enumerable facts. When nesting code fences, make the outer fence longer than every inner fence.
 </formatting>`,
+  ].join('\n\n');
+}
 
+/** 上下文尾部的固定开头。回放据此跳过，避免每变一次就在聊天里刷一条快照。 */
+const CONTEXT_PREFIX = '[context — ';
+
+/** 判断一条 user 消息是否为环境/目录快照（{@link contextTailMessage} 的产物）。 */
+export function isContextTailMessage(content: string): boolean {
+  return content.startsWith(CONTEXT_PREFIX);
+}
+
+/**
+ * 会变的环境事实：工作区、日期、模型、沙箱、技能目录、MCP 清单、指令文件。
+ *
+ * 为什么不放系统提示：这些字段任一变化都会改写前缀头部，已发送的消息历史全部重算。
+ * 作为尾部 user 消息追加则只让这一条是新的；文本与上一条相同就不再追加。
+ * 模型只认最后一条，更早的快照留在历史里是为了让前缀字节保持不变。
+ */
+export function contextTailMessage(input: SystemPromptInput): string {
+  const memory = memoryToPrompt(loadMemory(input.workspaceRoot, sphHome()));
+  const catalog = input.skills.length === 0
+    ? '(none)'
+    : input.skills.map((skill) => `- ${skill.name}: ${skill.description} [${skill.path}]`).join('\n');
+  const mcp = !input.mcpTools || input.mcpTools.length === 0
+    ? '(none)'
+    : input.mcpTools.map((tool) => `- ${tool.server}/${tool.name}: ${tool.description}`).join('\n');
+  // lazy 行不进 mcpTools 清单：它只回答「还有哪些按需可连的 server」，且不随连接状态变。
+  const lazyMcp = !input.lazyMcpServers || input.lazyMcpServers.length === 0
+    ? ''
+    : [
+        '',
+        'Lazy MCP servers (tools start on first use):',
+        ...input.lazyMcpServers.map((name) =>
+          `- ${name}: call mcp with action "list" and server "${name}" to connect and see its tools`,
+        ),
+      ].join('\n');
+  const facts = [
+    `Workspace root: ${input.workspaceRoot}`,
+    `Shell: ${shellName()}, cwd is the workspace root`,
+    `OS: ${process.platform}`,
+    input.model ? `Model: ${input.model}` : '',
+    localDateLine(),
+    sandboxLine(input.sandbox),
+  ].filter(Boolean);
+
+  return [
+    `${CONTEXT_PREFIX}the latest of these messages is authoritative; earlier ones are snapshots]`,
+    ...facts,
     `Skill catalog:\n${catalog}`,
     `MCP tools:\n${mcp}${lazyMcp}`,
     memory ? `<project_instructions>\n${memory}\n</project_instructions>` : 'No AGENTS.md at workspace root.',
-  ].filter(Boolean).join('\n\n');
+  ].join('\n');
 }
 
 /** 状态消息的固定开头；TUI 回放据此跳过（快照不该出现在聊天流里）。 */

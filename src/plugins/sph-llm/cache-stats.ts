@@ -6,7 +6,7 @@
  * 「这一轮突然变差」和「一直就这么差」。这里把相邻两次请求拉平对比，把差值归因到具体的
  * token 数上，并在超过噪声下限时给出最可能的解释（等太久 TTL 过期 / 换了模型）。
  *
- * 口径（与 PI 的 `cache-stats.ts` 对齐）：
+ * 口径：
  *
  *   missed = min(上一轮 promptTokens, 本轮 promptTokens) − cachedTokens
  *
@@ -49,6 +49,13 @@ export interface CacheMiss {
   modelChanged: boolean;
   /** 闲置已超过缓存 TTL。 */
   likelyExpired: boolean;
+  /**
+   * 这次未命中是预期的（换了模型，或压缩后改走新会话）。
+   * 仍落事件，方便和「前缀被意外改写」分开，但不进 waste。
+   */
+  expected: boolean;
+  /** expected 为真时的原因。普通未命中不填。 */
+  reason?: 'model' | 'compaction';
 }
 
 export interface CacheWaste {
@@ -82,6 +89,11 @@ const EMPTY_WASTE: CacheWaste = {
 export class CacheMissTracker {
   private previous?: CacheSample;
   /**
+   * 下一次没有基线的采样按预期冷启动记，而不是静默丢掉。
+   * 压缩新开会话之后，整段重算是新内容，不是前缀被改坏。
+   */
+  private coldStart?: 'compaction';
+  /**
    * 粘性标记：这一段里是否见过缓存活动。
    *
    * 用来区分两件长得一样的事——「只上报缓存读的端点（OpenAI 系）整段未命中」与
@@ -101,9 +113,23 @@ export class CacheMissTracker {
     this.totals.cachedTokens += Math.max(0, cached);
     if (cached > 0) this.sawCacheActivity = true;
 
-    // 无法判定：没有基线、本轮没有输入、或这个端点从未上报过缓存活动。
+    // 没有基线：普通的第一轮只建基线。压缩刚开了新会话时，这一轮是预期的冷启动。
     if (previous === undefined || sample.promptTokens <= 0) {
+      const reason = previous === undefined ? this.coldStart : undefined;
+      if (previous === undefined) this.coldStart = undefined;
       this.previous = sample;
+      if (reason && sample.promptTokens > 0 && sample.cachedTokens !== undefined) {
+        const missedTokens = Math.max(0, sample.promptTokens - cached);
+        if (missedTokens > CACHE_NOISE_FLOOR) {
+          return {
+            missedTokens,
+            modelChanged: false,
+            likelyExpired: false,
+            expected: true,
+            reason,
+          };
+        }
+      }
       return undefined;
     }
     if (sample.cachedTokens === undefined && !this.sawCacheActivity) {
@@ -124,15 +150,29 @@ export class CacheMissTracker {
       && previous.modelKey !== undefined
       && sample.modelKey !== previous.modelKey;
 
-    this.totals.missedTokens += missedTokens;
-    this.totals.missCount += 1;
+    // 换模型必然整段重算。记下来，但不要和「前缀被意外改写」加进同一笔 waste。
+    if (!modelChanged) {
+      this.totals.missedTokens += missedTokens;
+      this.totals.missCount += 1;
+    }
     this.previous = sample;
     return {
       missedTokens,
       ...(idleMs === undefined ? {} : { idleMs }),
       modelChanged,
       likelyExpired: idleMs !== undefined && idleMs >= CACHE_TTL_MS,
+      expected: modelChanged,
+      ...(modelChanged ? { reason: 'model' as const } : {}),
     };
+  }
+
+  /**
+   * 下一次采样是压缩之后的新会话：整段重发是预期的，不进 waste。
+   * 同时丢掉旧基线，避免拿压缩前的 prompt 长度来减。
+   */
+  expectColdStart(reason: 'compaction'): void {
+    this.previous = undefined;
+    this.coldStart = reason;
   }
 
   /**
@@ -143,6 +183,7 @@ export class CacheMissTracker {
    */
   reset(): void {
     this.previous = undefined;
+    this.coldStart = undefined;
   }
 
   get waste(): CacheWaste {
@@ -165,7 +206,10 @@ export function cacheHitRate(waste: CacheWaste): number | undefined {
  * 真的变了。编一个确定原因比说「两者之一」更糟。
  */
 export function describeCacheMiss(miss: CacheMiss): string {
-  const head = `cache miss: ${miss.missedTokens} prompt tokens re-billed`;
+  const head = miss.expected
+    ? `cache miss expected: ${miss.missedTokens} prompt tokens sent fresh`
+    : `cache miss: ${miss.missedTokens} prompt tokens re-billed`;
+  if (miss.reason === 'compaction') return `${head} — context was compacted into a new session`;
   if (miss.modelChanged) return `${head} — model changed, so the whole prompt is re-sent`;
   if (miss.likelyExpired && miss.idleMs !== undefined) {
     return `${head} — idle ${formatIdle(miss.idleMs)} (cache TTL ~${CACHE_TTL_MS / 60_000}m)`;

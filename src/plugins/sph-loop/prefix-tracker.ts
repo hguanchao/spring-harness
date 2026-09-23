@@ -3,8 +3,9 @@
  *
  * 为什么需要它：`cache_miss`（llm/cache-stats.ts）只能告诉你「这一轮少命中了多少」，
  * 却说不清**哪一段变了**。前缀按 `tools → system → messages` 拼接，三段的变更原因、
- * 频率与治理方式完全不同——tools 变来自 MCP reload 或子代理工具集，system 变来自
- * skills/AGENTS.md，messages 分叉则说明 append-only 被破坏（compact 或投影 bug）。
+ * 频率与治理方式完全不同——tools 变来自工具表，system 变来自工具说明或角色约束，
+ * messages 中段分叉则说明 append-only 被破坏。日期、技能目录、指令文件在尾部消息里，
+ * 变了只是追加，不该报成 system 变化。
  * 逐段 hash 对比把「缓存为什么变差」从猜测变成一条会话事件。
  *
  * 口径：合法形态是**纯追加**——上一轮请求的消息序列是本轮请求消息序列的前缀。此时

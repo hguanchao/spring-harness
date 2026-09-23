@@ -23,7 +23,7 @@
 import { basename, join } from 'node:path';
 import type { AgentListener } from '../sph-loop/events.js';
 import { collectFileMentions } from '../sph-loop/attachments.js';
-import { loadCompaction, projectContext } from '../sph-loop/compact.js';
+import { loadCompaction, openCompactedSession, projectContext } from '../sph-loop/compact.js';
 import { loadUserTheme } from './theme/theme.js';
 import { sphModelsPath, sphThemePath } from '../../home.js';
 
@@ -58,7 +58,7 @@ import { jsonlSessionFactory } from '../sph-session/store.js';
 import { EMPTY_PLUGIN_SERVICES } from '../types.js';
 import { SCHEDULER_SERVICE, SESSION_SERVICE, STORAGE_SERVICE, type SchedulerService, type SessionService, type SpillStorePort, type StorageService } from '../services.js';
 import { sessionService } from '../sph-session/index.js';
-import type { SessionPort } from '../../session/types.js';
+import type { SessionFactory, SessionPort } from '../../session/types.js';
 import { defaultTools } from '../sph-tools/index.js';
 import {
   BLOCK_GAP,
@@ -980,6 +980,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         this.projection.onSubagentEvent(event.id, event.event);
         return;
       }
+      case 'session_fork':
+        // 这一轮还在往转录里写。只换会话文件，不清屏幕，否则流式正文会丢。
+        this.rebindForkedSession(event.sessionId, false);
+        return;
       case 'done': {
         this.projection.finalizeStreaming();
         this.paint('transcript');
@@ -1457,15 +1461,45 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
   // ------------------------------------------------------------------ Compact
 
+  /** 会话工厂：注入的优先，其次插件，测试里没装插件时用默认 JSONL。 */
+  private sessionFactory(): SessionFactory {
+    if (this.deps.sessions) return this.deps.sessions;
+    const api = this.deps.pluginServices.get<SessionService>(SESSION_SERVICE);
+    if (api) return api.factory;
+    if (this.deps.pluginServices === EMPTY_PLUGIN_SERVICES) return sessionService.factory;
+    throw new Error('sph-session is not loaded');
+  }
+
+  /**
+   * 换成压缩开出来的会话。
+   *
+   * 轮次进行中只换绑定：转录正在被实时事件往上写，清掉再回放会和后到的 delta 叠成两份。
+   * 空闲时的 `/compact` 要回放，否则屏幕还停在旧会话上。
+   */
+  private rebindForkedSession(id: string, replay: boolean): void {
+    try {
+      this.deps.claimSession?.(id);
+    } catch (error) {
+      this.addNotice(errorMessage(error), 'warn');
+      return;
+    }
+    this.session = this.sessionFactory().open(this.deps.sessionDir, id);
+    if (!replay) return;
+    this.clearChat();
+    this.resetRecapState();
+    this.restoreSession();
+    this.applyEditorBorder();
+    this.refreshCounters();
+  }
+
   /**
    * `/compact [instructions]`：立刻把历史压成一个检查点，不等水位线。
    *
    * 与自动压缩共用 `projectContext`，区别只在于走 `force`——水位线判断的是「估算」，
    * 用户主动要求时估算不该有否决权（估算可能因为分词口径不同而偏乐观）。
    *
-   * 落地方式与 loop 完全一致：只往会话里写一条 `compaction` 事件，不碰内存态。下一轮
-   * `runTurn` 启动时由 `loadCompaction` 读回来，所以这里不需要维护任何投影状态，
-   * 也不会出现「命令改了状态、下一轮又按旧状态发请求」的错位。
+   * 落地是新开会话，不往原会话写 compaction 事件。原会话的消息保持原样，
+   * 之后从它接着聊时前缀还和上次请求一致。
    *
    * 带参数时是**聚焦说明**：
    * 只改这一次摘要的重点，不改固定段落结构。
@@ -1504,8 +1538,20 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         this.addNotice('Nothing new to compact — the recent history is kept as-is.', 'dim');
         return;
       }
-      this.session.appendEvent('compaction', { summary: next.summary, covered: next.covered });
-      this.addNotice(`Compacted ${next.covered - covered} messages into a checkpoint.`, 'success');
+      const forked = openCompactedSession({
+        factory: this.sessionFactory(),
+        from: this.session,
+        workspaceRoot: this.deps.workspaceRoot,
+        makeCurrent: true,
+        summary: next.summary,
+        covered: next.covered,
+        messages,
+        depth: this.sessionDepth,
+      });
+      this.rebindForkedSession(forked.session.id, true);
+      if (this.session.id === forked.session.id) {
+        this.addNotice(`Compacted ${next.covered - covered} messages into a new session.`, 'success');
+      }
     } catch (error) {
       this.addNotice(`Compact failed: ${message(error)}`, 'error');
     } finally {
@@ -1627,11 +1673,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         sandbox: this.deps.sandbox.status.mode,
         skills: scanSkills(this.deps.workspaceRoot).catalog,
         mcpTools: this.deps.mcp()?.listTools() ?? [],
+        lazyMcpServers: (this.deps.mcp()?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
+        allowedTools: new Set((this.deps.tools ?? defaultTools).list().map((tool) => tool.name)),
         toolPrompts: (this.deps.tools ?? defaultTools).list().flatMap((tool) => (
           tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : []
         )),
-        // goal / lastFailure / planMode 与 runTurn 同参：不进 system（前缀最头部），
-        // 跨轮次状态由 runTurn 以尾部 user 消息注入。
+        // 与 runTurn 同参。会变的事实不在 system 里，已经作为尾部消息写在会话中。
       }),
       contextWindow: this.contextWindow,
     };

@@ -51,6 +51,9 @@ export function createTextOutput(): HeadlessOutput {
       case 'error':
         process.stderr.write(`${event.text}\n`);
         break;
+      case 'session_fork':
+        process.stderr.write(`\n[session] compacted into ${event.sessionId}\n`);
+        break;
       default:
         break;
     }
@@ -68,7 +71,10 @@ export function createJsonOutput(meta: JsonOutputMeta): HeadlessOutput {
   let promptTokens = 0;
   let completionTokens = 0;
   let cachedTokens = 0;
+  // 压缩会换会话。result 行要指向还在继续的那一份，而不是进程启动时的 id。
+  let sessionId = meta.sessionId;
   const listener: AgentListener = (event) => {
+    if (event.type === 'session_fork') sessionId = event.sessionId;
     // 汇总所需的字段在途中累加：事后回读会话文件会多一次 I/O，且失败路径上未必可读。
     if (event.type === 'text') text.push(event.text);
     if (event.type === 'usage') {
@@ -83,7 +89,7 @@ export function createJsonOutput(meta: JsonOutputMeta): HeadlessOutput {
     finalLine: () =>
       `${JSON.stringify({
         type: 'result',
-        sessionId: meta.sessionId,
+        sessionId,
         text: text.join(''),
         usage: { promptTokens, completionTokens, cachedTokens },
       })}\n`,

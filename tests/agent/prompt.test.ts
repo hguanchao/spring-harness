@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildSystemPrompt, sessionStateMessage } from '../../src/plugins/sph-loop/prompt.js';
+import { buildSystemPrompt, contextTailMessage, sessionStateMessage } from '../../src/plugins/sph-loop/prompt.js';
 import { explorePrompt, generalPrompt } from '../../src/plugins/sph-subagent/prompt.js';
 import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from '../../src/plugins/sph-loop/compact.js';
 import { CLASSIFIER_SYSTEM } from '../../src/permission/auto.js';
@@ -15,13 +15,21 @@ import { EXPLORE_TOOLS, tools } from '../../src/plugins/sph-tools/index.js';
  * 不是逐字比对（措辞会演进，约束不该丢）。
  */
 
-function base(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): string {
-  return buildSystemPrompt({
+function input(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): Parameters<typeof buildSystemPrompt>[0] {
+  return {
     workspaceRoot: 'E:\\ws',
     sandbox: 'workspace',
     skills: [],
     ...overrides,
-  });
+  };
+}
+
+function base(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): string {
+  return buildSystemPrompt(input(overrides));
+}
+
+function tail(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): string {
+  return contextTailMessage(input(overrides));
 }
 
 describe('主系统提示词的结构', () => {
@@ -36,26 +44,40 @@ describe('主系统提示词的结构', () => {
     }
   });
 
-  it('身份段带环境事实：工作区根、shell、沙箱', () => {
-    const p = base();
-    assert.ok(p.includes('Workspace root: E:\\ws'));
-    // 必须点名具体 shell：Windows 上是 pwsh 而非 bash，bash-only 语法会静默失败。
-    assert.ok(/Shell: .*bash and pwsh/.test(p), '身份段必须同时点名 bash 与 pwsh');
-    assert.ok(p.includes('Sandbox: workspace'));
-    assert.match(p, /Today: \d{4}-\d{2}-\d{2} \([^)]+\)/, '身份段必须带本地日期，否则模型会用训练截止日当今天');
-    assert.ok(p.includes(`OS: ${process.platform}`));
+  it('系统提示不含会变的环境事实', () => {
+    const p = base({ model: 'some-model', skills: [{ name: 'pdf', description: 'forms', path: 'a' }] });
+    assert.equal(p.includes('Workspace root:'), false);
+    assert.equal(p.includes('Today:'), false);
+    assert.equal(p.includes('Model:'), false);
+    assert.equal(p.includes('Sandbox:'), false);
+    assert.equal(p.includes('Skill catalog:'), false);
+    assert.equal(p.includes('MCP tools:'), false);
+    assert.equal(p.includes('AGENTS.md'), false);
+    // 换模型、换日期、换工作区都不该改系统提示的字节。
+    assert.equal(base(), base({ model: 'other-model', workspaceRoot: 'D:\\other' }));
   });
 
-  it('传入 model 时身份段写模型名，省略则不出现空 Model 行', () => {
-    assert.ok(base({ model: 'DeepSeek-V4-Flash-0731' }).includes('Model: DeepSeek-V4-Flash-0731'));
-    assert.equal(/\nModel:\n/.test(base()), false);
-    assert.equal(base().includes('Model:'), false);
+  it('环境事实在尾部上下文里：工作区根、shell、沙箱、日期', () => {
+    const p = tail();
+    assert.ok(p.includes('Workspace root: E:\\ws'));
+    // 必须点名具体 shell：Windows 上是 pwsh 而非 bash，bash-only 语法会静默失败。
+    assert.ok(/Shell: .*bash and pwsh/.test(p), '上下文必须同时点名 bash 与 pwsh');
+    assert.ok(p.includes('Sandbox: workspace'));
+    assert.match(p, /Today: \d{4}-\d{2}-\d{2} \([^)]+\)/, '必须带本地日期，否则模型会用训练截止日当今天');
+    assert.ok(p.includes(`OS: ${process.platform}`));
+    assert.ok(p.startsWith('[context — '), '回放靠这个前缀跳过快照');
+  });
+
+  it('传入 model 时尾部写模型名，省略则不出现空 Model 行', () => {
+    assert.ok(tail({ model: 'some-model' }).includes('Model: some-model'));
+    assert.equal(/\nModel:\n/.test(tail()), false);
+    assert.equal(tail().includes('Model:'), false);
   });
 
   it('Windows 沙箱说明嵌套 spawn EPERM 是 token 策略，不许当命令写错来重试', {
     skip: process.platform === 'win32' ? false : '这条约束只对 Windows 沙箱文案有意义',
   }, () => {
-    const p = base();
+    const p = tail();
     assert.ok(p.includes('spawn EPERM'));
     assert.ok(p.includes('do not retry the same spawn'));
   });
@@ -145,11 +167,12 @@ describe('工具段的条件拼装', () => {
 });
 
 describe('lazy MCP server 目录行', () => {
-  it('lazy server 有独立提示行，带首连方式；无 lazy 时不出现该段', () => {
-    const withLazy = base({ lazyMcpServers: ['playwright'] });
+  it('lazy server 在尾部上下文里，带首连方式；无 lazy 时不出现该段，系统提示里也不出现', () => {
+    const withLazy = tail({ lazyMcpServers: ['playwright'] });
     assert.ok(withLazy.includes('Lazy MCP servers'));
     assert.ok(withLazy.includes('- playwright: call mcp with action "list" and server "playwright"'));
-    assert.ok(!base().includes('Lazy MCP servers'), '没有 lazy server 时不该出现空段');
+    assert.ok(!tail().includes('Lazy MCP servers'), '没有 lazy server 时不该出现空段');
+    assert.ok(!base({ lazyMcpServers: ['playwright'] }).includes('Lazy MCP servers'));
   });
 });
 

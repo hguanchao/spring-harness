@@ -559,3 +559,59 @@ describe('子代理审批策略', () => {
     assert.deepEqual(await spawnThenShell(), ['parent']);
   });
 });
+
+describe('压缩换会话', () => {
+  it('超水位时新开会话，原会话的消息不改写，未命中标成预期', async () => {
+    const { session, root, cleanup } = makeSession();
+    const events: AgentEvent[] = [];
+    try {
+      for (let i = 1; i <= 12; i++) {
+        session.appendMessage({ role: 'user', content: `u${i} ${'x'.repeat(4000)}` });
+        session.appendMessage({ role: 'assistant', content: `a${i} ${'y'.repeat(4000)}` });
+      }
+      const before = session.readMessages().length;
+      await runTurn({
+        prompt: 'continue',
+        workspaceRoot: root,
+        client: {
+          async complete(): Promise<StreamDelta> {
+            return {
+              text: 'ok',
+              finishReason: 'stop',
+              usage: { promptTokens: 5000, completionTokens: 8, totalTokens: 5008, cachedTokens: 0 },
+            };
+          },
+        },
+        compactClient: {
+          async complete(): Promise<StreamDelta> {
+            return { text: '## Goal and Acceptance Criteria\n- continue', finishReason: 'stop' };
+          },
+        },
+        session,
+        tools: defaultTools,
+        sandbox,
+        approver,
+        contextWindow: 8_000,
+        listener: (event) => events.push(event),
+      });
+      const fork = events.find((event) => event.type === 'session_fork');
+      assert.equal(fork?.type, 'session_fork');
+      if (fork?.type !== 'session_fork') return;
+      assert.equal(fork.fromSessionId, session.id);
+      assert.equal(session.readMessages().length, before, '原会话不收这条新的 user，也不改旧消息');
+      assert.equal(
+        session.readAll().some((record) => record.type === 'event' && record.kind === 'compaction'),
+        false,
+      );
+      const opened = new JsonlSession(root, fork.sessionId);
+      const messages = opened.readMessages();
+      assert.match(messages[0]?.content ?? '', /compacted earlier context/);
+      assert.equal(messages.at(-1)?.content, 'ok');
+      const miss = opened.readAll().find((record) => record.type === 'event' && record.kind === 'cache_miss');
+      assert.equal(miss && miss.type === 'event' ? miss.data.expected : undefined, true);
+      assert.equal(miss && miss.type === 'event' ? miss.data.reason : undefined, 'compaction');
+    } finally {
+      cleanup();
+    }
+  });
+});

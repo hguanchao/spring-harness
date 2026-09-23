@@ -30,6 +30,24 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * 对象键按名字递归排序。
+ *
+ * 请求体靠 `JSON.stringify` 的插入序变成字节。同一份工具参数若键序随字面量或
+ * 注册过程漂移，前缀从工具段起全部失效。数组顺序不动：那是语义，不是书写习惯。
+ * `undefined` 与 `JSON.stringify` 一样省略，避免排完序又多出一个键。
+ */
+export function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => stableValue(item));
+  if (!isRecord(value)) return value;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    const child = value[key];
+    if (child !== undefined) sorted[key] = stableValue(child);
+  }
+  return sorted;
+}
+
 /** 连续空白压成单空格并去掉首尾，用于预览/摘要/单行展示。 */
 export function flattenWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();

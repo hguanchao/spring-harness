@@ -84,6 +84,9 @@ describe('mainTurnCount', () => {
       user('[background task completed: npm test]\nok'),
       user('[message from parent session]\nkeep going'),
       user('[instructions from AGENTS.md]\nuse tabs'),
+      user('[context — snapshot]\nToday: 2026-09-23'),
+      user('[session state — snapshot]\nGoal: (none)'),
+      user('[compacted earlier context]\nsummary'),
       user('and also this'),
     ];
     assert.equal(mainTurnCount(messages), 2);
@@ -107,6 +110,9 @@ describe('mainTurnCount', () => {
     assert.ok(isSyntheticUserMessage('[background task FAILED: x]\nboom'));
     assert.ok(isSyntheticUserMessage('[message from parent session]\nhi'));
     assert.ok(isSyntheticUserMessage('[instructions from a/b.md]\nhi'));
+    assert.ok(isSyntheticUserMessage('[context — the latest of these messages is authoritative]\nWorkspace root: /ws'));
+    assert.ok(isSyntheticUserMessage('[session state — the latest of these messages is authoritative]\nGoal: (none)'));
+    assert.ok(isSyntheticUserMessage('[compacted earlier context]\nsummary'));
     assert.ok(!isSyntheticUserMessage('hello'));
   });
 });

@@ -1,7 +1,9 @@
 import type { RunTurnOptions } from '../../agent/driver.js';
 import {
+  appendableMessage,
   flushWireImages,
   loadCompaction,
+  openCompactedSession,
   projectContext,
   pushSessionMessage,
   wireFromMessages,
@@ -11,7 +13,7 @@ import {
 import type { AgentListener, SubagentEvent } from './events.js';
 import { TouchMemory, touchInstructionBlock } from './memory.js';
 import { PLAN_MODE_SERVICE, type PlanModeSeam } from '../services.js';
-import { buildSystemPrompt, sessionStateMessage } from './prompt.js';
+import { buildSystemPrompt, contextTailMessage, isContextTailMessage, isSessionStateMessage, sessionStateMessage } from './prompt.js';
 import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from './prefix-tracker.js';
 import { runToolBatch } from './tool-run.js';
 import { CacheMissTracker, describeCacheMiss } from '../sph-llm/cache-stats.js';
@@ -74,6 +76,15 @@ function nextEventId(prefix: string): string {
   return `${prefix}-${++eventSeq}`;
 }
 
+/** 从后往前找最近一条被标记的 user 消息。尾部快照只在文本变了才再追加一条。 */
+function latestTagged(rows: readonly SessionMessage[], isTagged: (content: string) => boolean): string | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (row && row.role === 'user' && isTagged(row.content)) return row.content;
+  }
+  return undefined;
+}
+
 export type { AgentDriver, RunTurnOptions } from '../../agent/driver.js';
 
 /** 极简计数信号量：并行 subagent 超过上限时排队。 */
@@ -125,6 +136,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const sessionApi = services.get<SessionService>(SESSION_SERVICE);
   const sessions = options.sessions ?? sessionApi?.factory ?? bundled(services, jsonlSessionFactory);
   if (!sessions) throw new Error('sph-session is not loaded');
+  // 压缩会换成新会话。闭包必须看到这份绑定，不能捕获 options.session。
+  let active = options.session;
   const fold = sessionApi?.fold ?? bundled(services, foldSessionState);
   const events = sessionApi?.events ?? bundled(services, sessionEventData);
   const closeTurn = sessionApi?.closeInterruptedTurn ?? bundled(services, closeInterruptedTurn);
@@ -145,43 +158,35 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const memory = options.memory ?? new TouchMemory(options.workspaceRoot);
   const worktrees = options.worktrees ?? new WorktreeStore();
 
-  // 系统提示词在**一轮内冻结**，而不是每步重读。原因：它经 projectContext 的 withSystem
-  // 注入为 message 0，正处在缓存前缀的最前面——enter_plan_mode 之类发生在工具批里的
-  // 状态变化若在这里生效，本轮后续每一步连同整段历史都会重新计费。
-  // 冻结不损失行为正确性：计划模式的进出引导由工具结果自带（tools/plan.ts 的返回文案），
-  // 读写限制在执行层强制（PLAN_BLOCKED_TOOLS）；跨轮重建是刻意的，轮与轮之间本来就要
-  // 追加新消息，此时反映状态变化不带来额外的缓存损失。
-  const systemPrompt = ((): string => {
-    const system = buildSystemPrompt({
-      workspaceRoot: options.workspaceRoot,
-      model: options.model,
-      sandbox: options.sandbox.status.mode,
-      skills: skills.catalog,
-      mcpTools: mcp?.listTools() ?? [],
-      // 清单只随配置变化、不随连接状态变化（见 prompt.ts 的 lazyMcpServers 注释）。
-      lazyMcpServers: (mcp?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
-      // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
-      // 整段消失，而不是留下一句指向不存在工具的指令。`allowedTools` 为空时过去会放行
-      // 全部段落——那会让被插件禁用/装载失败的工具（如 sph-mcp 没装时的 `mcp`）也留一段
-      // 指令，所以这里按**工具表里真实存在的名字**收口。
-      allowedTools: options.allowedTools ?? new Set(registry.list().map((tool) => tool.name)),
-      toolPrompts: registry.list().flatMap((tool) => (tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : [])),
-      // goal / lastFailure / planMode 不进 system：它们随时可变，放在前缀最头部意味着
-      // 一次变化就作废全部消息历史的缓存。经 sessionStateMessage 以尾部 user 消息注入。
-    });
-    // 子代理角色段追加在末尾：主提示词在前、角色约束在后，父级主 turn 的前缀保持一致
-    // （缓存命中），且角色约束作为最后读到的一段不会被前面的通用规则盖过。
-    return options.subagentPrompt
-      ? `${system}\n\n${options.subagentPrompt}`
-      : system;
-  })();
+  // 系统提示在一轮内冻结，而且一轮和下一轮也是同一份：它是前缀的 message 0。
+  // 日期、目录、目标这些会变的内容在尾部消息里，变了只追加，不改写这一段。
+  // 计划模式的进出由工具结果和执行层负责，不靠改系统提示。
+  const promptInput = {
+    workspaceRoot: options.workspaceRoot,
+    model: options.model,
+    sandbox: options.sandbox.status.mode,
+    skills: skills.catalog,
+    mcpTools: mcp?.listTools() ?? [],
+    // 清单只随配置变化、不随连接状态变化（见 prompt.ts 的 lazyMcpServers 注释）。
+    lazyMcpServers: (mcp?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
+    // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
+    // 整段消失，而不是留下一句指向不存在工具的指令。`allowedTools` 为空时过去会放行
+    // 全部段落——那会让被插件禁用/装载失败的工具（如 sph-mcp 没装时的 `mcp`）也留一段
+    // 指令，所以这里按**工具表里真实存在的名字**收口。
+    allowedTools: options.allowedTools ?? new Set(registry.list().map((tool) => tool.name)),
+    toolPrompts: registry.list().flatMap((tool) => (tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : [])),
+  };
+  const systemBody = buildSystemPrompt(promptInput);
+  // 子代理角色段追加在末尾：主提示词在前、角色约束在后。父会话不带这段，前缀互不影响。
+  const systemPrompt = options.subagentPrompt ? `${systemBody}\n\n${options.subagentPrompt}` : systemBody;
+  const contextText = contextTailMessage(promptInput);
   // token 预算：整棵代理树的累计量（自己的 usage + 各子代理 end 事件里的 tokens）。
   const budget = Math.max(0, Math.floor(options.maxSessionTokens ?? 0));
   const budgetWarnAt = budget > 0 ? Math.floor(budget * BUDGET_WARN_RATIO) : 0;
   let sessionTokens = 0;
   if (budget > 0) {
     if (!fold) throw new Error('sph-session is not loaded');
-    sessionTokens = fold(options.session.readAll()).tokensUsed;
+    sessionTokens = fold(active.readAll()).tokensUsed;
   }
   let budgetWarned = false;
   /**
@@ -212,45 +217,46 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     }
   };
 
-  // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。
-  const mirror: SessionMessage[] = options.session.readMessages();
+  // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。压缩换会话时整表替换。
+  let mirror: SessionMessage[] = active.readMessages();
   if (!closeTurn) throw new Error('sph-session is not loaded');
-  closeTurn(options.session, mirror);
-  // 用户消息先只进内存。首次模型活动再落盘——取消时 TUI 把原文放回输入框，
-  // JSONL 里也不该留下一条没有回复的 user。
-  const pendingUser: SessionMessage = {
+  closeTurn(active, mirror);
+  // 还没落盘的行。取消发生在第一次模型活动之前时，这些行不进 JSONL，输入框能把原文拿回去。
+  const pendingRows = new Set<SessionMessage>();
+  const queueTail = (row: SessionMessage): void => {
+    mirror.push(row);
+    pendingRows.add(row);
+  };
+  queueTail({
     type: 'message',
     ts: new Date().toISOString(),
     role: 'user',
     content: options.prompt,
     images: options.userImages,
     attachments: options.attachments,
-  };
-  mirror.push(pendingUser);
-  // 跨轮次状态（goal / 最近失败 / 计划模式）以尾部 user 消息注入，紧跟本轮 prompt——
-  // 下一轮它固化在历史里，前缀从它之前完整命中（sessionStateMessage 的注释讲为什么
-  // 不能放 system）。与 pendingUser 同一套延迟落盘：首次模型活动时一起写，取消都不留。
-  const stateRow: SessionMessage = {
-    type: 'message',
-    ts: new Date().toISOString(),
-    role: 'user',
-    content: sessionStateMessage(options.goal, options.lastFailure, options.planMode?.active === true, services.get<PlanModeSeam>(PLAN_MODE_SERVICE)),
-  };
-  mirror.push(stateRow);
+  });
+  // 环境和跨轮次状态都在尾部。与上一条逐字相同就不再追加：重复快照只涨上下文，不提供新信息。
+  if (latestTagged(mirror, isContextTailMessage) !== contextText) {
+    queueTail({ type: 'message', ts: new Date().toISOString(), role: 'user', content: contextText });
+  }
+  const stateText = sessionStateMessage(
+    options.goal,
+    options.lastFailure,
+    options.planMode?.active === true,
+    services.get<PlanModeSeam>(PLAN_MODE_SERVICE),
+  );
+  if (latestTagged(mirror, isSessionStateMessage) !== stateText) {
+    queueTail({ type: 'message', ts: new Date().toISOString(), role: 'user', content: stateText });
+  }
   let turnPersisted = false;
   const persistTurnStart = (): void => {
     if (turnPersisted) return;
     turnPersisted = true;
-    options.session.appendMessage({
-      role: 'user',
-      content: options.prompt,
-      images: options.userImages,
-      attachments: options.attachments,
-    });
-    options.session.appendMessage({ role: 'user', content: stateRow.content });
-    options.session.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
+    for (const row of pendingRows) active.appendMessage(appendableMessage(row));
+    pendingRows.clear();
+    active.appendEvent('turn_start', { depth, sandbox: options.sandbox.status.mode });
   };
-  let compaction: CompactionEvent | undefined = loadCompaction(options.session);
+  let compaction: CompactionEvent | undefined = loadCompaction(active);
   let wire: WireState = wireFromMessages(mirror, compaction);
   let lastUsage: TokenUsage | undefined;
   // stub 级压缩的冻结边界（session 坐标）：一旦生效就不再随轮次前移，摘要落地时重置。
@@ -267,7 +273,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   /** todo 上次落盘的样子：只有真的变了才写事件，避免每步都往 JSONL 塞一份重复快照。 */
   let todoSnapshot = JSON.stringify(todos.list());
   const appendMessage = (message: Omit<SessionMessage, 'type' | 'ts'>): void => {
-    options.session.appendMessage(message);
+    active.appendMessage(message);
     const row: SessionMessage = { type: 'message', ts: new Date().toISOString(), ...message };
     mirror.push(row);
     pushSessionMessage(wire, row);
@@ -304,11 +310,11 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (activeSubagentSessions.has(input.resumeFrom)) {
         throw new Error(`resume_from: subagent ${input.resumeFrom} is still running`);
       }
-      sourceRecords = sessions.open(options.session.dir, input.resumeFrom).readAll();
+      sourceRecords = sessions.open(active.dir, input.resumeFrom).readAll();
       if (sourceRecords.length === 0) {
         throw new Error(`resume_from: subagent session ${input.resumeFrom} not found`);
       }
-      const starts = options.session
+      const starts = active
         .readAll()
         .filter(
           (record) =>
@@ -336,7 +342,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       childWorkspaceRoot = resumedWorktree;
     }
 
-    const childSession = sessions.create(options.session.dir, childWorkspaceRoot, false);
+    let childSession = sessions.create(active.dir, childWorkspaceRoot, false);
     const subId = nextEventId('sub');
     const startedAt = Date.now();
     activeSubagentSessions.add(childSession.id);
@@ -385,12 +391,25 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       ...(childWorktree === undefined ? {} : { worktree: childWorktree }),
     };
     options.listener?.({ type: 'subagent_start', ...subagentStart });
-    options.session.appendEvent('subagent', { phase: 'start', ...subagentStart });
+    active.appendEvent('subagent', { phase: 'start', ...subagentStart });
     // 子事件封进 subagent_event：主流程的步骤块从此只属于主代理，TUI 按 id 归位子活动。
     // usage / ask 是全局语义（用量计数、审批提示），保持直通；done 由 subagent_end 表达。
     // usage 同时按子代理累计——subagent_end 要带出该子代理自己的 token 消耗量。
     const childUsage = { promptTokens: 0, completionTokens: 0 };
     const childListener: AgentListener = (event) => {
+      // 子代理自己的压缩不能把界面的当前会话换成子会话。只把子会话句柄追到新文件。
+      if (event.type === 'session_fork') {
+        const previousId = childSession.id;
+        activeSubagentSessions.delete(previousId);
+        if (input.mode === 'background') {
+          jobs.detachInbox(previousId);
+          jobs.attachInbox(event.sessionId, childInbox);
+        }
+        childSession = sessions.open(childSession.dir, event.sessionId);
+        activeSubagentSessions.add(childSession.id);
+        if (input.jobRecord) input.jobRecord.subagentSessionId = childSession.id;
+        return;
+      }
       if (event.type === 'usage') {
         childUsage.promptTokens += event.promptTokens;
         childUsage.completionTokens += event.completionTokens;
@@ -463,7 +482,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         tokens,
         ...lifecycle,
       });
-      options.session.appendEvent('subagent', {
+      active.appendEvent('subagent', {
         phase: 'end',
         id: subId,
         ok: outcome.ok,
@@ -506,17 +525,17 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       return jobs.sendToSubagent(id, text);
     },
     planMode: options.planMode,
-    sessionDir: options.session.dir,
-    sessionId: options.session.id,
+    sessionDir: active.dir,
+    sessionId: active.id,
     setPlanMode: options.planMode
-      ? (active: boolean) => {
-          if (!options.planMode || options.planMode.active === active) return;
-          options.planMode.active = active;
+      ? (enabled: boolean) => {
+          if (!options.planMode || options.planMode.active === enabled) return;
+          options.planMode.active = enabled;
           if (!events) throw new Error('sph-session is not loaded');
-          options.session.appendEvent('plan_mode', events.planMode(active));
+          active.appendEvent('plan_mode', events.planMode(enabled));
           options.listener?.({
             type: 'status',
-            text: active
+            text: enabled
               ? 'Plan mode on — explore and design; writes are blocked until the plan is approved.'
               : 'Plan mode off.',
           });
@@ -622,35 +641,57 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           options.listener?.({ type: 'status', text: 'Folding context…' });
         },
       });
-      if (projection.stubbedFromSession !== undefined && stubFromSession === undefined) {
-        stubFromSession = projection.stubbedFromSession;
-      }
-      // 前缀分段观测：tools / system 本该是会话常量，消息序列本该只追加。任何一段
-      // 中途变更都直接解释「为什么这轮缓存没命中」，落成事件与 cache_miss 呼应。
+      // 前缀分段观测：tools / system 本该是会话常量，消息序列本该只追加。
+      // 压缩是计划中的换会话，不记成 prefix_change——那会和「前缀被意外改写」混在一起。
       const snapshot: PrefixSnapshot = {
-        toolsHash: hashText(JSON.stringify(registry.schemas(allowed)) ?? ''),
+        toolsHash: hashText(JSON.stringify(registry.schemas(allowed))),
         systemHash: hashText(systemPrompt),
         messageHashes: projection.messages.map((message) => hashMessage(message)),
       };
-      const prefixChanges = observePrefix(prefixPrev, snapshot);
-      prefixPrev = snapshot;
-      if (prefixChanges.length > 0) {
-        options.session.appendEvent('prefix_change', { changes: prefixChanges });
-      }
-      if (projection.compaction) {
-        const next = projection.compaction;
-        if (next.covered !== (compaction?.covered ?? 0)) {
-          options.session.appendEvent('compaction', { summary: next.summary, covered: next.covered });
-          compaction = next;
-          wire = wireFromMessages(mirror, compaction);
-          // 摘要重写了历史：提示词从此是新内容，缓存基线必须一起丢掉，
-          // 否则压缩后的第一轮会被算成一整段未命中。
-          cacheTracker.reset();
-          // 摘要覆盖了冻结边界所在的区间：旧边界失去意义，以 covered 为新系列起点。
-          stubFromSession = undefined;
-          // 历史被计划内改写：前缀基线一并重置，下一轮作为新系列起点，不报 prefix_change。
-          prefixPrev = undefined;
-          options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
+      const next = projection.compaction;
+      const fork = next !== undefined && next.covered !== (compaction?.covered ?? 0);
+      if (fork && next) {
+        const fromSessionId = active.id;
+        const opened = openCompactedSession({
+          factory: sessions,
+          from: active,
+          workspaceRoot: options.workspaceRoot,
+          makeCurrent: depth === 0,
+          summary: next.summary,
+          covered: next.covered,
+          messages: mirror,
+          depth,
+          tokensUsed: sessionTokens,
+        });
+        active = opened.session;
+        mirror = opened.mirror;
+        wire = wireFromMessages(mirror);
+        compaction = undefined;
+        // 新会话的下标和旧冻结边界对不上。摘要本身就是新的系列起点。
+        stubFromSession = undefined;
+        lastUsage = undefined;
+        usageAnchor = mirror.length;
+        // 尾部里还没落盘的行已经写进新会话。再走 persistTurnStart 会写第二遍。
+        turnPersisted = true;
+        pendingRows.clear();
+        ctx.sessionId = active.id;
+        cacheTracker.expectColdStart('compaction');
+        prefixPrev = snapshot;
+        options.listener?.({
+          type: 'session_fork',
+          sessionId: active.id,
+          fromSessionId,
+          covered: next.covered,
+        });
+        options.listener?.({ type: 'status', text: `context compacted (${next.covered} messages summarized)` });
+      } else {
+        if (projection.stubbedFromSession !== undefined && stubFromSession === undefined) {
+          stubFromSession = projection.stubbedFromSession;
+        }
+        const prefixChanges = observePrefix(prefixPrev, snapshot);
+        prefixPrev = snapshot;
+        if (prefixChanges.length > 0) {
+          active.appendEvent('prefix_change', { changes: prefixChanges });
         }
       }
       return projection.messages;
@@ -692,7 +733,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           (info) => {
             const text = `Retrying LLM stream (attempt ${info.attempt}): ${info.message}`;
             if (info.kind === 'compat') {
-              options.session.appendEvent('compat_retry', {
+              active.appendEvent('compat_retry', {
                 attempt: info.attempt,
                 message: info.message,
                 text,
@@ -704,7 +745,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
               options.listener?.({ type: 'stream_retry' });
               // 与 compat_retry 同等地位落盘：断流次数、错误原文、距本跳开始的耗时
               // （maxRetries 缺省时省略 max 字段，旧记录保持形状稳定）。
-              options.session.appendEvent('stream_retry', {
+              active.appendEvent('stream_retry', {
                 attempt: info.attempt,
                 ...(info.maxRetries === undefined ? {} : { max: info.maxRetries }),
                 message: info.message,
@@ -740,7 +781,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       lastUsage = reply.usage;
       usageAnchor = anchorAt;
       chargeTokens(reply.usage.promptTokens, reply.usage.completionTokens);
-      options.session.appendEvent('usage', { ...reply.usage });
+      active.appendEvent('usage', { ...reply.usage });
       options.listener?.({
         type: 'usage',
         promptTokens: reply.usage.promptTokens,
@@ -753,12 +794,15 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         promptTokens: reply.usage.promptTokens,
         ...(reply.usage.cachedTokens === undefined ? {} : { cachedTokens: reply.usage.cachedTokens }),
         at: Date.now(),
+        ...(options.model === undefined ? {} : { modelKey: options.model }),
       });
       if (miss) {
-        options.session.appendEvent('cache_miss', {
+        active.appendEvent('cache_miss', {
           missedTokens: miss.missedTokens,
           modelChanged: miss.modelChanged,
           likelyExpired: miss.likelyExpired,
+          expected: miss.expected,
+          ...(miss.reason === undefined ? {} : { reason: miss.reason }),
           ...(miss.idleMs === undefined ? {} : { idleMs: miss.idleMs }),
           text: describeCacheMiss(miss),
         });
@@ -804,7 +848,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         continue;
       }
       appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
-      options.session.appendEvent('turn_end', { depth, finishReason: finish });
+      active.appendEvent('turn_end', { depth, finishReason: finish });
       options.listener?.({ type: 'done' });
       return;
     }
@@ -847,7 +891,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       isParallel: (name) => registry.isConcurrencySafe(name),
       signal: options.signal,
       onStart(call) {
-        options.session.appendEvent('tool_intent', { id: call.id, name: call.name, args: call.arguments });
+        active.appendEvent('tool_intent', { id: call.id, name: call.name, args: call.arguments });
         options.listener?.({ type: 'tool_start', name: call.name, id: call.id, args: call.arguments });
       },
       async execute(call) {
@@ -877,7 +921,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
         if (!result.ok) {
           if (!events) throw new Error('sph-session is not loaded');
-          options.session.appendEvent('tool_result', events.toolFailure(call.name, result.content));
+          active.appendEvent('tool_result', events.toolFailure(call.name, result.content));
         }
         options.listener?.({ type: 'tool_end', name: call.name, id: call.id, ok: result.ok, content: result.content });
       },
@@ -886,7 +930,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     const nextTodos = JSON.stringify(todos.list());
     if (nextTodos !== todoSnapshot) {
       todoSnapshot = nextTodos;
-      options.session.appendEvent('todo', todoEventData(todos.list()) as unknown as Record<string, unknown>);
+      active.appendEvent('todo', todoEventData(todos.list()) as unknown as Record<string, unknown>);
     }
   }
   throw new Error(`tool loop exceeded ${MAX_STEPS} steps`);

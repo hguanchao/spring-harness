@@ -92,11 +92,30 @@ describe('CacheMissTracker', () => {
     assert.equal(miss?.likelyExpired, false);
   });
 
-  it('换模型单独标出来：那是预期行为，不是缺陷', () => {
+  it('换模型单独标出来：那是预期行为，不进 waste', () => {
     const tracker = new CacheMissTracker();
     tracker.observe(sample(20_000, 19_000, { modelKey: 'a' }));
-    assert.equal(tracker.observe(sample(21_000, 0, { modelKey: 'b' }))?.modelChanged, true);
-    assert.equal(tracker.observe(sample(21_000, 0, { modelKey: 'b' }))?.modelChanged, false);
+    const changed = tracker.observe(sample(21_000, 0, { modelKey: 'b' }));
+    assert.equal(changed?.modelChanged, true);
+    assert.equal(changed?.expected, true);
+    assert.equal(changed?.reason, 'model');
+    assert.equal(tracker.waste.missCount, 0, '换模型不该和前缀被改写算在同一笔里');
+    const again = tracker.observe(sample(21_000, 0, { modelKey: 'b' }));
+    assert.equal(again?.modelChanged, false);
+    assert.equal(again?.expected, false);
+    assert.equal(tracker.waste.missCount, 1);
+  });
+
+  it('压缩冷启动记成预期未命中，不进 waste', () => {
+    const tracker = new CacheMissTracker();
+    tracker.observe(sample(20_000, 19_000));
+    tracker.expectColdStart('compaction');
+    const miss = tracker.observe(sample(9_000, 0));
+    assert.equal(miss?.expected, true);
+    assert.equal(miss?.reason, 'compaction');
+    assert.equal(miss?.missedTokens, 9_000);
+    assert.equal(tracker.waste.missCount, 0);
+    assert.equal(tracker.observe(sample(9_500, 9_000)), undefined, '冷启动之后重新有基线');
   });
 
   it('reset 之后的第一轮重新建立基线，不把压缩算成未命中', () => {

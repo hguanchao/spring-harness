@@ -9,7 +9,7 @@
  * 交互模式所有，回放只负责「从记录里读出来」。
  */
 
-import { isSessionStateMessage } from '../sph-loop/prompt.js';
+import { isContextTailMessage, isSessionStateMessage } from '../sph-loop/prompt.js';
 import { messagesOf } from '../sph-session/query.js';
 import { closeInterruptedTurn } from '../../session/repair.js';
 import { foldSessionState, type SessionFailure } from '../../session/fold.js';
@@ -114,7 +114,8 @@ function replayMessage(host: ReplayHost, record: SessionMessage): void {
   if (record.role === 'user') {
     // 跨轮次状态快照（goal/失败/计划模式）是给模型读的缓存友好注入，不进聊天流——
     // 每轮一条的重复快照在回放里只会是噪声；最新一条的语义已由当前 turn 的注入保证。
-    if (isSessionStateMessage(record.content)) return;
+    // 环境快照和跨轮次状态都是给模型读的尾部注入，不进聊天流。
+    if (isSessionStateMessage(record.content) || isContextTailMessage(record.content)) return;
     host.chatContainer.addChild(new UserMessageComponent(record.content, getMarkdownTheme()));
     return;
   }

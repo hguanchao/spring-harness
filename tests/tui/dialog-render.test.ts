@@ -413,7 +413,7 @@ describe('斜杠命令打通到弹窗', () => {
     }
   });
 
-  it('/compact 把历史压成检查点，并落一条 compaction 事件', async () => {
+  it('/compact 把历史压成检查点，并新开一个会话', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sph-cmd-compact-'));
     const terminal = new FakeTerminal();
     const mcp = new McpHub(testHostFacts());
@@ -439,10 +439,15 @@ describe('斜杠命令打通到弹窗', () => {
         '/compact',
       );
 
-      assert.match(screen, /Compacted \d+ messages into a checkpoint/);
+      assert.match(screen, /Compacted \d+ messages into a new session/);
       assert.equal(screen.includes('Unknown command'), false);
-      // 只写事件、不维护内存态：下一轮由 loadCompaction 读回来，所以落盘是唯一要验证的。
-      assert.match(readFileSync(join(root, 'test.jsonl'), 'utf8'), /"kind":"compaction"/);
+      const oldLog = readFileSync(join(root, 'test.jsonl'), 'utf8');
+      assert.match(oldLog, /"kind":"session_fork"/);
+      assert.equal(oldLog.includes('"kind":"compaction"'), false, '原会话不能再写会改写发送投影的 compaction 事件');
+      const current = JSON.parse(readFileSync(join(root, 'current.json'), 'utf8')) as { id: string };
+      assert.notEqual(current.id, 'test');
+      const opened = readFileSync(join(root, `${current.id}.jsonl`), 'utf8');
+      assert.match(opened, /compacted earlier context/);
     } finally {
       mcp.dispose();
       rmSync(root, { recursive: true, force: true });

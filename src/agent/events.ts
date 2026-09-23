@@ -36,6 +36,13 @@ export type AgentEvent =
   | { type: 'usage'; promptTokens: number; completionTokens: number; cachedTokens?: number }
   | { type: 'error'; text: string }
   /**
+   * 压缩把后续轮次挪到一个新会话。
+   *
+   * 旧会话的消息原样留下，发送前缀不改写；界面把当前会话换成 `sessionId`，
+   * 进行中的这一轮不重放转录。
+   */
+  | { type: 'session_fork'; sessionId: string; fromSessionId: string; covered: number }
+  /**
    * 子任务块开始。toolCallId 是主流程里那次 subagent 工具调用的 id，
    * 恢复会话时靠它把块对齐回放流里的工具行。
    */
