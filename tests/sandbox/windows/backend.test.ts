@@ -154,5 +154,54 @@ describe(
         rmSync(outside, { recursive: true, force: true });
       }
     });
+
+    it('abort 终止子进程，而不是只停止等待', { timeout: 45_000 }, async () => {
+      const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
+      const shell = await pwshCommand();
+      assert.ok(shell, 'pwsh 不可用则本用例应被 skip');
+      const workspace = mkdtempSync(join(tmpdir(), 'sph-abort-ws-'));
+      const temp = mkdtempSync(join(tmpdir(), 'sph-abort-tmp-'));
+      const sandbox = new WindowsAclSandbox({
+        mode: 'workspace',
+        workspaceRoot: workspace,
+        sphHomeDir: workspace,
+        tempDir: temp,
+      });
+      const started = join(workspace, 'started');
+      const marker = join(workspace, 'marker');
+      try {
+        await sandbox.init();
+        const abort = new AbortController();
+        // 忙等写在 pwsh 进程自己里面：杀掉它之后没有子进程会去补写 marker。
+        const script = [
+          "Set-Content -LiteralPath 'started' -Value go",
+          '$end = (Get-Date).AddSeconds(8)',
+          'while ((Get-Date) -lt $end) {}',
+          "Set-Content -LiteralPath 'marker' -Value leaked",
+        ].join('; ');
+        const pending = sandbox.run({
+          command: shell.command,
+          args: [...shell.prefixArgs, script],
+          cwd: workspace,
+          timeoutMs: 30_000,
+          signal: abort.signal,
+        });
+        const deadline = Date.now() + 20_000;
+        while (!existsSync(started)) {
+          if (Date.now() > deadline) throw new Error('pwsh did not start');
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        abort.abort();
+        const result = await pending;
+        assert.equal(result.exitCode, 1);
+        // 若只是不再等待，忙等结束后 marker 会出现。
+        await new Promise((resolve) => setTimeout(resolve, 12_000));
+        assert.equal(existsSync(marker), false);
+      } finally {
+        sandbox.dispose();
+        rmSync(workspace, { recursive: true, force: true });
+        rmSync(temp, { recursive: true, force: true });
+      }
+    });
   },
 );

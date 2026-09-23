@@ -11,14 +11,14 @@
  */
 
 import { statSync } from 'node:fs';
-import { relative, resolve } from 'node:path';
 import type { FileAttachment } from '../../session/types.js';
 import {
+  assertInsideWorkspace,
   casefoldPath,
   IMAGE_BYTE_LIMIT,
   imageMime,
   looksLikeText,
-  pathEscapes,
+  PathEscapeError,
   READ_BYTE_LIMIT,
   readHead,
   splitCompleteUtf8,
@@ -72,19 +72,26 @@ export interface CollectedMentions {
  * 解析文本里的提及并读取文件。文本文件按 read_file 同一套上限截断（READ_BYTE_LIMIT，
  * UTF-8 边界安全）；图片转 data URL。提到目录、工作区外、二进制文件都生成带 error
  * 的占位条目——模型能据此向用户说明为什么内容没给到。
+ *
+ * 边界与 read/edit 相同，走 assertInsideWorkspace 的 realpath：工作区内指向区外的
+ * 符号链接不能靠「字符串里没有 ..」混进去。
  */
 export function collectFileMentions(text: string, workspaceRoot: string): CollectedMentions {
   const attachments: FileAttachment[] = [];
   const images: string[] = [];
   const seen = new Set<string>();
   for (const mention of parseFileMentions(text)) {
-    // 补全写进来的路径统一是 / 分隔；resolve 在两个平台都能吃。
+    // 补全写进来的路径统一是 / 分隔；assertInsideWorkspace 在两个平台都能吃。
     const display = mention.replace(/\\/g, '/');
-    const abs = resolve(workspaceRoot, display);
-    const rel = relative(casefoldPath(resolve(workspaceRoot)), casefoldPath(abs));
-    if (rel === '' || pathEscapes(rel)) {
-      attachments.push({ path: display, error: 'path is outside the workspace' });
-      continue;
+    let abs: string;
+    try {
+      abs = assertInsideWorkspace(workspaceRoot, display);
+    } catch (error) {
+      if (error instanceof PathEscapeError) {
+        attachments.push({ path: display, error: 'path is outside the workspace' });
+        continue;
+      }
+      throw error;
     }
     // Windows 大小写不敏感：同一文件两种写法只读一次。
     const dedupeKey = casefoldPath(abs);

@@ -152,6 +152,36 @@ describe('evaluateRules 复合命令逐段求值', () => {
     );
   });
 
+  it('引号内的命令替换和 bash 反引号拆不开，allow 不放行', () => {
+    const rules: PermissionRules = {
+      allow: ['bash:echo*', 'bash:npm test'],
+      ask: [],
+      deny: ['bash:rm -rf*'],
+    };
+    assert.equal(evaluateRules(rules, { tool: 'bash', command: 'echo "$(rm -rf /)"' }), undefined);
+    assert.equal(evaluateRules(rules, { tool: 'bash', command: 'echo `rm -rf /`' }), undefined);
+    assert.equal(
+      evaluateRules(rules, { tool: 'bash', command: 'npm test && echo "$(rm -rf /)"' }),
+      undefined,
+      '前一段命中 allow 也不能把藏在后一段引号里的替换一起放行',
+    );
+    // 单引号不展开。双引号里被反斜杠转义的 $( 也不执行，括号又不是切点。
+    assert.equal(evaluateRules(rules, { tool: 'bash', command: "echo '$(rm -rf /)'" }), 'allow');
+    assert.equal(evaluateRules(rules, { tool: 'bash', command: 'echo "\\$(rm -rf /)"' }), 'allow');
+    // 未加引号的 $(...) 仍被括号切开，deny 看得见。
+    assert.equal(evaluateRules(rules, { tool: 'bash', command: 'echo $(rm -rf /)' }), 'deny');
+  });
+
+  it('pwsh 的双引号子表达式挡住 allow，反引号是转义不是替换', () => {
+    const rules: PermissionRules = { allow: ['pwsh:Write-Output*'], ask: [], deny: [] };
+    assert.equal(
+      evaluateRules(rules, { tool: 'pwsh', command: 'Write-Output "$(Remove-Item x)"' }),
+      undefined,
+    );
+    assert.equal(evaluateRules(rules, { tool: 'pwsh', command: "Write-Output '$(Remove-Item x)'" }), 'allow');
+    assert.equal(evaluateRules(rules, { tool: 'pwsh', command: 'Write-Output `n' }), 'allow');
+  });
+
   it('非 shell 工具（mcp/web_search）不按 shell 语义拆分', () => {
     assert.equal(
       evaluateRules({ allow: ['web_search:weather*'], ask: [], deny: [] }, { tool: 'web_search', command: 'weather | tokyo' }),

@@ -135,19 +135,28 @@ export class WindowsAclSandbox implements SandboxHandle {
     const deadline = Date.now() + spawn.timeoutMs;
     try {
       for (;;) {
-        if (spawn.signal?.aborted) break;
+        // abort 与超时同一归宿。只跳出等待的话进程还在跑，shell 又把拿不到的退出码印成 timeout。
+        if (spawn.signal?.aborted) {
+          api.terminateProcess(child.process, 1);
+          api.waitForSingleObject(child.process, 5_000);
+          exitCode = readExitCode(child.process);
+          break;
+        }
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           api.terminateProcess(child.process, 1);
           break;
         }
-        const waited = api.waitForSingleObject(child.process, Math.min(POLL_INTERVAL_MS, remaining));
+        // 同步 Wait 会占死事件循环：TUI 的取消、signal.abort 都排不进来，上面的分支永远看不到。
+        // 先非阻塞看一眼进程，再把这 25ms 让给事件循环；管道仍按这个间隔排空，避免写满互锁。
+        const waited = api.waitForSingleObject(child.process, 0);
         drainHandle(child.stdout, stdout);
         drainHandle(child.stderr, stderr);
         if (waited === 0) {
           exitCode = readExitCode(child.process);
           break;
         }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(POLL_INTERVAL_MS, remaining)));
       }
       // 进程已退出/被终止，管道里可能还压着最后一段输出。
       drainHandle(child.stdout, stdout);

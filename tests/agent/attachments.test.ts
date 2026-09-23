@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -85,7 +85,38 @@ describe('collectFileMentions', () => {
     const { attachments } = collectFileMentions('@a.ts @./a.ts', root);
     assert.equal(attachments.length, 1);
   });
+
+  it('指向工作区外的链接按越界拒绝，不把区外内容内联', (t) => {
+    const outside = mkdtempSync(join(tmpdir(), 'sph-attach-out-'));
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'super-secret');
+      const linked = tryOutsideLink(outside, join(root, 'link'));
+      if (!linked) {
+        t.skip('本机不允许创建目录链接');
+        return;
+      }
+      const { attachments } = collectFileMentions('@link/secret.txt', root);
+      assert.deepEqual(attachments, [{ path: 'link/secret.txt', error: 'path is outside the workspace' }]);
+      assert.equal(JSON.stringify(attachments).includes('super-secret'), false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
+
+/** 目录链接：Windows 上 junction 不需要提权，失败再试 symlink。 */
+function tryOutsideLink(outside: string, linkPath: string): boolean {
+  for (const type of ['junction', 'dir', undefined] as const) {
+    try {
+      if (type === undefined) symlinkSync(outside, linkPath);
+      else symlinkSync(outside, linkPath, type);
+      return true;
+    } catch {
+      // 换下一种
+    }
+  }
+  return false;
+}
 
 describe('attachmentWireSuffix', () => {
   it('把附件拼成 attached-files 块，占位条目自闭合', () => {
