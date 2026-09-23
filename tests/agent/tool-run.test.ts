@@ -12,13 +12,11 @@ function call(id: string, name: string): ToolCallRequest {
 }
 
 describe('isConcurrencySafe', () => {
-  it('treats read-like tools as parallel and writers/todo/mcp as exclusive', () => {
+  it('treats read-like tools as parallel and writers as exclusive', () => {
     assert.equal(isConcurrencySafe('read'), true);
     assert.equal(isConcurrencySafe('web_search'), true);
     assert.equal(isConcurrencySafe('glob'), true);
-    assert.equal(isConcurrencySafe('todo'), false);
     assert.equal(isConcurrencySafe('write'), false);
-    assert.equal(isConcurrencySafe('mcp'), false);
     assert.equal(isConcurrencySafe('unknown_tool'), false);
   });
 });

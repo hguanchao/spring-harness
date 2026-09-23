@@ -61,7 +61,7 @@ export interface TuiDeps {
   /** 生效中的 MCP 启停偏好，供弹窗显示当前状态。 */
   mcpPreferences: McpPreferences;
   /** 已装载插件与导入失败的摘要，供 `/plugins` 与诊断显示。 */
-  pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[]; shadowed: string[] };
+  pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[]; shadowed: string[]; pinned?: string[] };
   /** 插件服务表；loop 按接缝名取用（sph-mcp 的清单进提示词），插件工具也靠它取兄弟服务。 */
   pluginServices: PluginServices;
   /** todo 服务（todo 插件提供）。 */

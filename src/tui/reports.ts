@@ -219,8 +219,10 @@ export function renderPluginsReport(input: {
   plugins: readonly LoadedPlugin[];
   failures: readonly PluginLoadFailure[];
   shadowed: readonly string[];
+  /** 试图替换固定内置插件、但被拒绝的名字。内置实现仍在。 */
+  pinned?: readonly string[];
 }): string {
-  const { plugins, failures, shadowed } = input;
+  const { plugins, failures, shadowed, pinned = [] } = input;
   const lines: string[] = [`## Plugins (${plugins.length})`, ''];
 
   if (plugins.length === 0) {
@@ -268,6 +270,16 @@ export function renderPluginsReport(input: {
       'These bundled plugins were replaced by a same-named third-party plugin. Legitimate for',
       'patching a built-in, but the bundled service and tools are gone, not merged:',
       ...shadowed.map((name) => `- ${name}`),
+    );
+  }
+
+  if (pinned.length > 0) {
+    lines.push(
+      '',
+      '### Pinned',
+      '',
+      'These bundled plugins stay loaded. A same-named third-party plugin was ignored:',
+      ...pinned.map((name) => `- ${name}`),
     );
   }
 

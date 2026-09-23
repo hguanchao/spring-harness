@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { spawnUnrestricted } from './host-spawn.js';
-import type { ConfinedSpawn, SandboxHandle, SpawnResult } from './types.js';
-import { SandboxError, type SandboxMode } from './types.js';
+import { spawnUnrestricted } from '../../sandbox/host-spawn.js';
+import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../../sandbox/types.js';
+import { SandboxError, type SandboxMode } from '../../sandbox/types.js';
 
 export function linuxBwrapArgs(
   mode: Exclude<SandboxMode, 'off'>,

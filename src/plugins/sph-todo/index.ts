@@ -14,7 +14,7 @@
  * - 会话事件**写入**走核心：`runTurn` 检测到清单变化后 `appendEvent('todo', …)`。
  *   事件格式是核心与插件共同遵守的契约，所以序列化函数由插件提供、核心只消费数据。
  *
- * 分界线的检验：`[plugins] disabled = ["todo"]` 时，核心不引用本插件的任何代码，折叠、
+ * 分界线的检验：`[plugins] disabled = ["sph-todo"]` 时，核心不引用本插件的任何代码，折叠、
  * TUI、runTurn 依旧能编译；只是日志里不再出现 `todo` 事件，工具表里没有 `todo` 工具。
  */
 
@@ -41,6 +41,9 @@ const todoTool: ToolSpec = {
   name: 'todo',
   description:
     'Replace the in-session todo list — send the whole list every call, because it replaces rather than merges. statuses: pending | in_progress | completed. Keep at most one item in_progress at a time and mark items completed as they finish rather than batching them. Skip it for work that does not span multiple steps.',
+  prompt:
+    'Use todo for a short in-session checklist when the work genuinely spans steps; skip it for single-step work. Keep at most one item in_progress at a time, and mark an item completed as soon as it is done rather than batching.',
+  planSafe: true,
   schema: {
     type: 'object',
     properties: {
@@ -79,7 +82,7 @@ const todoTool: ToolSpec = {
   },
 };
 
-/** 插件入口。宿主按 `src/plugins/todo/` 装载，插件名取目录名。 */
+/** 插件入口。宿主按 `src/plugins/sph-todo/` 装载，插件名取目录名。 */
 export default function setup(api: PluginApi): void {
   const list = new TodoList();
   api.registerTool(todoTool);

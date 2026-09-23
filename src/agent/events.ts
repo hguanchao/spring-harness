@@ -45,7 +45,8 @@ export type AgentEvent =
       id: string;
       description: string;
       mode: 'foreground' | 'background';
-      childType: 'explore' | 'general';
+      /** 子代理定义的名字（内置为 explore / general，也可以是一份 agent 文件）。 */
+      childType: string;
       childSessionId: string;
       toolCallId?: string;
       /** 子代理跑在隔离 git 工作树时的工作树路径（isolation: worktree）。 */

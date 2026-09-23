@@ -1,12 +1,12 @@
-import { errorMessage } from '../../util.js';
-import { canonicalize } from '../../workspace/boundary.js';
-import { hasOtherLiveSessionIn } from '../../session/lock.js';
-import { sessionDirFor } from '../../session/path.js';
-import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../types.js';
-import { SandboxError, type SandboxMode, type SandboxStatus } from '../types.js';
+import { errorMessage } from '../../../util.js';
+import { canonicalize } from '../../../workspace/boundary.js';
+import { hasOtherLiveSessionIn } from '../../../session/lock.js';
+import { sessionDirFor } from '../../../session/path.js';
+import type { ConfinedSpawn, SandboxHandle, SpawnResult } from '../../../sandbox/types.js';
+import { SandboxError, type SandboxMode, type SandboxStatus } from '../../../sandbox/types.js';
 import { grantWrite, revokeWrite } from './acl.js';
 import { sidBuffer, tempWriteSid, workspaceWriteSid } from './sid.js';
-import { capSpawnOutput } from '../env.js';
+import { capSpawnOutput } from '../../../sandbox/env.js';
 import { drainHandle, readExitCode, spawnAsUser } from './spawn.js';
 import {
   createFilteredToken,

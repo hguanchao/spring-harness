@@ -170,6 +170,20 @@ describe('插件装载根的优先级与信任门', () => {
     }
   });
 
+  it('sph-sandbox 被同名第三方顶替时，内置留下，名字记在 pinned', () => {
+    const s = scaffold();
+    try {
+      s.dir(s.bundledRoot, 'sph-sandbox');
+      s.dir(s.userRoot, 'sph-sandbox');
+      const result = s.discover();
+      assert.deepEqual(result.pinned, ['sph-sandbox']);
+      assert.deepEqual(result.shadowed, []);
+      assert.equal(result.candidates.find((c) => c.name === 'sph-sandbox')?.root, 'bundled');
+    } finally {
+      s.cleanup();
+    }
+  });
+
   it('没有遮蔽时 shadowed 为空', () => {
     const s = scaffold();
     try {
@@ -246,7 +260,7 @@ describe('插件装载根的优先级与信任门', () => {
 });
 
 describe('内置插件确实随包发布', () => {
-  it('默认内置根（src/plugins）能找到 sph-mcp', () => {
+  it('默认内置根（src/plugins）能找到随包发布的插件', () => {
     // 不传 bundledRoot 走默认值：内置根就是 loader 自己所在的目录，源码树与 dist 两种
     // 布局下都成立，不需要任何路径推算。
     const found = discoverPlugins({
@@ -254,8 +268,10 @@ describe('内置插件确实随包发布', () => {
       userRoot: join(tmpdir(), 'definitely-not-a-plugins-dir'),
     }).candidates;
     const foundNames = found.map((candidate) => candidate.name);
-    assert.ok(foundNames.includes('sph-mcp'), `内置插件里应有 sph-mcp，实际: ${foundNames.join(',')}`);
-    assert.equal(found.find((c) => c.name === 'sph-mcp')?.root, 'bundled');
+    for (const name of ['sph-mcp', 'sph-todo', 'sph-plan', 'sph-sandbox', 'sph-subagent']) {
+      assert.ok(foundNames.includes(name), `内置插件里应有 ${name}，实际: ${foundNames.join(',')}`);
+      assert.equal(found.find((c) => c.name === name)?.root, 'bundled');
+    }
   });
 
   it('内置根不会把插件系统自己的模块列成插件', () => {

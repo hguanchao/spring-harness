@@ -1,24 +1,14 @@
 /**
  * Plan mode：先探索再动手。
  *
- * 激活期间系统提示词多一段引导，写工具（含 shell / 可写 subagent）被运行时拒绝。
+ * 激活期间跨轮次状态多一段引导。默认拦截由核心按工具的 planSafe 能力执行；
+ * 本文件只声明按参数才能判定的例外——只读子代理放行，其余子代理拦截。
  * 模型用 exit_plan_mode 呈交完整 markdown 计划，用户批准后才离开。
  * 状态只记一条 last-wins 的 `plan_mode` 事件，resume 从日志折叠。
  */
 import { join } from 'node:path';
 import type { PluginApi } from '../types.js';
-import { PLAN_MODE_SERVICE, type PlanModeSeam } from '../services.js';
-
-/** 计划模式里禁止的副作用工具。explore 子代理除外，由调用方单独放行。 */
-const BLOCKED_TOOLS = new Set([
-  'write',
-  'edit',
-  'bash',
-  'pwsh',
-  'mcp',
-  'subagent',
-  'send_subagent_message',
-]);
+import { PLAN_MODE_SERVICE, SUBAGENT_SERVICE, type PlanModeSeam, type SubagentCatalog } from '../services.js';
 
 export function planFilePath(sessionDir: string, sessionId: string): string {
   return join(sessionDir, `${sessionId}.plan.md`);
@@ -49,8 +39,7 @@ export function planHeading(plan: string): string | undefined {
 export function planModeSection(): string {
   return [
     'You are in plan mode: explore the codebase and design an implementation plan. Do not implement.',
-    'Use read, grep, glob, ls, ask_user, todo, skill, web_search, web_fetch, jobs, and explore subagents.',
-    'Writes, edit, bash, pwsh, mcp, general subagents, and send_subagent_message are blocked until the user approves the plan.',
+    'Read-only tools and read-only subagents stay available. Anything that writes, runs a command, or calls an external service is blocked until the user approves the plan.',
     'When the plan is complete, call exit_plan_mode with the FULL markdown, starting with a # heading that names it.',
     'If the user asks you to write a plan or the approach is still ambiguous, stay here until they approve.',
   ].join('\n');
@@ -61,26 +50,26 @@ export function planBlockedReason(name: string): string {
 }
 
 /**
- * 接缝实现：核心面对 PlanModeSeam 接口，不引用本文件。
- *
- * 拦截表按「名字 + 参数豁免」声明，而不是留在核心按名字猜——todo 的教训是核心
- * 不能硬编码插件工具名（曾把 `mcp` 写死在 PLAN_BLOCKED_TOOLS 里）。
+ * 接缝实现。子代理会不会写，调用时向 sph-subagent 的目录查——定义可以在两次调用之间变。
+ * 目录不在（插件被关掉）或名字未知，按会写处理。其余工具返回 undefined，由核心按 planSafe 拦截。
  */
-const seam: PlanModeSeam = {
-  isBlocked: (toolName, args) => {
-    if (!BLOCKED_TOOLS.has(toolName)) return false;
-    // explore 子代理是只读的，允许在 plan mode 下派发。
-    if (toolName === 'subagent' && args.type === 'explore') return false;
-    return true;
-  },
-  blockedReason: (toolName) => planBlockedReason(toolName),
-  promptSection: () => planModeSection(),
-  hasPlanHeading,
-  planHeading,
-  planFilePath,
-};
+export function createPlanSeam(catalog: () => SubagentCatalog | undefined): PlanModeSeam {
+  return {
+    isBlocked: (toolName, args) => {
+      if (toolName !== 'subagent') return undefined;
+      const requested = typeof args.agent === 'string' && args.agent.trim() !== '' ? args.agent.trim() : 'general';
+      const writes = catalog()?.find(requested)?.writes;
+      return writes !== false;
+    },
+    blockedReason: (toolName) => planBlockedReason(toolName),
+    promptSection: () => planModeSection(),
+    hasPlanHeading,
+    planHeading,
+    planFilePath,
+  };
+}
 
-/** 插件入口。宿主按 `src/plugins/plan/` 装载，插件名取目录名。 */
+/** 插件入口。宿主按 `src/plugins/sph-plan/` 装载，插件名取目录名。 */
 export default function setup(api: PluginApi): void {
-  api.provide(PLAN_MODE_SERVICE, seam);
+  api.provide(PLAN_MODE_SERVICE, createPlanSeam(() => api.consume<SubagentCatalog>(SUBAGENT_SERVICE)));
 }

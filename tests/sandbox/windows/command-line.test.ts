@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { quoteCommandLineArg as q } from '../../../src/sandbox/windows/command-line.js';
+import { quoteCommandLineArg as q } from '../../../src/plugins/sph-sandbox/windows/command-line.js';
 
 /**
  * 期望值都按「实际的命令行文本」写：TS 源码里反斜杠要转义，所以 `'a\\\\'` 表示两个反斜杠。

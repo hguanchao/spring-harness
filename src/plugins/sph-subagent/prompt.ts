@@ -1,16 +1,15 @@
 /**
  * 子代理提示词。
  *
- * 三种角色共用同一套骨架（角色 → 能力 → 约束 → 作用域 → 产出），模型切换角色时认知成本
- * 最低；差异只在该变的地方变。骨架本身借鉴参考实现，但每一条都对着 sph 的真实约束写：
+ * 角色共用同一套骨架（角色 → 能力 → 约束 → 作用域 → 产出）。差异只在该变的地方变。
+ * 每一条都对着 sph 的真实约束写：
  *
  * - **扁平代理树**：sph 默认 maxSubagentDepth=1，子代理不能再派生子代理。这条必须写，
  *   否则子代理会尝试 subagent 调用并在运行时被拒，白白浪费一轮。
- * - **结果被父代理程序化消费**：runChild 取的是子代理最后一条 assistant 文本，
- *   没有结构化的「返回」工具。所以产出格式约束是硬性的，且必须要求「报告结论」而不是
- *   「叙述过程」——父代理拿到的是这一段文字，别的什么都看不到。
- * - **被拒要有出路**：参考实现里最关键的一条。子代理权限在派生时就固定了，被拒后既不能
- *   重试也不能升级，唯一正确的动作是写进报告让父代理处理。没有这条，子代理会卡死或乱撞。
+ * - **结果被父代理程序化消费**：宿主取的是子代理最后一条 assistant 文本，
+ *   没有结构化的「返回」工具。产出必须是结论，父代理看不到工具调用。
+ * - **被拒要有出路**：权限在派生时就固定了，被拒后既不能重试也不能升级，
+ *   唯一正确的动作是写进报告让父代理处理。
  */
 
 /** 所有角色共享的尾部：作用域 + 产出格式 + 被拒出路。 */
@@ -66,8 +65,10 @@ You cannot spawn subagents: this session is a flat delegation, so a subagent cal
 
 ${SHARED_TAIL}`;
 
-export type SubagentRole = 'explore' | 'general';
+export function explorePrompt(): string {
+  return EXPLORE_PROMPT;
+}
 
-export function subagentPrompt(role: SubagentRole): string {
-  return role === 'explore' ? EXPLORE_PROMPT : GENERAL_PROMPT;
+export function generalPrompt(): string {
+  return GENERAL_PROMPT;
 }

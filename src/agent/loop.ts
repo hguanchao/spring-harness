@@ -34,10 +34,27 @@ import { scanSkills } from '../skills/scan.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { FileObservation } from '../tools/observe.js';
 import { SUBAGENT_CONCURRENCY, type ToolContext, type ToolResult } from '../tools/types.js';
-import { subagentPrompt, type SubagentRole } from './subagent-prompt.js';
 import { existsSync } from 'node:fs';
 
 const MAX_STEPS = 32;
+
+/**
+ * 把子代理定义里的工具名单收成实际可用集合。
+ *
+ * `*` 按当前工具表展开，但委托工具不跟着进去：子代理默认不能再派生子代理，
+ * 深度预算是第二道，工具集是第一道。点名的工具原样保留（含委托工具），
+ * 嵌套只在定义明确授权、且深度预算允许时成立。
+ */
+function resolveChildTools(registry: ToolRegistry, declared: readonly string[]): Set<string> {
+  const base = declared.includes('*')
+    ? registry.generalNames()
+    : new Set(declared.filter((name) => registry.find(name)));
+  if (declared.includes('*')) {
+    base.delete('subagent');
+    base.delete('send_subagent_message');
+  }
+  return base;
+}
 
 /** 预算用掉多少就打一条 warn：留出「收尾并交付已有成果」的余地。 */
 const BUDGET_WARN_RATIO = 0.8;
@@ -130,10 +147,10 @@ export interface RunTurnOptions {
   planMode?: { active: boolean };
   reviewPlan?: (plan: string, title: string) => Promise<{ approved: boolean; feedback?: string }>;
   /**
-   * 子代理角色。设置时在主系统提示词之后追加该角色的约束段（只读边界、扁平代理树、
-   * 产出格式、被拒出路）——子代理此前与主代理共用同一份提示词，缺这些边界。
+   * 子代理角色约束。设置时追加在主系统提示词之后（只读边界、扁平代理树、
+   * 产出格式、被拒出路）。正文由 sph-subagent 按 agent 定义提供。
    */
-  subagentRole?: SubagentRole;
+  subagentPrompt?: string;
   /**
    * 会话累计 token 预算（config.max_session_tokens）；0 或省略表示不限制。
    *
@@ -218,13 +235,14 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       // 全部段落——那会让被插件禁用/装载失败的工具（如 sph-mcp 没装时的 `mcp`）也留一段
       // 指令，所以这里按**工具表里真实存在的名字**收口。
       allowedTools: options.allowedTools ?? new Set(registry.list().map((tool) => tool.name)),
+      toolPrompts: registry.list().flatMap((tool) => (tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : [])),
       // goal / lastFailure / planMode 不进 system：它们随时可变，放在前缀最头部意味着
       // 一次变化就作废全部消息历史的缓存。经 sessionStateMessage 以尾部 user 消息注入。
     });
     // 子代理角色段追加在末尾：主提示词在前、角色约束在后，父级主 turn 的前缀保持一致
     // （缓存命中），且角色约束作为最后读到的一段不会被前面的通用规则盖过。
-    return options.subagentRole
-      ? `${system}\n\n${subagentPrompt(options.subagentRole)}`
+    return options.subagentPrompt
+      ? `${system}\n\n${options.subagentPrompt}`
       : system;
   })();
   // token 预算：整棵代理树的累计量（自己的 usage + 各子代理 end 事件里的 tokens）。
@@ -329,7 +347,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
   const runChild = async (input: {
     prompt: string;
-    type: 'explore' | 'general';
+    agent: string;
+    tools: readonly string[];
+    systemPrompt: string;
     signal?: AbortSignal;
     description?: string;
     mode: 'foreground' | 'background';
@@ -364,9 +384,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         );
       const last = starts.at(-1);
       if (last && last.type === 'event') {
-        if (last.data.childType !== undefined && last.data.childType !== input.type) {
+        if (last.data.childType !== undefined && last.data.childType !== input.agent) {
           throw new Error(
-            `resume_from: source type ${String(last.data.childType)} does not match requested ${input.type}`,
+            `resume_from: source agent ${String(last.data.childType)} does not match requested ${input.agent}`,
           );
         }
         if (typeof last.data.worktree === 'string') resumedWorktree = last.data.worktree;
@@ -424,7 +444,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       id: subId,
       description,
       mode: input.mode,
-      childType: input.type,
+      childType: input.agent,
       childSessionId: childSession.id,
       ...(input.toolCallId === undefined ? {} : { toolCallId: input.toolCallId }),
       ...(childWorktree === undefined ? {} : { worktree: childWorktree }),
@@ -457,7 +477,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       options.listener?.({ type: 'subagent_event', id: subId, event: event as SubagentEvent });
     };
 
-    const allowed = input.type === 'explore' ? registry.exploreNames() : registry.generalNames();
+    const allowed = resolveChildTools(registry, input.tools);
     let outcome: { ok: boolean; summary: string } = { ok: true, summary: '' };
     try {
       await runTurn({
@@ -481,7 +501,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         maxSubagentDepth,
         allowedTools: allowed,
         worktrees,
-        subagentRole: input.type,
+        subagentPrompt: input.systemPrompt,
         ...(input.mode === 'background' ? { inbox: childInbox } : {}),
       });
       const last = lastAssistantMessage(childSession.readMessages());
@@ -590,7 +610,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       }
       const child = {
         prompt: input.prompt,
-        type: input.type,
+        agent: input.agent,
+        tools: input.tools,
+        systemPrompt: input.systemPrompt,
         description: input.description,
         toolCallId: input.toolCallId,
         resumeFrom: input.resumeFrom,
@@ -879,9 +901,13 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (allowed && !allowed.has(name)) return `tool not allowed in this agent: ${name}`;
       if (registry.isRootOnly(name) && depth > 0) return `tool only available to the root session: ${name}`;
       if (!registry.find(name)) return `unknown tool: ${name}`;
-      const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
-      if (options.planMode?.active && planSeam?.isBlocked(name, args)) {
-        return planSeam.blockedReason(name);
+      if (options.planMode?.active) {
+        const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
+        // 插件可以按参数覆盖（只读子代理放行）。没有覆盖时按工具自己的 planSafe，
+        // 未声明即拦截：新注册的写工具不会因为不在某张名单里而被放开。
+        const verdict = planSeam?.isBlocked(name, args);
+        const blocked = verdict === true || (verdict !== false && !registry.isPlanSafe(name));
+        if (blocked) return planSeam?.blockedReason(name) ?? `blocked in plan mode: ${name}`;
       }
       return undefined;
     };

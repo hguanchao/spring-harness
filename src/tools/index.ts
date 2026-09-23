@@ -8,13 +8,11 @@ import { askUserTool } from './ask-user.js';
 import { globTool } from './glob.js';
 import { webFetchTool, webSearchTool } from './web-search.js';
 import { jobsTool } from './jobs.js';
-import { subagentTool } from './subagent.js';
-import { sendSubagentMessageTool } from './send-subagent.js';
 import type { ToolSpec } from './types.js';
 import { writeTool } from './write.js';
 import { ToolRegistry } from './registry.js';
 
-function tagged(tool: ToolSpec, flags: Pick<ToolSpec, 'concurrencySafe' | 'explore' | 'rootOnly'>): ToolSpec {
+function tagged(tool: ToolSpec, flags: Pick<ToolSpec, 'concurrencySafe' | 'explore' | 'rootOnly' | 'planSafe'>): ToolSpec {
   return { ...tool, ...flags };
 }
 
@@ -22,25 +20,23 @@ function tagged(tool: ToolSpec, flags: Pick<ToolSpec, 'concurrencySafe' | 'explo
  * 默认产品工具表。标志写在装配处而不是每个工具文件里：漏标对照下面这份清单，
  * 不必在每个工具文件里搜三个布尔值。
  *
- * rootOnly 用于隔离子代理：send_subagent_message 这类工具若对子代理开放，
- * 会形成无主的旁路通道。子代理的 allowedTools 由 ToolRegistry.generalNames() 剔除。
+ * rootOnly 用于隔离子代理：只对根会话开放的工具（如 send_subagent_message）
+ * 由 ToolRegistry.generalNames() 从子代理的工具集里剔除。
  */
 export const tools: ToolSpec[] = [
-  tagged(readFileTool, { concurrencySafe: true, explore: true }),
+  tagged(readFileTool, { concurrencySafe: true, explore: true, planSafe: true }),
   writeTool,
   searchReplaceTool,
-  tagged(grepTool, { concurrencySafe: true, explore: true }),
-  tagged(globTool, { concurrencySafe: true, explore: true }),
-  tagged(listDirTool, { concurrencySafe: true, explore: true }),
+  tagged(grepTool, { concurrencySafe: true, explore: true, planSafe: true }),
+  tagged(globTool, { concurrencySafe: true, explore: true, planSafe: true }),
+  tagged(listDirTool, { concurrencySafe: true, explore: true, planSafe: true }),
   bashTool,
   pwshTool,
-  tagged(skillTool, { concurrencySafe: true, explore: true }),
-  tagged(askUserTool, { explore: true }),
-  tagged(webSearchTool, { concurrencySafe: true, explore: true }),
-  tagged(jobsTool, { concurrencySafe: true }),
-  tagged(subagentTool, { concurrencySafe: true }),
-  tagged(sendSubagentMessageTool, { rootOnly: true }),
-  tagged(webFetchTool, { concurrencySafe: true, explore: true }),
+  tagged(skillTool, { concurrencySafe: true, explore: true, planSafe: true }),
+  tagged(askUserTool, { explore: true, planSafe: true }),
+  tagged(webSearchTool, { concurrencySafe: true, explore: true, planSafe: true }),
+  tagged(jobsTool, { concurrencySafe: true, planSafe: true }),
+  tagged(webFetchTool, { concurrencySafe: true, explore: true, planSafe: true }),
 ];
 
 function createDefaultToolRegistry(): ToolRegistry {

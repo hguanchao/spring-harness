@@ -12,6 +12,7 @@ import type { AgentEvent } from '../../src/agent/events.js';
 import type { ChatMessage, LlmClient, StreamDelta, TokenUsage } from '../../src/llm/openai.js';
 import type { SandboxHandle } from '../../src/sandbox/types.js';
 import type { Approver } from '../../src/permission/policy.js';
+import type { ToolRegistry } from '../../src/tools/registry.js';
 
 const sandbox: SandboxHandle = {
   status: { mode: 'off', enforcement: 'none', platform: process.platform },
@@ -43,6 +44,22 @@ function toolOnceClient(count: { calls: number }): LlmClient {
       return { text: 'done', finishReason: 'stop', usage };
     },
   };
+}
+
+/** 子代理审批测试需要 sph-subagent 的工具；其余插件不参与这次断言。 */
+async function toolsWithSubagent(workspaceRoot: string): Promise<ToolRegistry> {
+  const host = new PluginHost({
+    coreTools: defaultTools.list(),
+    workspaceRoot,
+    configPath: join(workspaceRoot, 'config.toml'),
+  });
+  const discovered = discoverPlugins({
+    workspaceRoot,
+    userRoot: join(workspaceRoot, 'no-user'),
+    disabled: ['sph-mcp', 'sph-todo', 'sph-plan', 'sph-sandbox'],
+  });
+  await host.load(discovered.candidates);
+  return host.tools();
 }
 
 function makeSession(): { session: JsonlSession; root: string; cleanup: () => void } {
@@ -500,7 +517,7 @@ describe('子代理审批策略', () => {
   const SPAWN: StreamDelta = {
     text: '',
     finishReason: 'tool-calls',
-    toolCalls: [{ id: 's1', name: 'subagent', arguments: '{"prompt":"child work","description":"child work"}' }],
+    toolCalls: [{ id: 's1', name: 'subagent', arguments: '{"prompt":"child work","description":"child work","agent":"general"}' }],
   };
   const SHELL: StreamDelta = {
     text: '',
@@ -519,7 +536,7 @@ describe('子代理审批策略', () => {
         workspaceRoot: root,
         client: scriptedClient([SPAWN, SHELL, DONE, DONE]),
         session,
-        tools: defaultTools,
+        tools: await toolsWithSubagent(root),
         sandbox,
         approver: { decide: async () => { seen.push('parent'); return true; } },
         ...(subagentApprover === undefined ? {} : { subagentApprover }),

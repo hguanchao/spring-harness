@@ -115,13 +115,13 @@ Plugins are discovered from three roots. On a name clash the higher one wins as 
 
 | Root | Scope | Form |
 |---|---|---|
-| `src/plugins/*` | Bundled with sph (`sph-mcp` lives here), compiled into `dist/` | Directory with `index.ts` |
+| `src/plugins/*` | Bundled with sph (`sph-mcp`, `sph-todo`, `sph-plan`, `sph-sandbox`, `sph-subagent`), compiled into `dist/` | Directory with `index.ts` |
 | `~/.sph/plugins/*` | Your own, every project | Directory or single file |
 | `<workspace>/.sph/plugins/*` | Project-local — **loaded only when the workspace is trusted** | Directory or single file |
 
 Third-party plugins go under `.sph/` rather than a `plugins/` directory at the repo root: it keeps them with the rest of sph's per-project state (`.sph/config.toml`) and away from source directories. A `package.json` can declare `sph.plugins: ["./a.ts", "./b.ts"]` for a multi-module plugin and `sph.name` to name it.
 
-A repository's `.sph/plugins/*.ts` is arbitrary code someone else wrote, so it goes behind the same trust gate as `AGENTS.md` and the sandbox: reading a stranger's repo must not execute what they shipped. Because third-party plugins outrank bundled ones, a workspace or user plugin **can** replace `sph-mcp` — legitimate for patching, but sph prints `plugin <name> shadows the bundled one` when it happens, since a swapped-out service is otherwise invisible.
+A repository's `.sph/plugins/*.ts` is arbitrary code someone else wrote, so it goes behind the same trust gate as `AGENTS.md` and the sandbox: reading a stranger's repo must not execute what they shipped. Because third-party plugins outrank bundled ones, a workspace or user plugin **can** replace `sph-mcp` — legitimate for patching, but sph prints `plugin <name> shadows the bundled one` when it happens, since a swapped-out service is otherwise invisible. `sph-sandbox` is the exception: a same-named third-party plugin is ignored and the built-in confinement backend stays loaded. Replacing the sandbox silently would hand process isolation to whatever a repository shipped.
 
 Turn one off in `config.toml`:
 
@@ -208,22 +208,35 @@ Malformed session lines are skipped rather than failing the file. Multiple `sph`
 src/
 ├── cli/         entry, arg parsing, runtime assembly (bootstrap), output formats
 ├── agent/       loop.ts (the turn loop) · prompt.ts · compact.ts · tool-run.ts
-│                memory.ts (AGENTS.md) · plan.ts · recap.ts · subagent-prompt.ts
-├── tools/       the 18 core tools + capability sets and permission helpers
+│                memory.ts (AGENTS.md) · recap.ts
+├── tools/       core tools + capability sets and permission helpers
 ├── llm/         protocol adapters, SSE client, retry, error classification, compat caps
 ├── tui/         terminal UI: screen/ (framework) + components/ (app)
-├── sandbox/     OS confinement: open.ts dispatches to windows/ or linux.ts
+├── sandbox/     confinement policy and the off-mode spawn; OS backends live in sph-sandbox
 ├── session/     JSONL store, event folding, repair, locking, export
 ├── plugins/     plugin contract, discovery/loader, host, service seams, and the
-│                bundled sph-mcp plugin (the `mcp` tool is here, not in tools/)
-├── runtime/     in-process shared resources: jobs, todos, spill, worktrees
+│                bundled plugins: sph-mcp, sph-todo, sph-plan, sph-sandbox, sph-subagent
+├── runtime/     in-process shared resources: jobs, spill, worktrees
 ├── permission/  approval policy + the LLM safety reviewer + grant store
 ├── config/      TOML load/validate, models.json registry, surgical save
 ├── workspace/   path boundary, root resolution, trust
 └── skills/      SKILL.md catalog scanning
 ```
 
-`src/plugins/services.ts` is the MCP **seam**: data shapes plus an interface, no implementation. Core keeps it so `/mcps`, the reports, and `[[mcp_servers]]` config parsing can name MCP's data without importing the plugin — otherwise disabling `sph-mcp` would not even compile. This is the same split dsh uses (`@deepseek-ai/dsh-mcp-client` provides `ctx.mcp` over a seam core owns).
+`src/plugins/services.ts` holds the seams: data shapes plus interfaces, no implementation. Core keeps them so `/mcps`, session folding, and plan-mode checks can name those capabilities without importing a plugin — otherwise disabling one would not even compile. This is the same split dsh uses (`@deepseek-ai/dsh-mcp-client` provides `ctx.mcp` over a seam core owns).
+
+`sph-subagent` follows the pi-subagents split: agent definitions and the `subagent` / `send_subagent_message` tools live in the plugin, while the child session, depth budget, approval, and event protocol stay in the turn loop. Built-in agents are `explore` (read-only) and `general`. A markdown file in `~/.sph/agents/` or `<workspace>/.sph/agents/` adds or replaces one; the workspace directory is read only when the workspace is trusted. A file looks like this:
+
+```markdown
+---
+name: scout
+description: Fast codebase recon
+tools: read, grep, glob, ls
+writes: false
+---
+
+Your system prompt goes here.
+```
 
 One turn of `runTurn` looks like this:
 

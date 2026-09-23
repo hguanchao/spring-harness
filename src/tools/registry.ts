@@ -55,6 +55,11 @@ export class ToolRegistry {
     return this.byName.get(name)?.rootOnly === true;
   }
 
+  /** 计划模式下默认可调用。未知名字 fail-closed。 */
+  isPlanSafe(name: string): boolean {
+    return this.byName.get(name)?.planSafe === true;
+  }
+
   exploreNames(): Set<string> {
     return new Set(this.list().filter((tool) => tool.explore).map((tool) => tool.name));
   }

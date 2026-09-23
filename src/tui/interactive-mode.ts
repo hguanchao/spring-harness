@@ -1594,6 +1594,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         sandbox: this.deps.sandbox.status.mode,
         skills: scanSkills(this.deps.workspaceRoot).catalog,
         mcpTools: this.deps.mcp()?.listTools() ?? [],
+        toolPrompts: (this.deps.tools ?? defaultTools).list().flatMap((tool) => (
+          tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : []
+        )),
         // goal / lastFailure / planMode 与 runTurn 同参：不进 system（前缀最头部），
         // 跨轮次状态由 runTurn 以尾部 user 消息注入。
       }),

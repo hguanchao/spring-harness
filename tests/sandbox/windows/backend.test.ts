@@ -21,7 +21,7 @@ describe(
   { skip: process.platform === 'win32' ? false : '只有 Windows 有双令牌后端' },
   () => {
     it('init 后 status 正确，dispose 可重复调用', async () => {
-      const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-token-ws-'));
       const temp = mkdtempSync(join(tmpdir(), 'sph-token-tmp-'));
       const sandbox = new WindowsAclSandbox({
@@ -43,7 +43,7 @@ describe(
     });
 
     it('tokenTierFor 按 shell 二进制分档：bash 走过滤档，pwsh/未知走受限档', async () => {
-      const { tokenTierFor } = await import('../../../src/sandbox/windows/backend.js');
+      const { tokenTierFor } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
       assert.equal(tokenTierFor('C:\\Program Files\\Git\\usr\\bin\\bash.exe'), 'filtered');
       assert.equal(tokenTierFor('D:\\tools\\sh.exe'), 'filtered');
       assert.equal(tokenTierFor('C:\\Program Files\\PowerShell\\7\\pwsh.exe'), 'restricted');
@@ -52,7 +52,7 @@ describe(
     });
 
     it('沙箱内跑真 Git Bash 不再撞 signal pipe 初始化失败', { timeout: 60_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
       const { resolveBashBinary } = await import('../../../src/sandbox/shell-bin.js');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-token-bash-'));
       const temp = mkdtempSync(join(tmpdir(), 'sph-token-bash-tmp-'));
@@ -102,7 +102,7 @@ describe(
   },
   () => {
     it('工作区内可写、工作区外被拒，TMP 指向沙箱私有临时目录', { timeout: 90_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
       const shell = await pwshCommand();
       assert.ok(shell, 'pwsh 不可用则本用例应被 skip');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-fence-ws-'));

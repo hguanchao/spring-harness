@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildSystemPrompt, sessionStateMessage } from '../../src/agent/prompt.js';
-import { subagentPrompt } from '../../src/agent/subagent-prompt.js';
+import { explorePrompt, generalPrompt } from '../../src/plugins/sph-subagent/prompt.js';
 import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from '../../src/agent/compact.js';
 import { CLASSIFIER_SYSTEM } from '../../src/permission/auto.js';
 import { memoryToPrompt, touchInstructionBlock, type MemoryFile } from '../../src/agent/memory.js';
@@ -252,8 +252,10 @@ describe('压缩摘要', () => {
 });
 
 describe('子代理提示词', () => {
+  const prompts = { explore: explorePrompt(), general: generalPrompt() };
+
   it('explore 带只读横幅并点名没有编辑工具', () => {
-    const p = subagentPrompt('explore');
+    const p = prompts.explore;
     assert.ok(p.includes('=== READ-ONLY MODE ==='));
     assert.ok(p.includes('You have NO file editing tools'));
   });
@@ -261,14 +263,14 @@ describe('子代理提示词', () => {
   it('两个角色都声明扁平代理树：子代理不能再派生子代理', () => {
     // sph 默认 maxSubagentDepth=1；不写这条，子代理会白试一轮然后被运行时拒绝。
     for (const role of ['explore', 'general'] as const) {
-      assert.ok(subagentPrompt(role).includes('cannot spawn subagents'), `${role} 缺少扁平代理树声明`);
+      assert.ok(prompts[role].includes('cannot spawn subagents'), `${role} 缺少扁平代理树声明`);
     }
   });
 
   it('两个角色都要求「报告结论而非叙述过程」', () => {
     // runChild 取的是最后一条 assistant 文本，父代理看不到子代理的工具调用。
     for (const role of ['explore', 'general'] as const) {
-      const p = subagentPrompt(role);
+      const p = prompts[role];
       assert.ok(p.includes('the ONLY thing the delegating agent receives'), `${role} 缺少接收者模型`);
       assert.ok(p.includes('not a narration of the steps'), `${role} 缺少产出格式约束`);
     }
@@ -276,7 +278,7 @@ describe('子代理提示词', () => {
 
   it('被拒时给出出路：写进报告让父代理处理，而不是重试', () => {
     for (const role of ['explore', 'general'] as const) {
-      const p = subagentPrompt(role);
+      const p = prompts[role];
       assert.ok(p.includes('do not retry the denied operation'), `${role} 缺少被拒约束`);
       assert.ok(p.includes('so the delegating agent can handle it'), `${role} 缺少被拒出路`);
     }
@@ -284,7 +286,7 @@ describe('子代理提示词', () => {
 
   it('作用域边界：默认只在工作区内，越界是策略', () => {
     for (const role of ['explore', 'general'] as const) {
-      assert.ok(subagentPrompt(role).includes('Workspace boundary'));
+      assert.ok(prompts[role].includes('Workspace boundary'));
     }
   });
 });

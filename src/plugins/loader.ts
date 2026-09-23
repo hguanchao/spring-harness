@@ -182,10 +182,20 @@ function scanRoot(
  * `shadowed` 单独给出而不是让调用方自己推：只有发现过程知道哪些名字在**内置根里出现过、
  * 又被第三方顶掉**了。这是「行为变了却查不出为什么」的典型来源，必须让调用方有机会说出来。
  */
+/**
+ * 不允许被同名第三方整包换掉的内置插件。
+ *
+ * 沙箱后端是隔离机制：工作区插件能换掉 `sph-mcp` 只是行为变了；换掉 `sph-sandbox`
+ * 是把进程隔离交给仓库里的任意代码。发现阶段直接丢掉那份候选，内置后端留下。
+ */
+const PINNED_BUNDLED = new Set(['sph-sandbox']);
+
 export interface DiscoveredPlugins {
   candidates: PluginCandidate[];
   /** 被第三方顶掉的内置插件名。 */
   shadowed: string[];
+  /** 试图顶掉固定内置插件、但被拒绝的名字。内置实现仍在候选里。 */
+  pinned: string[];
 }
 
 /**
@@ -230,17 +240,28 @@ export function discoverPlugins(options: DiscoverPluginsOptions): DiscoveredPlug
   // 低优先级先入表，高优先级覆盖（与 MCP 来源合并同一套「同名整条替换」语义）。
   const byName = new Map<string, PluginCandidate>();
   const shadowed: string[] = [];
+  const pinned: string[] = [];
   const builtinNames = new Set<string>();
   for (const { dir, kind, take, directoriesOnly } of roots) {
     if (!take) continue;
     for (const candidate of scanRoot(dir, kind, directoriesOnly)) {
-      if (kind !== 'bundled' && builtinNames.has(candidate.name)) shadowed.push(candidate.name);
+      if (kind !== 'bundled' && builtinNames.has(candidate.name)) {
+        if (PINNED_BUNDLED.has(candidate.name)) {
+          pinned.push(candidate.name);
+          continue;
+        }
+        shadowed.push(candidate.name);
+      }
       if (kind === 'bundled') builtinNames.add(candidate.name);
       byName.set(candidate.name, candidate);
     }
   }
   const candidates = [...byName.values()].filter((candidate) => !disabled.has(candidate.name));
-  return { candidates, shadowed: [...new Set(shadowed)].sort() };
+  return {
+    candidates,
+    shadowed: [...new Set(shadowed)].sort(),
+    pinned: [...new Set(pinned)].sort(),
+  };
 }
 
 /** 动态导入一个插件入口，取出默认导出。 */

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { linuxBwrapArgs } from '../../src/sandbox/linux.js';
+import { linuxBwrapArgs } from '../../src/plugins/sph-sandbox/linux.js';
 
 describe('linux bwrap args', () => {
   it('read-only 断网，workspace 不断网', () => {

@@ -13,7 +13,7 @@ import {
 import koffi from 'koffi';
 
 import { quoteCommandLineArg } from './command-line.js';
-import { mergeChildEnv, windowsEnvBlock } from '../env.js';
+import { mergeChildEnv, windowsEnvBlock } from '../../../sandbox/env.js';
 
 export interface Spawned {
   process: Handle;

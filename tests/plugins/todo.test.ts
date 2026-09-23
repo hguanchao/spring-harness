@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import setup, { TodoList } from '../../src/plugins/todo/index.js';
+import setup, { TodoList } from '../../src/plugins/sph-todo/index.js';
 import { TODO_SERVICE, todoEventData, type TodoService } from '../../src/plugins/services.js';
 import { EMPTY_PLUGIN_SERVICES, type PluginApi, type PluginHostFacts } from '../../src/plugins/types.js';
 import type { ToolContext, ToolSpec } from '../../src/tools/types.js';
@@ -16,7 +16,7 @@ function harness(): { api: PluginApi; tools: ToolSpec[]; services: Map<string, u
     isWorkspaceTrusted: () => true,
   };
   const api: PluginApi = {
-    name: 'todo',
+    name: 'sph-todo',
     workspaceRoot: process.cwd(),
     configPath: 'config.toml',
     host,

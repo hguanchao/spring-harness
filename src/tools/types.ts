@@ -43,7 +43,12 @@ export interface ToolContext {
   observation?: FileObservation;
   spawnSubagent(input: {
     prompt: string;
-    type: 'explore' | 'general';
+    /** 子代理定义的名字，写入会话事件，resume 时必须与源会话一致。 */
+    agent: string;
+    /** 该定义声明的工具名。`*` 表示宿主按当前工具表展开（仍去掉委托工具）。 */
+    tools: readonly string[];
+    /** 追加在子会话系统提示词之后的角色约束。 */
+    systemPrompt: string;
     background?: boolean;
     description?: string;
     /** 主流程里这次 `subagent` 工具调用的 id；恢复会话时子任务块靠它对齐回放位置。 */
@@ -74,6 +79,18 @@ export interface ToolSpec {
   explore?: boolean;
   /** 仅根会话可见。缺省否。 */
   rootOnly?: boolean;
+  /**
+   * 计划模式下允许调用。缺省否：未声明的工具在 plan mode 下被拒绝。
+   *
+   * 只读探索工具标 true。会改文件、跑命令、或按参数决定能否写的工具保持缺省，
+   * 由 plan 插件按参数放行（例如只读子代理）。
+   */
+  planSafe?: boolean;
+  /**
+   * 面向模型的使用说明。工具不可用时整段消失。
+   * 核心工具的说明在 prompt.ts；插件工具在注册时带上自己的一段。
+   */
+  prompt?: string;
   /**
    * callId 是这次调用在主流程里的工具调用 id（并行执行时各不相同）。
    * 绝大多数工具用不到它；subagent 靠它把子任务块锚回调用行。

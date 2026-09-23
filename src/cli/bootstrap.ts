@@ -259,41 +259,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   const sessionDir = sessionDirFor(options.workspaceRoot);
   mkdirSync(sessionDir, { recursive: true });
 
-  // 沙箱在**插件装载之后**打开：confine 档位的后端由 sph-sandbox 插件提供
-  // （Windows ACL / Linux bwrap 是机制，可插件化；策略与 fail-closed 留在核心）。
-  // 插件缺席 → 后端不存在 → 核心拒绝启动，而不是放开——安全约束不能有「缺席」状态。
-  const sandboxFactory = plugins.get<SandboxBackendFactory>(SANDBOX_SERVICE);
-  let sandbox: SandboxHandle;
-  try {
-    sandbox = await openSandbox(config.sandbox, options.workspaceRoot, sandboxFactory);
-  } catch (error) {
-    if (error instanceof SandboxError) throw new CliError(error.message, 1);
-    throw error;
-  }
-
-  // 会话选择与 pi 对齐：默认新建；只有 `-c/--continue` 才续用最近一次主会话。
-  let session = await resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
-  if (options.resumeId) {
-    const file = join(sessionDir, `${options.resumeId}.jsonl`);
-    if (!existsSync(file)) {
-      sandbox.dispose();
-      throw new CliError(`session not found: ${options.resumeId} (see: sph sessions)`, 1);
-    }
-    setCurrentSession(sessionDir, options.resumeId, options.workspaceRoot);
-    session = new JsonlSession(sessionDir, options.resumeId);
-  }
-
-  let release: (() => void) | undefined;
-  try {
-    release = acquireSessionLock(sessionDir, session.id);
-  } catch (error) {
-    sandbox.dispose();
-    if (error instanceof SessionLockedError) throw new CliError(error.message, 1);
-    throw error;
-  }
-
-  // 插件在 MCP 之前装好：MCP 本身就是一个插件（sph-mcp），核心只是按服务名取它。
-  // 项目级插件受信任门保护——仓库里的 plugins/*.ts 是会被执行的代码，而仓库内容是别人写的。
+  // 插件先于沙箱：confine 档位的后端由 sph-sandbox 提供，打开时才能取到工厂。
+  // 项目级插件受信任门保护——仓库里的 .sph/plugins 是会被执行的代码。
   const plugins = new PluginHost({
     coreTools,
     workspaceRoot: options.workspaceRoot,
@@ -305,15 +272,50 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     trusted,
     disabled: config.disabledPlugins,
   });
-  // 内置插件被顶掉是合法的（就地打补丁），但必须说出来：`sph-mcp` 被顶掉意味着 /mcps
-  // 依赖的整个服务换成了另一份实现，而界面上看不出任何差别。
+  // 内置插件被顶掉是合法的（就地打补丁），但必须说出来。sph-sandbox 例外：
+  // 同名第三方被发现阶段丢掉，内置后端留下，这里只报告那次被拒绝的替换。
   for (const name of discovered.shadowed) {
-    process.stderr.write(`warning: plugin ${name} shadows the bundled one
-`);
+    process.stderr.write(`warning: plugin ${name} shadows the bundled one\n`);
   }
-  await plugins.load(discovered.candidates, discovered.shadowed);
-  const pluginWarnings = plugins.warnings();
-  for (const warning of pluginWarnings) process.stderr.write(`warning: ${warning}\n`);
+  for (const name of discovered.pinned) {
+    process.stderr.write(`warning: plugin ${name} cannot replace the bundled one; the built-in stays loaded\n`);
+  }
+  await plugins.load(discovered.candidates, discovered.shadowed, discovered.pinned);
+  for (const warning of plugins.warnings()) process.stderr.write(`warning: ${warning}\n`);
+
+  // confine 档位必须有后端。插件缺席或装载失败 → 拒绝启动，而不是放开约束。
+  const sandboxFactory = plugins.get<SandboxBackendFactory>(SANDBOX_SERVICE);
+  let sandbox: SandboxHandle;
+  try {
+    sandbox = await openSandbox(config.sandbox, options.workspaceRoot, sandboxFactory);
+  } catch (error) {
+    plugins.dispose();
+    if (error instanceof SandboxError) throw new CliError(error.message, 1);
+    throw error;
+  }
+
+  // 会话选择与 pi 对齐：默认新建；只有 `-c/--continue` 才续用最近一次主会话。
+  let session = await resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
+  if (options.resumeId) {
+    const file = join(sessionDir, `${options.resumeId}.jsonl`);
+    if (!existsSync(file)) {
+      sandbox.dispose();
+      plugins.dispose();
+      throw new CliError(`session not found: ${options.resumeId} (see: sph sessions)`, 1);
+    }
+    setCurrentSession(sessionDir, options.resumeId, options.workspaceRoot);
+    session = new JsonlSession(sessionDir, options.resumeId);
+  }
+
+  let release: (() => void) | undefined;
+  try {
+    release = acquireSessionLock(sessionDir, session.id);
+  } catch (error) {
+    sandbox.dispose();
+    plugins.dispose();
+    if (error instanceof SessionLockedError) throw new CliError(error.message, 1);
+    throw error;
+  }
 
   const preferences = { ...config.mcpPreferences };
 

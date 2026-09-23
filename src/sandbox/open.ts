@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sphHome } from '../home.js';
@@ -48,11 +48,15 @@ export async function openSandbox(
   mkdirSync(sphHome(), { recursive: true });
   if (mode === 'off') return new OffSandbox(tempDir);
   if (!backendFactory) {
+    rmSync(tempDir, { recursive: true, force: true });
     throw new SandboxError(
       `sandbox ${mode} needs the sph-sandbox plugin; it is not loaded — add it back or pass --sandbox off`,
     );
   }
-  const backend = await backendFactory(mode, workspaceRoot);
-  // 后端必须接受核心给的 tempDir（清理路径由核心统一收口）。
-  return backend;
+  try {
+    return await backendFactory(mode, workspaceRoot, tempDir);
+  } catch (error) {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw error;
+  }
 }

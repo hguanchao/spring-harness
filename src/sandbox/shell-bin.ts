@@ -30,15 +30,11 @@ function isWslLauncher(file: string): boolean {
 }
 
 /**
- * 从 PATH 上的 git.exe 反推同装的 Git Bash。
+ * 从一份 git.exe 向上找同装的 Git Bash。
  *
- * Git for Windows 的安装器只把 `<root>\cmd` 放进 PATH——那里有 git.exe，没有 bash.exe；
- * 于是从 cmd / Explorer / IDE 启动的进程在 PATH 上找不到 Git Bash，只会撞见 System32 的
- * WSL 入口。bash 稳定躺在 `<root>\bin`（启动器）与 `<root>\usr\bin`（真身），由 git.exe 位置向上找即可。
+ * 安装器只把 `<root>\cmd` 放进 PATH，bash 在 `<root>\bin` 或 `<root>\usr\bin`。
  */
-function bashBesideGit(): string | undefined {
-  const git = lookOnPath('git');
-  if (!git) return undefined;
+function bashBeside(git: string): string | undefined {
   let dir = dirname(git);
   for (let depth = 0; depth < 3; depth += 1) {
     for (const candidate of [join(dir, 'bin', 'bash.exe'), join(dir, 'usr', 'bin', 'bash.exe')]) {
@@ -47,6 +43,29 @@ function bashBesideGit(): string | undefined {
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
+  }
+  return undefined;
+}
+
+/**
+ * 沿 PATH 找带 Git Bash 的那一份 git。
+ *
+ * 不能停在第一份：工具链会把自己的最小 git 插到 PATH 最前，那份只有 git.exe、没有 bash。
+ * 后面才是 Git for Windows。停在第一份会让 bash 工具误报「没装 Git Bash」。
+ */
+function bashBesideGit(): string | undefined {
+  const path = process.env.PATH ?? '';
+  const exts = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')
+    : [''];
+  for (const dir of path.split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const git = join(dir, `git${ext}`);
+      if (!existsSync(git)) continue;
+      const bash = bashBeside(git);
+      if (bash) return bash;
+    }
   }
   return undefined;
 }

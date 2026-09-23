@@ -3,26 +3,21 @@ import { describe, it } from 'node:test';
 import { defaultTools, tools } from '../../src/tools/index.js';
 
 describe('default tool table flags', () => {
-  it('default table includes aliases, subagent is parallel, root-only stays out of general', () => {
-    assert.equal(tools.length, 15);
-    assert.equal(defaultTools.list().length, 15);
-    assert.equal(defaultTools.isConcurrencySafe('subagent'), true);
-    assert.equal(defaultTools.isRootOnly('send_subagent_message'), true);
-    assert.equal(defaultTools.generalNames().has('send_subagent_message'), false);
+  it('只读探索工具可并行，写工具不行；explore 集合不含 write', () => {
+    assert.equal(tools.length, 13);
+    assert.equal(defaultTools.list().length, 13);
     assert.equal(defaultTools.exploreNames().has('read'), true);
     assert.equal(defaultTools.exploreNames().has('write'), false);
+    assert.equal(defaultTools.isPlanSafe('read'), true);
+    assert.equal(defaultTools.isPlanSafe('write'), false);
+    assert.equal(defaultTools.isPlanSafe('bash'), false);
   });
 
-  it('mcp 与 todo 不在核心表里——它们由插件注册', () => {
-    // 回归点：MCP 曾是核心工具（19 个里的一个）。现在它的实现、工具与来源发现都在
-    // plugins/sph-mcp，核心表里不该再有 mcp；插件被 [plugins] disabled 关掉时，
-    // 模型看到的就是一张没有 mcp 的工具表。
-    assert.equal(tools.some((tool) => tool.name === 'mcp'), false);
-    assert.equal(defaultTools.find('mcp'), undefined);
-    assert.equal(tools.some((tool) => tool.name === 'todo'), false);
-    assert.equal(defaultTools.find('todo'), undefined);
-    // plan 插件的两个工具也不在核心表里。
-    assert.equal(tools.some((tool) => tool.name === 'enter_plan_mode'), false);
-    assert.equal(defaultTools.find('exit_plan_mode'), undefined);
+  it('插件工具不在核心表里', () => {
+    // 关掉对应插件后，模型看到的工具表里不该再有这些名字。
+    for (const name of ['mcp', 'todo', 'enter_plan_mode', 'exit_plan_mode', 'subagent', 'send_subagent_message']) {
+      assert.equal(tools.some((tool) => tool.name === name), false, name);
+      assert.equal(defaultTools.find(name), undefined, name);
+    }
   });
 });

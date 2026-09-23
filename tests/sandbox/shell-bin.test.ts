@@ -81,6 +81,14 @@ describe('Windows bash 解析', {
     assert.equal(resolved(), bash.toLowerCase());
   });
 
+  it('PATH 上第一份 git 没有 bash 时继续找下一份', () => {
+    const bare = touch(join('bare', 'cmd', 'git.exe'));
+    const git = touch(join('Git', 'cmd', 'git.exe'));
+    const bash = touch(join('Git', 'bin', 'bash.exe'));
+    process.env.PATH = [dirname(bare), dirname(git)].join(delimiter);
+    assert.equal(resolved(), bash.toLowerCase());
+  });
+
   it('WSL 入口排在真 bash 之前时跳过它继续找', () => {
     process.env.SystemRoot = join(root, 'Windows');
     const wsl = touch(join('Windows', 'System32', 'bash.exe'));

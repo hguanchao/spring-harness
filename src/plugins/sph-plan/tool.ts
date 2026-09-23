@@ -19,6 +19,9 @@ export const enterPlanModeTool: ToolSpec = {
   name: 'enter_plan_mode',
   description:
     'Use enter_plan_mode when a task has ambiguity about the right approach or when the user asks you to write a plan. It switches to read-only plan mode so you can explore and design before any implementation.',
+  prompt:
+    'Use enter_plan_mode when a task has ambiguity about the right approach or when the user asks you to write a plan. It is a read-only phase: explore, then present the plan with exit_plan_mode.',
+  planSafe: true,
   schema: { type: 'object', properties: {} },
   async execute(_args, ctx: ToolContext): Promise<ToolResult> {
     if (!ctx.setPlanMode || !ctx.planMode) {
@@ -42,6 +45,9 @@ export const exitPlanModeTool: ToolSpec = {
   name: 'exit_plan_mode',
   description:
     'Use exit_plan_mode after you have finished writing the plan in plan mode. Send the COMPLETE markdown, starting with a # heading that names it. The user may approve (carry out the plan from your next step) or keep planning — their feedback comes back in this result; revise and present again.',
+  prompt:
+    'Use exit_plan_mode after you have finished the plan in plan mode. Send the complete markdown starting with a # heading. The user may approve or send you back to revise.',
+  planSafe: true,
   schema: {
     type: 'object',
     properties: {

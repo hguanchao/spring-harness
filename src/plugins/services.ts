@@ -185,7 +185,7 @@ export interface TodoService {
 }
 
 /** `todo` 服务的注册名。插件与核心都引这里，避免两处各写一个字符串。 */
-export const TODO_SERVICE = 'todo';
+export const TODO_SERVICE = 'sph-todo';
 
 /** todo 服务缺席时的默认值：空清单、可安全调用。 */
 export const EMPTY_TODO: TodoService = {
@@ -207,20 +207,21 @@ export function todoEventData(items: readonly TodoItem[]): TodoEventData {
 // plan mode 接缝
 //
 // plan mode 是「策略」而非「数据」：它拦截副作用工具、注入引导正文、走用户审批。
-// 核心保留 loop 的**执行点**（拒绝调用发生在 runTurn 里），但「拦哪些工具、引导词
-// 是什么、计划长什么样」都由 plan 插件声明——否则核心又要按名字猜插件工具。
+// 核心保留 loop 的**执行点**（拒绝调用发生在 runTurn 里）。默认按工具的 planSafe
+// 能力拦截；插件只覆盖按参数才能判定的例外（只读子代理），并提供引导词与计划格式。
 //
-// 分界线的检验：`[plugins] disabled = ["plan"]` 时，核心不引用 plan 插件的实现，
-// 但 loop 的拦截点仍在（它面对的是**空拦截表**——没有工具被拦，plan mode 也就
-// 无法被进入，因为 enter_plan_mode 工具本身不在工具表里）。
-
-/** 一个工具在 plan mode 下是否应被拦截。按能力声明，不按名字猜。 */
-export type PlanBlockedPredicate = (toolName: string, args: Record<string, unknown>) => boolean;
+// 分界线的检验：`[plugins] disabled = ["sph-plan"]` 时，核心不引用该插件的实现。
+// enter_plan_mode 不在工具表里，plan mode 进不去，拦截点也就不会被问到。
 
 /** plan mode 的宿主能力面：核心把执行点交给插件声明，插件把行为交给核心执行。 */
 export interface PlanModeSeam {
-  /** 是否拦截这个工具调用。explore 子代理等豁免在此判定。 */
-  isBlocked(toolName: string, args: Record<string, unknown>): boolean;
+  /**
+   * 覆盖默认的 planSafe 判定。
+   *
+   * true 强制拦截，false 强制放行，undefined 交给工具自己的 planSafe。
+   * 只读子代理是 false：名字说明不了它能不能写，要看参数。
+   */
+  isBlocked(toolName: string, args: Record<string, unknown>): boolean | undefined;
   /** 拦截理由；isBlocked 为 true 时必有。 */
   blockedReason(toolName: string): string;
   /** 引导正文（随跨轮次状态注入为尾部 user 消息）。 */
@@ -234,7 +235,7 @@ export interface PlanModeSeam {
 }
 
 /** plan mode 服务的注册名。核心与插件都引这里。 */
-export const PLAN_MODE_SERVICE = 'plan';
+export const PLAN_MODE_SERVICE = 'sph-plan';
 
 // ---------------------------------------------------------------------------
 // sandbox 后端接缝
@@ -257,7 +258,25 @@ import type { SandboxHandle, SandboxMode } from '../sandbox/types.js';
 export type SandboxBackendFactory = (
   mode: SandboxMode,
   workspaceRoot: string,
+  /** 核心创建的会话临时目录；清理路径由核心收口，后端必须用这一份。 */
+  tempDir: string,
 ) => Promise<SandboxHandle>;
 
 /** `sandbox` 服务的注册名。核心与插件都引这里。 */
-export const SANDBOX_SERVICE = 'sandbox';
+export const SANDBOX_SERVICE = 'sph-sandbox';
+
+// ---------------------------------------------------------------------------
+// 子代理目录接缝
+//
+// plan mode 要知道一次 subagent 调用会不会写文件，而这取决于 agent 定义，不取决于
+// 工具名字。定义在 sph-subagent 里，sph-plan 不能 import 它，所以只留这一小条：
+// 按名字查这份定义会不会写。
+
+/** 子代理目录里 plan mode 需要的那一点。 */
+export interface SubagentCatalog {
+  /** 未知名字返回 undefined。 */
+  find(name: string): { writes: boolean } | undefined;
+}
+
+/** `sph-subagent` 服务的注册名。 */
+export const SUBAGENT_SERVICE = 'sph-subagent';
