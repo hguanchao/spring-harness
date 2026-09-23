@@ -330,8 +330,6 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     if (!this.projection.modelResponded) return;
     this.sessionTitleAttempted = true;
     void generateSessionTitle(this.client, prompt, draft, {
-      // 主代理同款工具集：免费档网关按请求形态放行，不带会被当外部 API 滥用拒掉。
-      tools: (this.deps.tools ?? defaultTools).schemas(),
       onUsage: (usage) => this.recordAuxUsage(usage, 'title'),
     }).then((title) => {
       if (title === undefined) return;

@@ -7,7 +7,7 @@
  */
 
 import { API_PROTOCOLS, type ApiProtocol } from '../../config/load.js';
-import { appendModelDeclaration, splitProviderModel, type ProviderDeclaration } from '../../config/registry.js';
+import { appendModelDeclaration, type ProviderDeclaration } from '../../config/registry.js';
 import { sphModelsPath } from '../../home.js';
 import { displayNameForModel, listAvailableModels } from '../sph-llm/models.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../sph-llm/openai.js';
@@ -66,7 +66,8 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
   const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
   const items: SelectItem[] = providers.flatMap((provider) =>
     provider.models.map((declared) => {
-      const value = provider.name === host.currentProvider() ? declared.id : `${provider.name}/${declared.id}`;
+      // 模型 id 可以含 `/`，菜单值不能再靠斜杠把 provider 和 id 粘在一起。
+      const value = `${provider.name}\u001f${declared.id}`;
       const isCurrent = provider.name === host.currentProvider() && declared.id === host.currentModel();
       return {
         value,
@@ -88,8 +89,12 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
     // 主列贴内容收紧：默认 32 列会让短模型名后面拖一长条空白，四列观感才散。
     primaryColumnWidth: labelColumnWidth + 2,
   });
-  if (!selected || selected.value === `${host.currentProvider()}/${host.currentModel()}`) return;
-  const { provider, model } = splitProviderModel(providers, selected.value);
+  if (!selected) return;
+  const splitAt = selected.value.indexOf('\u001f');
+  if (splitAt <= 0) return;
+  const provider = selected.value.slice(0, splitAt);
+  const model = selected.value.slice(splitAt + 1);
+  if (provider === host.currentProvider() && model === host.currentModel()) return;
   host.applyModel(model, provider);
 }
 
@@ -145,6 +150,7 @@ export async function commandProvider(host: SettingsCommandHost, argument = ''):
   let catalogUnavailable = false;
   try {
     fetched = await listAvailableModels(provider.baseUrl, provider.apiKey, {
+      api: provider.api,
       headers: provider.headers,
       signal: AbortSignal.timeout(PROVIDER_FETCH_TIMEOUT_MS),
     });

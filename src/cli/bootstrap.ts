@@ -45,7 +45,7 @@ import {
   findProvider,
   loadRegistry,
   resolveModel,
-  splitProviderModel,
+
   type ModelRegistry,
   type ResolvedModel,
 } from '../config/registry.js';
@@ -88,6 +88,8 @@ export interface BootstrapOptions {
   /** `--resume <id>`：打开指定会话。 */
   resumeId?: string;
   model?: string;
+  /** `--provider`：models.json 里的提供商名。不从模型 id 里拆。 */
+  provider?: string;
   api?: ApiProtocol;
   effort?: ReasoningEffort;
   maxTokens?: number;
@@ -166,16 +168,10 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   // 代理是进程级出网开关，必须在任何可能出网的步骤（MCP、模型目录预热）之前装好。
   applyProxy(config.proxy);
 
-  // `--model` 支持 `provider/id` 限定（id 含斜杠且前缀不是已声明 provider 名时仍当模型 id）。
-  // 命中的模型若是声明的，其 contextWindow / maxTokens / api 一并生效——否则每换一次模型
-  // 都要手改配置，忘了就把窗口算错。显式 CLI 参数仍然优先。
-  let providerName = config.provider;
-  let effectiveModel = config.model;
-  if (options.model !== undefined) {
-    const split = splitProviderModel(registry.providers, options.model);
-    if (split.provider !== undefined) providerName = split.provider;
-    effectiveModel = split.model;
-  }
+  // `--model` 整串就是模型 id，不从斜杠里猜 provider。换提供商用 `--provider`。
+  // 命中的模型若是声明的，其 contextWindow / maxTokens / api 一并生效。
+  const providerName = options.provider ?? config.provider;
+  const effectiveModel = options.model ?? config.model;
   if (providerName !== config.provider || effectiveModel !== config.model || options.api !== undefined) {
     const provider = findProvider(registry, providerName);
     const resolved = resolveModel(provider, effectiveModel, { apiOverride: options.api });

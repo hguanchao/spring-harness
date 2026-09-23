@@ -1,7 +1,5 @@
 import {
   degradeRequestCaps,
-  degradeSilentCompat,
-  detectSessionAffinity,
   initialRequestCaps,
   type CompatProfile,
   type RequestCaps,
@@ -13,68 +11,6 @@ import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js'
 import { postSseStream } from './sse.js';
 import { backoffMs, DEFAULT_MAX_RETRIES, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../../util.js';
-import { randomBytes } from 'node:crypto';
-
-const HEADER_RAND_TOKEN = /\{rand(\d+)\}/g;
-const HEADER_RAND_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-/** OpenCode id 模板记号：ses 用 desc（时间取反，新会话排前），msg 用 asc。 */
-const HEADER_OCID_TOKEN = /\{ocid:(desc|asc)\}/g;
-const OCID_RND_LEN = 14;
-
-function randBase62(length: number): string {
-  const bytes = randomBytes(length);
-  let out = '';
-  for (let i = 0; i < length; i++) out += HEADER_RAND_ALPHABET[bytes[i]! % HEADER_RAND_ALPHABET.length];
-  return out;
-}
-
-/**
- * 单调时钟：同一毫秒内重复生成时计数器自增，保证时间段严格单调。
- * 状态必须活在模块级——放函数内的话每次调用都归位，计数器就是死代码。
- * desc/asc 各自独立计数（与真实客户端一致：会话与消息两个模块各自持钟）。
- */
-const ocidClocks = new Map<string, { last: number; ctr: number }>();
-
-/**
- * OpenCode 风格 id：48 位时间片段（ms×4096+计数器的低 6 字节，12 位 hex）
- * + 14 位 base62 随机段，共 26 字符。desc 对时间整体按位取反（~v），让新会话
- * 按字典序排前——与真实客户端的 ses_/msg_ 生成完全一致（已用抓包样本验证）。
- */
-function ocid(desc: boolean): string {
-  const kind = desc ? 'desc' : 'asc';
-  const clock = ocidClocks.get(kind) ?? { last: 0, ctr: 0 };
-  const ts = Date.now();
-  clock.ctr = ts !== clock.last ? 1 : clock.ctr + 1;
-  clock.last = ts;
-  ocidClocks.set(kind, clock);
-  let v = BigInt(ts) * 0x1000n + BigInt(clock.ctr);
-  if (desc) v = ~v;
-  let time = '';
-  for (let i = 0; i < 6; i++) time += ((v >> BigInt(40 - 8 * i)) & 0xffn).toString(16).padStart(2, '0');
-  return time + randBase62(OCID_RND_LEN);
-}
-
-/**
- * 展开请求头值里的随机模板，每次 HTTP 请求（含重试）都取新值。
- * `{randN}`：N 位 base62 随机串。
- * `{ocid:desc}` / `{ocid:asc}`：OpenCode 风格 26 位 id（时间片段 + 随机段），
- * 同一种记号在同毫秒内靠计数器保证时间段单调——对齐真实客户端的 ses_/msg_。
- * 动机：opencode zen 免费档按会话/请求 id 识别流量，静态 id 会被当成同一会话
- * 复用或同一请求重放；真实客户端每次发的都是新 id，这里对齐这个行为。
- */
-export function expandHeaderTemplates(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (!value.includes('{')) {
-      out[name] = value;
-      continue;
-    }
-    out[name] = value
-      .replace(HEADER_OCID_TOKEN, (_, kind) => ocid(kind === 'desc'))
-      .replace(HEADER_RAND_TOKEN, (_, n) => randBase62(Number(n)));
-  }
-  return out;
-}
 
 /** 一个上游协议的静态差异：端点、鉴权头、请求体编码、SSE 事件解码。 */
 export interface ProtocolAdapter {
@@ -104,12 +40,7 @@ export interface SseClientOptions {
   maxTokens?: number;
   maxRetries?: number;
   /**
-   * 追加点静态请求头（如网关要求客户端标识）；与协议默认头同名时以它为准。
-   * 值支持随机模板，每次 HTTP 请求（含重试）展开成全新值：
-   * - `{rand26}`（数字 = 长度）：纯随机 base62 串。
-   * - `{ocid:desc}` / `{ocid:asc}`：OpenCode 风格 26 位 id（ses 用 desc、msg 用 asc）。
-   * 给「按会话/请求 id 判重或限并发」的上游用——静态 id 会被当成同一会话
-   * 复用/同一请求重放。
+   * models.json 里的请求头，原样附上。与协议默认头同名时以它为准。
    */
   headers?: Record<string, string>;
   /** Anthropic prompt-cache 断点开关（来自 config.prompt_cache，默认开）。 */
@@ -133,11 +64,6 @@ export interface SseClientOptions {
  */
 const MAX_DEGRADATIONS = 8;
 
-/** 空 SSE / 空完成：再发同一份请求没有意义，应立刻降级字段而不是连打 maxRetries 次。 */
-function isSilentReject(error: unknown): boolean {
-  return error instanceof RetryableError && /no SSE data events|no content/.test(error.message);
-}
-
 /**
  * 三种协议共用的流式客户端。
  *
@@ -151,7 +77,8 @@ function isSilentReject(error: unknown): boolean {
 export function createSseClient(adapter: ProtocolAdapter, options: SseClientOptions): LlmClient {
   const url = `${options.baseUrl.replace(/\/$/, '')}${adapter.path}`;
   const headers: Record<string, string> = { ...adapter.headers(options.apiKey) };
-  const sessionAffinity = options.compat?.sessionAffinity ?? detectSessionAffinity(options.baseUrl);
+  // 不按主机猜亲和头。只有 models.json 的 compat.session_affinity 点了名字才发。
+  const sessionAffinity = options.compat?.sessionAffinity ?? 'off';
   // 会话亲和头在用户自定义头**之前**：config.httpHeaders 与它们同名时以用户为准。
   if (options.sessionId !== undefined && adapter.sessionHeaders) {
     Object.assign(headers, adapter.sessionHeaders(options.sessionId, sessionAffinity));
@@ -193,7 +120,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           await postSseStream({
             url,
             // 随机模板每次请求现展开：重试也拿新 id，不带上一次的会话/请求身份。
-            headers: expandHeaderTemplates(headers),
+            headers,
             body,
             signal,
             onData: (payload) => {
@@ -238,12 +165,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           if (signal?.aborted) throw error;
           // 参数降级只在还没给用户看过任何增量时做；已经流过思考/正文就只走传输重试。
           const text = errorMessage(error);
-          const next = streamed
-            ? undefined
-            : degrade(caps, text)
-              ?? (isSilentReject(error) && degradations < MAX_DEGRADATIONS
-                ? degradeSilentCompat(caps)
-                : undefined);
+          const next = streamed || degradations >= MAX_DEGRADATIONS ? undefined : degrade(caps, text);
           if (next) {
             onRetry?.({
               attempt: degradations + 2,

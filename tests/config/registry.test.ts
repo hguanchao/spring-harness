@@ -10,7 +10,7 @@ import {
   loadRegistry,
   parseRegistry,
   resolveModel,
-  splitProviderModel,
+
   upsertModelApi,
 } from '../../src/config/registry.js';
 import { ConfigError } from '../../src/config/errors.js';
@@ -128,22 +128,6 @@ describe('resolveModel 合并', () => {
 
   it('name 未声明时 undefined，调用方回落 displayNameForModel', () => {
     assert.equal(resolveModel(main, 'claude').name, undefined);
-  });
-});
-
-describe('splitProviderModel 歧义', () => {
-  const providers = parseRegistry(REGISTRY, env).providers;
-
-  it('前缀命中 provider 名时按限定解析', () => {
-    assert.deepEqual(splitProviderModel(providers, 'cheap/ds'), { provider: 'cheap', model: 'ds' });
-  });
-
-  it('前缀不是 provider 名时整串当模型 id（nvidia/xxx 的真实形态）', () => {
-    assert.deepEqual(splitProviderModel(providers, 'nvidia/deepseek-v4'), { model: 'nvidia/deepseek-v4' });
-  });
-
-  it('无斜杠时就是模型 id', () => {
-    assert.deepEqual(splitProviderModel(providers, 'glm'), { model: 'glm' });
   });
 });
 

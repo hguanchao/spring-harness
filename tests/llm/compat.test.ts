@@ -2,10 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   degradeRequestCaps,
-  degradeSilentCompat,
-  detectSessionAffinity,
   initialRequestCaps,
-  isOfficialOpenAI,
   type RequestCaps,
 } from '../../src/plugins/sph-llm/compat.js';
 
@@ -19,22 +16,11 @@ function after(text: string, caps = initialRequestCaps('gpt-4o', true)) {
   return degradeRequestCaps(caps, text);
 }
 
-describe('initialRequestCaps 模型名启发式', () => {
-  it('o 系列与 gpt-5 首个请求就用 max_completion_tokens', () => {
-    for (const model of ['o1', 'o1-mini', 'o3-mini', 'o4-mini', 'gpt-5', 'gpt-5-mini']) {
-      assert.equal(initialRequestCaps(model, true).maxCompletionTokens, true, model);
+describe('initialRequestCaps 按协议默认字段', () => {
+  it('不看主机名，chat 先发 max_tokens', () => {
+    for (const baseUrl of [undefined, 'https://api.openai.com/v1', 'https://api.deepseek.com/v1']) {
+      assert.equal(initialRequestCaps('gpt-5', true, { baseUrl }).outputLimit, 'max_tokens', baseUrl);
     }
-  });
-
-  it('网关的厂商前缀不影响识别', () => {
-    // OpenRouter 一类网关返回 openai/o3-mini，裸名匹配才拿得准。
-    assert.equal(initialRequestCaps('openai/o3-mini', true).maxCompletionTokens, true);
-  });
-
-  it('名字只是以 o+数字开头的不误伤', () => {
-    assert.equal(initialRequestCaps('o3xxx', true).maxCompletionTokens, false);
-    assert.equal(initialRequestCaps('gpt-4o', true).maxCompletionTokens, false);
-    assert.equal(initialRequestCaps('claude-sonnet-4', true).maxCompletionTokens, false);
   });
 
   it('promptCache 原样透传，其余位取默认', () => {
@@ -48,33 +34,14 @@ describe('initialRequestCaps 模型名启发式', () => {
   });
 });
 
-describe('未知端点默认少发缓存字段', () => {
-  it('只认官方 api.openai.com', () => {
-    assert.equal(isOfficialOpenAI('https://api.openai.com/v1'), true);
-    assert.equal(isOfficialOpenAI('https://api.openai.com'), true);
-    assert.equal(isOfficialOpenAI('https://proxy.example.com/v1'), false);
-    assert.equal(isOfficialOpenAI('https://openrouter.ai/api/v1'), false);
-    assert.equal(isOfficialOpenAI('http://example.invalid/v1'), false);
-  });
-
-  it('OpenRouter 只改亲和头格式，不当成官方 OpenAI', () => {
-    assert.equal(detectSessionAffinity('https://openrouter.ai/api/v1'), 'openrouter');
-    assert.equal(detectSessionAffinity('https://api.openai.com/v1'), 'openai');
-    assert.equal(detectSessionAffinity('https://proxy.example.com/v1'), 'openai');
-  });
-
-  it('未知 URL 不发 key 与 retention', () => {
+describe('缓存字段不看主机', () => {
+  it('打开 prompt cache 就发 key，retention 仍要 compat 打开', () => {
     const caps = initialRequestCaps('gpt-4o', true, { baseUrl: 'https://proxy.example.com/v1' });
     assert.equal(caps.promptCache, true);
-    assert.equal(caps.promptCacheKey, false);
-    assert.equal(caps.promptCacheRetention, false);
-    assert.equal(caps.streamOptions, true);
-  });
-
-  it('官方 OpenAI 发 key，不发 retention', () => {
-    const caps = initialRequestCaps('gpt-4o', true, { baseUrl: 'https://api.openai.com/v1' });
     assert.equal(caps.promptCacheKey, true);
     assert.equal(caps.promptCacheRetention, false);
+    assert.equal(caps.streamOptions, true);
+    assert.equal(initialRequestCaps('gpt-4o', true, { baseUrl: 'https://api.openai.com/v1' }).promptCacheKey, true);
   });
 
   it('[compat] 覆盖推断', () => {
@@ -104,28 +71,43 @@ describe('degradeRequestCaps', () => {
       "LLM HTTP 400: Unsupported parameter: 'max_tokens' is not supported with this model."
       + " Use 'max_completion_tokens' instead.",
     );
-    assert.equal(next?.maxCompletionTokens, true);
+    assert.equal(next?.outputLimit, 'max_completion_tokens');
   });
 
-  it('反向报文：端点只认 max_tokens 时翻回来', () => {
-    const caps = { ...initialRequestCaps('o3-mini', true) };
-    assert.equal(caps.maxCompletionTokens, true);
+  it('报文点名 max_output_tokens 时换过去', () => {
+    const caps = { ...initialRequestCaps('m', true), outputLimit: 'max_completion_tokens' as const };
+    assert.equal(caps.outputLimit, 'max_completion_tokens');
     const next = degradeRequestCaps(
       caps,
-      "Unsupported parameter: 'max_tokens' is not supported by this endpoint",
+      "Unsupported parameter: 'max_tokens' is not supported by this endpoint. Use max_output_tokens.",
     );
-    assert.equal(next?.maxCompletionTokens, false);
+    assert.equal(next?.outputLimit, 'max_output_tokens');
   });
 
   it('两个名字同时出现时按「迁向新名字」处理', () => {
     // OpenAI 的真实报文就是这种形态；即便端点意图相反，下一轮会被反向规则翻回来。
     const caps = { ...initialRequestCaps('gpt-4o', true) };
-    assert.equal(caps.maxCompletionTokens, false);
+    assert.equal(caps.outputLimit, 'max_tokens');
     const next = degradeRequestCaps(
       caps,
       "Unsupported parameter: 'max_tokens' is not supported. Use 'max_completion_tokens' instead.",
     );
-    assert.equal(next?.maxCompletionTokens, true);
+    assert.equal(next?.outputLimit, 'max_completion_tokens');
+  });
+
+  it('不认识 reasoning_effort 时不再发送', () => {
+    const next = after("Unsupported parameter: 'reasoning_effort' is not supported with this model.");
+    assert.equal(next?.reasoningWire, 'off');
+  });
+
+  it('报文点名 enable_thinking 时改用通义兼容模式的布尔', () => {
+    const next = after("unknown parameter reasoning_effort. use enable_thinking instead");
+    assert.equal(next?.reasoningWire, 'enable_thinking');
+  });
+
+  it('Anthropic 要求 adaptive 时从预算思考换过去', () => {
+    const next = after("budget_tokens is not supported for this model. Use thinking.type adaptive instead.");
+    assert.equal(next?.adaptiveThinking, true);
   });
 
   it('不认识 stream_options 时关掉它', () => {
@@ -193,17 +175,3 @@ describe('缓存路由参数的降级', () => {
   });
 });
 
-describe('degradeSilentCompat', () => {
-  it('按 stream_options → retention → key 的顺序剥，没有 unsupported 字样也能降', () => {
-    let caps = cacheOn();
-    caps = degradeSilentCompat(caps)!;
-    assert.equal(caps.streamOptions, false);
-    assert.equal(caps.promptCacheRetention, true);
-    caps = degradeSilentCompat(caps)!;
-    assert.equal(caps.promptCacheRetention, false);
-    assert.equal(caps.promptCacheKey, true);
-    caps = degradeSilentCompat(caps)!;
-    assert.equal(caps.promptCacheKey, false);
-    assert.equal(degradeSilentCompat(caps), undefined);
-  });
-});

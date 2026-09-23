@@ -8,11 +8,22 @@
  * 不把协议事件表塞进这里。
  */
 
-export const THINKING_KEYS = ['reasoning_content', 'reasoning', 'thinking'] as const;
+export const THINKING_KEYS = ['reasoning_content', 'reasoning', 'reasoning_text', 'thinking'] as const;
 export const TEXT_KEYS = ['content', 'text'] as const;
-export const PROMPT_TOKEN_KEYS = ['prompt_tokens', 'input_tokens'] as const;
-export const COMPLETION_TOKEN_KEYS = ['completion_tokens', 'output_tokens'] as const;
-export const TOTAL_TOKEN_KEYS = ['total_tokens'] as const;
+export const PROMPT_TOKEN_KEYS = ['prompt_tokens', 'input_tokens', 'prompt_token_count', 'input_token_count'] as const;
+export const COMPLETION_TOKEN_KEYS = [
+  'completion_tokens',
+  'output_tokens',
+  'candidates_token_count',
+  'output_token_count',
+] as const;
+export const TOTAL_TOKEN_KEYS = ['total_tokens', 'total_token_count'] as const;
+export const CACHED_TOKEN_KEYS = [
+  'prompt_cache_hit_tokens',
+  'cached_tokens',
+  'cache_read_input_tokens',
+  'cached_content_token_count',
+] as const;
 
 export function firstString(row: Record<string, unknown>, keys: readonly string[]): string | undefined {
   for (const key of keys) {

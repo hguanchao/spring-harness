@@ -363,20 +363,3 @@ function mergeCompat(
   return { ...base, ...override };
 }
 
-/**
- * 解析 `--model` 的 provider 限定形式 `provider/model`。
- *
- * 歧义处理：模型 id 本身可能含斜杠（`nvidia/deepseek-v4-flash`）。只有当第一个 `/`
- * 之前的部分**命中已声明的 provider 名**时才当限定，否则整串当模型 id——两种真实情况
- * 都不误判。
- */
-export function splitProviderModel(
-  providers: readonly ProviderDeclaration[],
-  spec: string,
-): { provider?: string; model: string } {
-  const slash = spec.indexOf('/');
-  if (slash <= 0) return { model: spec };
-  const head = spec.slice(0, slash);
-  if (!providers.some((item) => item.name === head)) return { model: spec };
-  return { provider: head, model: spec.slice(slash + 1) };
-}

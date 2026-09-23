@@ -35,6 +35,33 @@ describe('chat.completions 思考字段', () => {
     assert.equal(reply.text, 'pong');
   });
 
+  it('认 reasoning_text 与 reasoning_details 里的文本', () => {
+    const acc = newSseAcc();
+    applySsePayload(JSON.stringify({ choices: [{ delta: { reasoning_text: 'step' } }] }), acc);
+    applySsePayload(
+      JSON.stringify({ choices: [{ delta: { reasoning_details: [{ text: ' one' }, { summary: ' two' }] } }] }),
+      acc,
+    );
+    assert.equal(finishStream(acc).thinking, 'step one two');
+  });
+
+  it('用量认 Gemini 风格的 *_token_count', () => {
+    const acc = newSseAcc();
+    applySsePayload(
+      JSON.stringify({
+        choices: [{ delta: { content: 'x' } }],
+        usage: { prompt_token_count: 3, candidates_token_count: 1, total_token_count: 4, cached_content_token_count: 2 },
+      }),
+      acc,
+    );
+    assert.deepEqual(finishStream(acc).usage, {
+      promptTokens: 3,
+      completionTokens: 1,
+      totalTokens: 4,
+      cachedTokens: 2,
+    });
+  });
+
   it('用量认 input_tokens / output_tokens', () => {
     const acc = newSseAcc();
     applySsePayload(

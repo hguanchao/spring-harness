@@ -8,7 +8,6 @@ import { MODEL_SERVICE, type ModelClientOptions, type ModelService } from '../se
 import { anthropicAdapter } from './anthropic.js';
 import { openaiAdapter } from './openai.js';
 import { responsesAdapter } from './responses.js';
-import { mergePresetHeaders } from './presets.js';
 import { createSseClient, type ProtocolAdapter } from './stream-client.js';
 
 const adapters = new Map<string, ProtocolAdapter>([
@@ -29,7 +28,7 @@ export function createClient(options: ModelClientOptions): ReturnType<ModelServi
   if (!adapter) throw new Error(`unknown api protocol: ${api}`);
   return createSseClient(adapter, {
     ...conn,
-    headers: mergePresetHeaders(options.baseUrl, headers ?? {}),
+    headers: headers ?? {},
   });
 }
 

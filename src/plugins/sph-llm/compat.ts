@@ -1,13 +1,12 @@
-import { type CompatProfile, type SessionAffinityFormat } from '../../config/primitives.js';
-import { HOST_OPENAI_API, HOST_OPENROUTER, isOpenAiApiHost, isOpenRouterHost } from '../../net/hosts.js';
+import { type CompatProfile } from '../../config/primitives.js';
 
 /**
  * 请求参数容忍度（caps）：把「同一协议在不同端点上的参数差异」收敛成一组布尔位。
  *
  * 为什么单独成模块：`chat-completions` / `responses` 是两套协议，但**同一个协议在不同
  * 端点上的可接受参数并不相同**。三种已确认的真实差异：
- * - OpenAI 的 o 系列 / gpt-5 在 chat.completions 下只认 `max_completion_tokens`，
- *   发 `max_tokens` 直接 400；
+ * - 输出上限有三个名字：`max_tokens`、`max_completion_tokens`、`max_output_tokens`。
+ *   官方 OpenAI 用第二个，Responses 用第三个，其余兼容端点用第一个；报文点名再换。
  * - `stream_options` 是 OpenAI 私有扩展，部分兼容端点遇到未知字段直接 400；
  * - Responses 的 reasoning 项在转手中转站会被拒（`encrypted_content was not issued
  *   to this caller`），而官方端点需要它来跨步保留推理状态。
@@ -24,10 +23,34 @@ import { HOST_OPENAI_API, HOST_OPENROUTER, isOpenAiApiHost, isOpenRouterHost } f
  * 能力表比每次实测更危险。
  */
 
+/**
+ * chat.completions 输出上限的字段名。
+ * Responses 协议固定用 `max_output_tokens`，不读这一位。
+ */
+export const OUTPUT_LIMIT_FIELDS = ['max_tokens', 'max_completion_tokens', 'max_output_tokens'] as const;
+export type OutputLimitField = (typeof OUTPUT_LIMIT_FIELDS)[number];
+
+/**
+ * 推理档位在 chat.completions 上的写法。报文点名另一个字段才换，不按模型名猜。
+ * `off` 表示这个端点不收任何推理开关。
+ */
+export const REASONING_WIRES = ['effort', 'object', 'thinking', 'enable_thinking', 'off'] as const;
+export type ReasoningWire = (typeof REASONING_WIRES)[number];
+
 /** 一次请求的参数形态。adapter 只读它来决定发什么字段，不感知它是猜的还是学来的。 */
 export interface RequestCaps {
-  /** chat.completions 的输出上限用 `max_completion_tokens` 而不是 `max_tokens`。 */
-  maxCompletionTokens: boolean;
+  /** chat.completions 把输出上限写进哪个字段。 */
+  outputLimit: OutputLimitField;
+  /**
+   * 推理档位怎么写。`effort` 是 `reasoning_effort`，`object` 是 `reasoning.effort`，
+   * `thinking` 是 `{ type: "enabled" }`，`enable_thinking` 是布尔。
+   */
+  reasoningWire: ReasoningWire;
+  /**
+   * Anthropic thinking 用 `type: "adaptive"`，而不是 `enabled` + `budget_tokens`。
+   * 新模型拒预算、旧模型拒 adaptive，两边都由报文翻转，不看模型名。
+   */
+  adaptiveThinking: boolean;
   /** chat.completions 发送 `stream_options: { include_usage: true }`。 */
   streamOptions: boolean;
   /** Responses 发送 `store: false`（对话不留在服务端）。 */
@@ -60,7 +83,9 @@ export {
 
 /** 七个能力位均为「现代端点默认形态」；各 adapter 的默认参数值。 */
 export const DEFAULT_REQUEST_CAPS: RequestCaps = Object.freeze({
-  maxCompletionTokens: false,
+  outputLimit: 'max_tokens',
+  reasoningWire: 'effort',
+  adaptiveThinking: false,
   streamOptions: true,
   sendStore: true,
   sendReasoning: true,
@@ -68,45 +93,6 @@ export const DEFAULT_REQUEST_CAPS: RequestCaps = Object.freeze({
   promptCacheKey: true,
   promptCacheRetention: true,
 });
-
-/**
- * 已知强制 `max_completion_tokens` 的模型名。
- *
- * 只在「去掉厂商前缀后的裸名」上匹配，因为网关的命名有两种常见形态：
- * `o3-mini` 与 `openai/o3-mini`。要求数字后跟 `-` 或结尾，避免把 `o3xxx` 这类
- * 无辜名字卷进来。
- */
-const REQUIRES_MAX_COMPLETION_TOKENS = /^(o[1-9](-|$)|gpt-5(-|$))/;
-
-/** `openai/o3-mini` → `o3-mini`。取最后一段，兼容网关的厂商前缀命名。 */
-function bareModelName(model: string): string {
-  const trimmed = model.trim().toLowerCase();
-  const slash = trimmed.lastIndexOf('/');
-  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
-}
-
-function hostnameOf(baseUrl: string): string | undefined {
-  try {
-    return new URL(baseUrl).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
-}
-
-/** 只认官方 OpenAI 域名。未知网关一律当兼容端点，不维护厂商表。 */
-export function isOfficialOpenAI(baseUrl: string): boolean {
-  const host = hostnameOf(baseUrl);
-  if (host) return isOpenAiApiHost(host);
-  return new RegExp(`(?:^|[/.])${HOST_OPENAI_API.replaceAll('.', '\\.')}(?:[:/]|$)`, 'i').test(baseUrl);
-}
-
-/** URL 推断亲和头格式：只把 OpenRouter 从默认 openai 形态里摘出来。 */
-export function detectSessionAffinity(baseUrl: string): SessionAffinityFormat {
-  const host = hostnameOf(baseUrl);
-  if (host && isOpenRouterHost(host)) return 'openrouter';
-  if (!host && new RegExp(HOST_OPENROUTER.replaceAll('.', '\\.'), 'i').test(baseUrl)) return 'openrouter';
-  return 'openai';
-}
 
 export interface InitialCapsOptions {
   baseUrl?: string;
@@ -117,23 +103,25 @@ export interface InitialCapsOptions {
  * 首个请求的初始能力位。
  *
  * `promptCache` 来自配置，一票否决 Anthropic 断点与 OpenAI 系 cache 字段。
- * 未知 URL 默认不发 `prompt_cache_key` / `prompt_cache_retention`；
- * 只有官方 OpenAI API 主机才开 key。`[compat]` 覆盖推断。
+ * 输出上限先发该协议的文档默认名（chat 是 `max_tokens`）。端点报文点了别的名字再换。
+ * `prompt_cache_key` 在打开 prompt cache 时发出，被拒就摘掉。`prompt_cache_retention`
+ * 只有 compat 显式打开才发。不看主机名。
  */
 export function initialRequestCaps(
-  model: string,
+  _model: string,
   promptCache: boolean,
   options: InitialCapsOptions = {},
 ): RequestCaps {
-  const official = options.baseUrl !== undefined && isOfficialOpenAI(options.baseUrl);
   const override = options.compat;
   return {
-    maxCompletionTokens: REQUIRES_MAX_COMPLETION_TOKENS.test(bareModelName(model)),
+    outputLimit: 'max_tokens',
+    reasoningWire: 'effort',
+    adaptiveThinking: false,
     streamOptions: override?.streamOptions ?? true,
     sendStore: true,
     sendReasoning: true,
     promptCache,
-    promptCacheKey: promptCache && (override?.promptCacheKey ?? official),
+    promptCacheKey: promptCache && (override?.promptCacheKey ?? true),
     promptCacheRetention: promptCache && (override?.promptCacheRetention ?? false),
   };
 }
@@ -178,21 +166,61 @@ function mentionsParam(text: string, name: string): boolean {
  * 现实中 `max_tokens` 是正在被取代的旧名，反方向极少发生。即便猜错也不会死循环：
  * 下一轮报文会命中反向规则翻回来，整体由调用方的次数上限收口。
  */
+/** 报文点了另一个上限字段就换过去。两个名字同时出现时优先 `max_completion_tokens`。 */
+function nextOutputLimit(current: OutputLimitField, text: string): OutputLimitField | undefined {
+  const hinted = /use\s+['"`]?([a-z0-9_]+)['"`]?/.exec(text)?.[1];
+  if (hinted !== undefined && hinted !== current && (OUTPUT_LIMIT_FIELDS as readonly string[]).includes(hinted)) {
+    return hinted as OutputLimitField;
+  }
+  const others = OUTPUT_LIMIT_FIELDS.filter((name) => name !== current && mentionsParam(text, name));
+  if (others.length === 0) return undefined;
+  if (others.includes('max_completion_tokens')) return 'max_completion_tokens';
+  return others[0];
+}
+
+const REASONING_FIELD: Record<Exclude<ReasoningWire, 'off'>, string> = {
+  effort: 'reasoning_effort',
+  object: 'reasoning',
+  thinking: 'thinking',
+  enable_thinking: 'enable_thinking',
+};
+
+/**
+ * 推理开关：报文点名我们没在用的字段就改用它；只说当前字段不认识就关掉。
+ * `reasoning` 和 `reasoning_effort` 用词边界分开，点名后者不会被当成前者。
+ */
+function nextReasoningWire(current: ReasoningWire, text: string): ReasoningWire | undefined {
+  if (current === 'off') return undefined;
+  const named = (Object.keys(REASONING_FIELD) as Array<Exclude<ReasoningWire, 'off'>>).find((wire) => {
+    if (wire === current) return false;
+    return mentionsParam(text, REASONING_FIELD[wire]);
+  });
+  if (named !== undefined) return named;
+  if (!UNSUPPORTED_WORDS.some((word) => text.includes(word))) return undefined;
+  if (mentionsParam(text, REASONING_FIELD[current])) return 'off';
+  return undefined;
+}
+
 export function degradeRequestCaps(caps: RequestCaps, errorText: string): RequestCaps | undefined {
   const text = errorText.toLowerCase();
 
-  if (mentionsParam(text, 'max_completion_tokens') && !caps.maxCompletionTokens) {
-    return { ...caps, maxCompletionTokens: true };
+  const limit = nextOutputLimit(caps.outputLimit, text);
+  if (limit !== undefined) return { ...caps, outputLimit: limit };
+  // 旧模型拒 adaptive、新模型拒 budget_tokens。先于推理开关处理，避免 thinking 一词被抢走。
+  if (!caps.adaptiveThinking && mentionsParam(text, 'budget_tokens') && text.includes('adaptive')) {
+    return { ...caps, adaptiveThinking: true };
   }
+  if (caps.adaptiveThinking && mentionsParam(text, 'thinking') && text.includes('adaptive') && text.includes('not supported')) {
+    return { ...caps, adaptiveThinking: false };
+  }
+  const wire = nextReasoningWire(caps.reasoningWire, text);
+  if (wire !== undefined) return { ...caps, reasoningWire: wire };
   if (caps.sendReasoning && text.includes('not issued to this caller')) {
     return { ...caps, sendReasoning: false };
   }
 
   if (!UNSUPPORTED_WORDS.some((word) => text.includes(word))) return undefined;
 
-  if (mentionsParam(text, 'max_tokens') && caps.maxCompletionTokens) {
-    return { ...caps, maxCompletionTokens: false };
-  }
   if (mentionsParam(text, 'stream_options') && caps.streamOptions) {
     return { ...caps, streamOptions: false };
   }
@@ -216,17 +244,4 @@ export function degradeRequestCaps(caps: RequestCaps, errorText: string): Reques
   return undefined;
 }
 
-/**
- * 网关不回 400、直接给空 SSE / 空完成时，按 OpenCode 兼容端点常见拒收顺序摘字段。
- *
- * 实测：同一条提示词在 OpenCode 能跑完，sph 在工具后下一跳拿到 empty body。
- * OpenCode 默认不发 `stream_options` / `prompt_cache_retention` / `prompt_cache_key`；
- * 部分中转对未知字段不报 400，而是 200 + 空 event-stream。报文里没有 unsupported 字样，
- * `degradeRequestCaps` 认不出来，只能按这个静默顺序剥。
- */
-export function degradeSilentCompat(caps: RequestCaps): RequestCaps | undefined {
-  if (caps.streamOptions) return { ...caps, streamOptions: false };
-  if (caps.promptCacheRetention) return { ...caps, promptCacheRetention: false };
-  if (caps.promptCacheKey) return { ...caps, promptCacheKey: false };
-  return undefined;
-}
+

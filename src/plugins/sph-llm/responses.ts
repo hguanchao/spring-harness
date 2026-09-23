@@ -108,11 +108,11 @@ export function buildResponsesRequest(
     ...(options.tools.length > 0
       ? {
           tools: options.tools.map((tool) => ({ type: 'function', ...flattenToolSpec(tool) })),
-          // zen/cliproxy：缺 tool_choice 会把 function_call 剥掉，只剩「继续看…」前言然后停轮。
+          // Responses 在带 tools 时的文档默认是 auto。写明，端点就不会当成没指定。
           tool_choice: 'auto',
         }
       : {}),
-    ...(effort
+    ...(caps.reasoningWire !== 'off' && effort
       ? { reasoning: REQUEST_REASONING_SUMMARY ? { effort, summary: 'auto' } : { effort } }
       : {}),
     // 仅在显式配置时发送，未配置时输出上限由端点决定。

@@ -45,12 +45,6 @@ function clampSource(text: string): string {
 }
 
 export interface SessionTitleOptions {
-  /**
-   * 主代理同款的工具定义集。opencode zen 免费档按请求形态放行：工具数不足阈值的
-   * 「迷你请求」会被 FreeTierError 拒掉（实测 12 个工具过、6 个被拒）——标题调用
-   * 必须伪装成 agent 形态才能上桌。实测模型带着工具也照常回纯文本标题。
-   */
-  tools?: unknown[];
   /** 标题调用也是真花钱，走与 review/compaction 同一条辅助用量记账。 */
   onUsage?: (usage: TokenUsage) => void;
 }
@@ -73,7 +67,7 @@ export async function generateSessionTitle(
         { role: 'system', content: SESSION_TITLE_SYSTEM },
         { role: 'user', content: sources.join('\n\n') },
       ],
-      options?.tools ?? [],
+      [],
     );
     if (reply.usage) options?.onUsage?.(reply.usage);
     return sanitizeSessionTitle(reply.text ?? '') || undefined;

@@ -1,4 +1,5 @@
 import {
+  CACHED_TOKEN_KEYS,
   COMPLETION_TOKEN_KEYS,
   firstFiniteNumber,
   firstString,
@@ -7,7 +8,7 @@ import {
   THINKING_KEYS,
   TOTAL_TOKEN_KEYS,
 } from './aliases.js';
-import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
+import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type ReasoningWire, type RequestCaps } from './compat.js';
 import { streamFrameError } from './errors.js';
 import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_RETENTION } from './prompt-cache.js';
 import type { ProtocolAdapter } from './stream-client.js';
@@ -43,11 +44,7 @@ function readCachedTokens(usage: Record<string, unknown>): number | undefined {
     const value = (details as Record<string, unknown>).cached_tokens;
     if (typeof value === 'number' && Number.isFinite(value)) return value;
   }
-  for (const key of ['prompt_cache_hit_tokens', 'cached_tokens']) {
-    const value = usage[key];
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-  }
-  return undefined;
+  return firstFiniteNumber(usage, CACHED_TOKEN_KEYS);
 }
 
 interface ToolAcc {
@@ -83,6 +80,22 @@ export function bearerJsonHeaders(apiKey: string): Record<string, string> {
     'content-type': 'application/json',
     authorization: `Bearer ${apiKey}`,
   };
+}
+
+/**
+ * chat.completions 上推理档位的几种写法。一次只发一种，避免不认识的字段把请求打成 400。
+ * 依据是各家文档和 pi 的 openai-completions：OpenAI 用 reasoning_effort，
+ * OpenRouter 用 reasoning.effort，智谱用 thinking.type，通义兼容模式用 enable_thinking。
+ */
+export function chatReasoningFields(
+  effort: Exclude<ReasoningEffort, 'off'> | undefined,
+  wire: ReasoningWire,
+): Record<string, unknown> {
+  if (effort === undefined || wire === 'off') return {};
+  if (wire === 'effort') return { reasoning_effort: effort };
+  if (wire === 'object') return { reasoning: { effort } };
+  if (wire === 'thinking') return { thinking: { type: 'enabled' } };
+  return { enable_thinking: true };
 }
 
 /** off / 未设置都不发送推理档位；其余原值透传。 */
@@ -178,11 +191,23 @@ function nextToolSlot(acc: SseAcc): number {
   return max + 1;
 }
 
+/** OpenRouter 把思考放在 `reasoning_details[]` 的 text/summary 上，而不是一个字符串。 */
+function thinkingText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const parts: string[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue;
+    const text = firstString(item as Record<string, unknown>, ['text', 'summary', 'content']);
+    if (text) parts.push(text);
+  }
+  return parts.length > 0 ? parts.join('') : undefined;
+}
+
 function applyChatDelta(acc: SseAcc, delta: ChatDelta): { textDelta?: string; thinkingDelta?: string } {
   let textDelta: string | undefined;
   let thinkingDelta: string | undefined;
   const row = delta as unknown as Record<string, unknown>;
-  const thinking = firstString(row, THINKING_KEYS);
+  const thinking = firstString(row, THINKING_KEYS) ?? thinkingText(row.reasoning_details);
   if (thinking) thinkingDelta = appendStreamDelta(acc, undefined, thinking).thinkingDelta;
   const text = firstString(row, TEXT_KEYS);
   if (text) textDelta = appendStreamDelta(acc, text).textDelta;
@@ -324,9 +349,8 @@ export function buildRequestBody(
   options: RequestBodyOptions,
   caps: RequestCaps = DEFAULT_REQUEST_CAPS,
 ): Record<string, unknown> {
-  // 输出上限的名字随端点而变：o 系列 / gpt-5 只认 max_completion_tokens，发 max_tokens 直接 400。
-  // 仅在显式配置时发送；undefined 会被 JSON.stringify 丢弃，输出上限交还端点。
-  const limitKey = caps.maxCompletionTokens ? 'max_completion_tokens' : 'max_tokens';
+  // 上限字段和推理开关都由 caps 决定。端点点名另一个名字时，degrade 改 caps 再发。
+  const effort = activeReasoningEffort(options.reasoningEffort);
   return {
     model: options.model,
     messages: options.messages.map(serializeMessage),
@@ -335,11 +359,11 @@ export function buildRequestBody(
     stream: true,
     // include_usage 是 OpenAI 私有扩展：部分兼容端点遇到未知字段直接 400，故可降级关闭。
     stream_options: caps.streamOptions ? { include_usage: true } : undefined,
-    reasoning_effort: activeReasoningEffort(options.reasoningEffort),
+    ...chatReasoningFields(effort, caps.reasoningWire),
+    [caps.outputLimit]: options.maxTokens,
     // 前缀缓存是自动的，这两个字段负责「落到同一台机器」与「保留更久」。
     prompt_cache_key: caps.promptCacheKey ? clampPromptCacheKey(options.sessionId) : undefined,
     prompt_cache_retention: caps.promptCacheRetention ? PROMPT_CACHE_RETENTION : undefined,
-    [limitKey]: options.maxTokens,
   };
 }
 

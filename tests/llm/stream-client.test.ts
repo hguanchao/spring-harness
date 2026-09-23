@@ -105,14 +105,14 @@ describe('参数降级重试', () => {
     assert.equal(bodies[2]?.max_tokens, undefined);
   });
 
-  it('o 系列首个请求就用 max_completion_tokens，不必先失败一次', async () => {
+  it('模型名不影响首个请求的上限字段', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     stubFetch(bodies, () => okResponse('unused'));
 
     await client('openai/o3-mini').complete(messages, []);
     assert.equal(bodies.length, 1);
-    assert.equal(bodies[0]?.max_completion_tokens, 100);
-    assert.equal(bodies[0]?.max_tokens, undefined);
+    assert.equal(bodies[0]?.max_tokens, 100);
+    assert.equal(bodies[0]?.max_completion_tokens, undefined);
   });
 
   it('端点不认识 stream_options 时摘掉它重发', async () => {
@@ -207,21 +207,17 @@ describe('空流与截断', () => {
     assert.equal(calls, 3);
   });
 
-  it('空 SSE 先摘 stream_options 再发，而不是同一份请求连打', async () => {
-    const bodies: Array<Record<string, unknown>> = [];
-    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-      bodies.push(body);
-      if (body.stream_options) {
-        return new Response('', { headers: { 'content-type': 'text/event-stream' } });
-      }
+  it('空 SSE 按传输抖动重试同一份请求', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return new Response('', { headers: { 'content-type': 'text/event-stream' } });
       return okResponse('ok');
     }) as typeof fetch;
 
     const reply = await client().complete(messages, []);
     assert.equal(reply.text, 'ok');
-    assert.equal(bodies[0]?.stream_options !== undefined, true);
-    assert.equal(bodies[1]?.stream_options, undefined);
+    assert.equal(calls, 2);
   });
 
   it('finish=stop 但零内容按 EMPTY_RESPONSE 重试', async () => {
@@ -485,7 +481,7 @@ describe('会话缓存路由', () => {
     }) as typeof fetch;
   }
 
-  it('未知网关有 sessionId 也不发 cache key / retention，仍带 openai 形态亲和头', async () => {
+  it('有 sessionId 就发 cache key，不发 retention，也不猜亲和头', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const headers: Array<Record<string, string>> = [];
     stubWithHeaders(bodies, headers);
@@ -499,13 +495,13 @@ describe('会话缓存路由', () => {
     });
     await c.complete(messages, []);
 
-    assert.equal(bodies[0]?.prompt_cache_key, undefined);
+    assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
     assert.equal(bodies[0]?.prompt_cache_retention, undefined);
-    assert.equal(headers[0]?.session_id, 'sess-abc');
-    assert.equal(headers[0]?.['x-session-affinity'], 'sess-abc');
+    assert.equal(headers[0]?.session_id, undefined);
+    assert.equal(headers[0]?.['x-session-affinity'], undefined);
   });
 
-  it('官方 OpenAI 发 prompt_cache_key，不发 retention', async () => {
+  it('换主机也不改这套字段', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const headers: Array<Record<string, string>> = [];
     stubWithHeaders(bodies, headers);
@@ -520,7 +516,7 @@ describe('会话缓存路由', () => {
 
     assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
     assert.equal(bodies[0]?.prompt_cache_retention, undefined);
-    assert.equal(headers[0]?.session_id, 'sess-abc');
+    assert.equal(headers[0]?.session_id, undefined);
   });
 
   it('[compat] 可让未知网关发 key 与 retention', async () => {
@@ -541,7 +537,7 @@ describe('会话缓存路由', () => {
     assert.equal(bodies[0]?.prompt_cache_retention, '24h');
   });
 
-  it('OpenRouter URL 只发 x-session-id', async () => {
+  it('未声明 session_affinity 时不发厂商亲和头', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const headers: Array<Record<string, string>> = [];
     stubWithHeaders(bodies, headers);
@@ -554,9 +550,9 @@ describe('会话缓存路由', () => {
     });
     await c.complete(messages, []);
 
-    assert.equal(headers[0]?.['x-session-id'], 'sess-abc');
+    assert.equal(headers[0]?.['x-session-id'], undefined);
     assert.equal(headers[0]?.session_id, undefined);
-    assert.equal(bodies[0]?.prompt_cache_key, undefined);
+    assert.equal(bodies[0]?.prompt_cache_key, 'sess-abc');
   });
 
   it('不传 sessionId 时不发缓存路由参数与亲和头', async () => {

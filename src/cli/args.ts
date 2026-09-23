@@ -15,6 +15,7 @@ export interface CliArgs {
   trust: boolean;
   sandbox?: SandboxMode;
   model?: string;
+  provider?: string;
   effort?: ReasoningEffort;
   api?: ApiProtocol;
   /** 单次输出上限；--max-tokens 覆盖 config.toml 的 max_tokens。 */
@@ -44,8 +45,9 @@ Usage:
                                     (subagent transcripts are listed only under their main session)
   sph export [--format md|json|html] [--session id]   Export a session to stdout
   sph --rpc                 JSONL RPC on stdin/stdout (prompt / abort / quit)
-  sph --model <model>       Override the configured model for this process
-                            ("provider/id" also switches provider from models.json)
+  sph --model <model>       Override the configured model id for this process
+                            (the string is the id as written, including any "/")
+  sph --provider <name>     Use this provider from models.json (with --model, or alone)
   sph --effort <level>      Reasoning effort: off | low | medium | high | xhigh | max
   sph --max-tokens <n>      Max output tokens per completion (overrides config max_tokens)
   sph --api <protocol>      Upstream protocol: chat-completions | responses | anthropic-messages
@@ -139,6 +141,9 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (arg === '--model') {
       out.model = argv[++i];
       if (!out.model) throw new Error('--model requires a model name');
+    } else if (arg === '--provider') {
+      out.provider = argv[++i];
+      if (!out.provider) throw new Error('--provider requires a provider name');
     } else if (arg === '--effort') {
       const value = argv[++i];
       if (!value || !(REASONING_EFFORTS as readonly string[]).includes(value)) {

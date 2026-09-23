@@ -117,9 +117,14 @@ export function toAnthropicRequest(
   // thinking 归一在消息循环之前：回放块要按「本次请求是否启用 thinking」门控——
   // 关掉 effort 后历史里的 thinking 块不再发送，避免官方 API 对禁用态报错。
   const effort = options.reasoningEffort;
-  const thinking = effort && effort !== 'off'
-    ? { type: 'enabled', budget_tokens: THINKING_BUDGET[effort] }
-    : undefined;
+  const thinkingOn = effort !== undefined && effort !== 'off';
+  // 旧文档是 enabled + budget_tokens；新文档是 adaptive + output_config.effort。
+  // 先发预算（兼容网关和旧模型），报文要求 adaptive 再换，不按模型名分支。
+  const thinking = !thinkingOn
+    ? undefined
+    : caps.adaptiveThinking
+      ? { type: 'adaptive' }
+      : { type: 'enabled', budget_tokens: THINKING_BUDGET[effort] };
   // Anthropic 协议里 tool_result 是 user 消息的 content 块；连续多条 tool 消息并入同一条 user。
   let pendingToolResults: AnthropicBlock[] = [];
   const flushToolResults = (): void => {
@@ -196,7 +201,7 @@ export function toAnthropicRequest(
   return {
     model: options.model,
     stream: true,
-    max_tokens: thinking ? maxTokens + THINKING_BUDGET[effort as Exclude<ReasoningEffort, 'off'>] : maxTokens,
+    max_tokens: thinking?.type === 'enabled' ? maxTokens + THINKING_BUDGET[effort as Exclude<ReasoningEffort, 'off'>] : maxTokens,
     // 缓存断点要求 system 是块数组而不是裸字符串。
     ...(systemText === ''
       ? {}
@@ -206,6 +211,9 @@ export function toAnthropicRequest(
             : systemText,
         }),
     ...(thinking ? { thinking } : {}),
+    ...(thinking?.type === 'adaptive'
+      ? { output_config: { effort: effort === 'xhigh' || effort === 'max' ? 'max' : effort } }
+      : {}),
     ...(tools.length > 0 ? { tools } : {}),
     messages,
   };
@@ -347,9 +355,8 @@ export function applyAnthropicEvent(payload: string, acc: SseAcc): { textDelta?:
       // 所以这里是「先顶层、再回退」，不是替换。
       const raw = data.usage ?? data.delta?.usage;
       if (raw) {
-        // 该事件的计数是**累积值**，直接覆盖即可。但缺字段不能把 message_start 已经拿到的
-        // 真值抹成 0：zen 的 message_start 恒给 input_tokens: 0、真值只在这里，而规范的
-        // message_delta 又常常只带 output_tokens。两边都得能补上对方缺的那半。
+        // 该事件的计数是累积值。缺字段或占位 0 不能抹掉 message_start 已经拿到的真值：
+        // 有的端点先给 input_tokens: 0，message_delta 又常常只带 output_tokens。
         const next = readAnthropicUsage(raw);
         const previous = acc.usage;
         const prompt = next.prompt > 0 ? next.prompt : (previous?.promptTokens ?? 0);

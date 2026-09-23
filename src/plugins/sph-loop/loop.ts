@@ -570,12 +570,6 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
   const allowed = options.allowedTools;
 
-  // opencode zen 免费档按「请求是否带 bash 工具定义」判定流量来自 OpenCode——实测这是
-  // 唯一开关字段：缺 bash 即 403 FreeTierError（文案谎称客户端身份），system、随机 id、
-  // 并发、请求体其余字段全部无关。explore 子代理是只读工具集、天生缺 bash，请求侧补上
-  // schema 过闸；执行侧仍由下方 allowed 守卫拦截，模型真去调用只会得到明确报错。
-  const requestTools = allowed && !allowed.has('bash') ? new Set([...allowed, 'bash']) : allowed;
-
   for (let step = 0; step < MAX_STEPS; step++) {
     if (options.signal?.aborted) throw new Error('aborted');
     assertBudget();
@@ -618,7 +612,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         // stub 边界冻结：首次由投影回报，之后不再随轮次前移——前移一格就是一次
         // 历史中段改写，缓存从切点起全部作废。摘要落地时重置（摘要即新边界）。
         stubFromSession,
-        tools: registry.schemas(requestTools),
+        tools: registry.schemas(allowed),
         // 压缩摘要的花费也是真花钱，一样计入预算（未配 onAuxUsage 时也要计）。
         onUsage: (usage: TokenUsage) => {
           chargeTokens(usage.promptTokens, usage.completionTokens);
@@ -634,7 +628,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       // 前缀分段观测：tools / system 本该是会话常量，消息序列本该只追加。任何一段
       // 中途变更都直接解释「为什么这轮缓存没命中」，落成事件与 cache_miss 呼应。
       const snapshot: PrefixSnapshot = {
-        toolsHash: hashText(JSON.stringify(registry.schemas(requestTools)) ?? ''),
+        toolsHash: hashText(JSON.stringify(registry.schemas(allowed)) ?? ''),
         systemHash: hashText(systemPrompt),
         messageHashes: projection.messages.map((message) => hashMessage(message)),
       };
@@ -682,7 +676,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       try {
         reply = await options.client.complete(
           projected,
-          registry.schemas(requestTools),
+          registry.schemas(allowed),
           options.signal,
           (delta) => {
             if (delta.thinking) {

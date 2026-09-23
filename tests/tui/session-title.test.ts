@@ -63,7 +63,7 @@ describe('generateSessionTitle', () => {
     assert.ok(!seen[1]!.content.includes('assistant:'));
   });
 
-  it('tools 选项透传给 complete（免费档网关按请求形态放行）；缺省为空数组', async () => {
+  it('标题请求不带工具', async () => {
     let seenTools: unknown;
     const client = {
       async complete(_messages: unknown, tools: unknown) {
@@ -71,9 +71,6 @@ describe('generateSessionTitle', () => {
         return { text: 't' };
       },
     } as LlmClient;
-    const tools = [{ type: 'function', name: 'shell' }];
-    await generateSessionTitle(client, 'p', 'r', { tools });
-    assert.equal(seenTools, tools);
     await generateSessionTitle(client, 'p', 'r');
     assert.deepEqual(seenTools, []);
   });

@@ -150,6 +150,16 @@ describe('toAnthropicRequest 输出上限', () => {
     assert.equal(body.max_tokens, 8192 + 4096);
   });
 
+  it('adaptive 思考不叠加预算，effort 进 output_config', () => {
+    const body = toAnthropicRequest(
+      { model: 'm', messages: [user('hi')], tools: [], maxTokens: 8192, reasoningEffort: 'xhigh' },
+      { ...DEFAULT_REQUEST_CAPS, adaptiveThinking: true },
+    );
+    assert.deepEqual(body.thinking, { type: 'adaptive' });
+    assert.deepEqual(body.output_config, { effort: 'max' });
+    assert.equal(body.max_tokens, 8192);
+  });
+
   it('未配置上限时用 8192 基数', () => {
     const body = toAnthropicRequest({ model: 'm', messages: [user('hi')], tools: [] });
     assert.equal(body.max_tokens, 8192);

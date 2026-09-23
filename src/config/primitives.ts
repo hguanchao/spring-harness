@@ -13,7 +13,7 @@ export const SESSION_AFFINITY_FORMATS = ['openai', 'openrouter', 'off'] as const
 export type SessionAffinityFormat = (typeof SESSION_AFFINITY_FORMATS)[number];
 
 /**
- * 用户在 `[compat]` 里声明的覆盖。省略的字段走 URL 推断。
+ * 用户在 `compat` 里声明的覆盖。省略的字段走协议默认，不按主机名推断。
  * 类型留在宿主：配置解析不能依赖 sph-llm 的实现。
  */
 export interface CompatProfile {
@@ -40,7 +40,7 @@ function parseOptionalBoolean(value: unknown, key: string): boolean | undefined 
   return value;
 }
 
-/** `[compat]`：省略的字段走 URL 推断；空表等价于未配置。 */
+/** `compat`：省略的字段走协议默认；空表等价于未配置。 */
 export function parseCompat(value: unknown, key: string): CompatProfile | undefined {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {

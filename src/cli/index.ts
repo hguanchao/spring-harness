@@ -128,6 +128,7 @@ async function bootstrap(
       continueSession: args.continueSession,
       resumeId: args.resumeId,
       model: args.model,
+      provider: args.provider,
       api: args.api,
       effort: args.effort,
       maxTokens: args.maxTokens,
@@ -198,7 +199,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
     for (const warning of runtime.plugins.warnings()) process.stderr.write(`${warning}\n`);
 
     // 优先级：命令行 > 配置文件 > 内置默认。这样 /permission 写回 config 后下次启动仍生效。
-    // config.model 是 bootstrap 折叠后的生效模型（--model 的 provider/id 限定已在此解析）。
+    // config.model 是 bootstrap 折叠后的生效模型（--model 整串即 id，--provider 另选提供商）。
     const approvalMode: ApprovalMode = args.approval ?? config.approval ?? 'ask';
     const client = runtime.makeClient({
       model: config.model,
