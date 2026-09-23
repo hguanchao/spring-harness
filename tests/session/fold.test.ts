@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { foldSessionState, sessionEventData } from '../../src/session/fold.js';
+import { foldSessionState, sessionEventData } from '../../src/plugins/sph-session/fold.js';
 import type { SessionRecord } from '../../src/session/types.js';
 
 function recapEvent(data: Record<string, unknown>): SessionRecord {

@@ -8,11 +8,9 @@ import {
 } from '../permission/policy.js';
 import { SUBAGENT_APPROVAL_POLICIES } from '../permission/policy.js';
 import { sphConfigPath, sphModelsPath } from '../home.js';
-import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
-import type { CompatProfile } from '../llm/compat.js';
-import { DEFAULT_MAX_RETRIES } from '../llm/retry.js';
+import { DEFAULT_MAX_RETRIES, DEFAULT_SPILL_THRESHOLD, REASONING_EFFORTS, type ReasoningEffort } from '../llm/client.js';
 import type { McpServerConfig, McpPreferences } from '../plugins/services.js';
-import { DEFAULT_SPILL_THRESHOLD } from '../runtime/spill.js';
+import { type CompatProfile } from './primitives.js';
 import type { SandboxMode } from '../sandbox/types.js';
 import { ConfigError } from './errors.js';
 import { API_PROTOCOLS, type ApiProtocol } from './primitives.js';

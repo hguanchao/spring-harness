@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { InteractiveApprover, type ApprovalUi } from '../../src/tui/permission.js';
+import { InteractiveApprover, type ApprovalUi } from '../../src/plugins/sph-tui/permission.js';
 import type { ApprovalMode, ApprovalRequest } from '../../src/permission/policy.js';
 import type { GrantStore } from '../../src/permission/store.js';
 

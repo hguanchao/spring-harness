@@ -280,3 +280,144 @@ export interface SubagentCatalog {
 
 /** `sph-subagent` 服务的注册名。 */
 export const SUBAGENT_SERVICE = 'sph-subagent';
+
+// ---------------------------------------------------------------------------
+// 其余能力的接缝
+//
+// 模型、工具、技能、会话、存储、循环、调度、界面都由内置插件提供。
+// 宿主只按这些名字取服务。插件缺席时启动失败（写出缺的是哪一个），而不是静默换成另一份实现。
+// 工具没有单独的服务：sph-tools 用 registerTool 挂进工具表，宿主的核心表是空的。
+
+import type { LlmClient, ReasoningEffort } from '../llm/client.js';
+import type { ApiProtocol, CompatProfile } from '../config/primitives.js';
+import type { SessionFactory, SessionPort, SessionRecord } from '../session/types.js';
+
+/** 构造一个模型客户端需要的全部参数。`api` 选择协议适配器，其余交给传输层。 */
+export interface ModelClientOptions {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  api: ApiProtocol;
+  reasoningEffort?: ReasoningEffort;
+  maxTokens?: number;
+  headers?: Record<string, string>;
+  promptCache?: boolean;
+  sessionId?: string;
+  compat?: CompatProfile;
+  maxRetries?: number;
+}
+
+export interface ModelService {
+  createClient(options: ModelClientOptions): LlmClient;
+}
+
+/** `sph-llm` 服务的注册名。 */
+export const MODEL_SERVICE = 'sph-llm';
+
+export interface SkillEntry {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface SkillScan {
+  catalog: SkillEntry[];
+  warnings: string[];
+}
+
+export interface SkillService {
+  scan(workspaceRoot: string): SkillScan;
+  /** 技能目录根，供 /skills 展示。 */
+  roots(workspaceRoot: string): string[];
+}
+
+/** `sph-skills` 服务的注册名。 */
+export const SKILLS_SERVICE = 'sph-skills';
+
+/** `sph sessions` 列表里的一行。 */
+export interface SessionInfo {
+  id: string;
+  mtimeMs: number;
+  messages: number;
+  preview: string;
+  hits?: number;
+  subagents: number;
+  /** 子代理会话指向它的主会话。主会话没有这个字段。 */
+  parentId?: string;
+}
+
+/** 折叠结果里宿主要读的那几项。插件可以返回更全的对象。 */
+export interface FoldedSessionView {
+  depth: number;
+  goal?: string;
+  failures: { tool: string; excerpt: string; ts: string }[];
+  planMode: boolean;
+}
+
+export interface SessionService {
+  sessionDirFor(workspaceRoot: string): string;
+  resumeOrCreate(dir: string, workspaceRoot: string, forceNew: boolean): Promise<SessionPort>;
+  open(dir: string, id: string): SessionPort;
+  /** 把这个 id 记成工作区的当前会话。 */
+  activate(dir: string, id: string, workspaceRoot: string): void;
+  acquireLock(dir: string, id: string): () => void;
+  isLockError(error: unknown): boolean;
+  factory: SessionFactory;
+  list(dir: string, options?: { search?: string; includeSubagents?: boolean }): Promise<SessionInfo[]>;
+  fold(records: readonly SessionRecord[]): FoldedSessionView;
+  exportMarkdown(session: SessionPort): string;
+  exportJson(session: SessionPort): string;
+  exportHtml(session: SessionPort): string;
+}
+
+/** `sph-session` 服务的注册名。 */
+export const SESSION_SERVICE = 'sph-session';
+
+export interface SpillStorePort {
+  readonly root: string;
+  persist(tool: string, content: string): string | undefined;
+}
+
+export interface StorageService {
+  open(dir: string, threshold: number): SpillStorePort;
+}
+
+/** `sph-storage` 服务的注册名。 */
+export const STORAGE_SERVICE = 'sph-storage';
+
+/** 子代理 worktree。循环与清理只依赖这两个方法。 */
+export interface WorktreePort {
+  create(workspaceRoot: string, id: string): { path: string };
+  dispose(): { kept: string[] };
+}
+
+import type { AgentDriver } from '../agent/driver.js';
+import type { JobBoardPort } from '../runtime/scheduler.js';
+
+export type { JobBoardPort };
+
+export interface LoopService {
+  runTurn: AgentDriver;
+  createWorktrees(): WorktreePort;
+}
+
+/** `sph-loop` 服务的注册名。 */
+export const LOOP_SERVICE = 'sph-loop';
+
+export interface SchedulerService {
+  /** 进程内后台任务板。宿主负责创建，并在退出时 abortAll。 */
+  create(): JobBoardPort;
+}
+
+/** `sph-schedule` 服务的注册名。 */
+export const SCHEDULER_SERVICE = 'sph-schedule';
+
+export interface UiService {
+  /** 未信任工作区的全屏确认。插件自己开关屏幕，返回前屏幕已退出。 */
+  confirmTrust(workspaceRoot: string): Promise<boolean>;
+  /** 主界面。runtime 与命令行参数由宿主传入，插件按自己的依赖形状取用。 */
+  run(runtime: unknown, args: unknown): Promise<void>;
+}
+
+/** `sph-tui` 服务的注册名。 */
+export const UI_SERVICE = 'sph-tui';

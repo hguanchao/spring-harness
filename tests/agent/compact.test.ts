@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { ChatMessage } from '../../src/llm/openai.js';
+import type { ChatMessage } from '../../src/plugins/sph-llm/openai.js';
 import type { SessionMessage } from '../../src/session/types.js';
 import {
   estimateTokens,
@@ -10,7 +10,7 @@ import {
   pushSessionMessage,
   toChatMessages,
   projectContext,
-} from '../../src/agent/compact.js';
+} from '../../src/plugins/sph-loop/compact.js';
 
 function session(partial: Omit<SessionMessage, 'type' | 'ts'>): SessionMessage {
   return { type: 'message', ts: '2026-01-01T00:00:00.000Z', ...partial };

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BLOCK_GAP } from '../../../src/tui/screen/primitives.js';
-import { OSC133_ZONE_START } from '../../../src/tui/screen/utils.js';
-import { UserMessageComponent } from '../../../src/tui/components/user-message.js';
+import { BLOCK_GAP } from '../../../src/plugins/sph-tui/screen/primitives.js';
+import { OSC133_ZONE_START } from '../../../src/plugins/sph-tui/screen/utils.js';
+import { UserMessageComponent } from '../../../src/plugins/sph-tui/components/user-message.js';
 
 describe('UserMessageComponent OSC 133', () => {
   it('起点在气泡顶，不在块前空隙', () => {

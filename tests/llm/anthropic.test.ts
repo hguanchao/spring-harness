@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applyAnthropicEvent, toAnthropicRequest } from '../../src/llm/anthropic.js';
-import { DEFAULT_REQUEST_CAPS } from '../../src/llm/compat.js';
-import { finishStream, newSseAcc } from '../../src/llm/openai.js';
-import type { ChatMessage } from '../../src/llm/openai.js';
+import { applyAnthropicEvent, toAnthropicRequest } from '../../src/plugins/sph-llm/anthropic.js';
+import { DEFAULT_REQUEST_CAPS } from '../../src/plugins/sph-llm/compat.js';
+import { finishStream, newSseAcc } from '../../src/plugins/sph-llm/openai.js';
+import type { ChatMessage } from '../../src/plugins/sph-llm/openai.js';
 
 const user = (content: string): ChatMessage => ({ role: 'user', content });
 

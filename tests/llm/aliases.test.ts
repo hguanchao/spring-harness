@@ -7,7 +7,7 @@ import {
   PROMPT_TOKEN_KEYS,
   TEXT_KEYS,
   THINKING_KEYS,
-} from '../../src/llm/aliases.js';
+} from '../../src/plugins/sph-llm/aliases.js';
 
 describe('响应字段并集', () => {
   it('思考键按 reasoning_content → reasoning → thinking', () => {

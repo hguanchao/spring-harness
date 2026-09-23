@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { scanSkills, skillRoots } from '../../src/skills/scan.js';
+import { scanSkills, skillRoots } from '../../src/plugins/sph-skills/scan.js';
 
 function writeSkill(root: string, name: string, description: string): void {
   const dir = join(root, name);

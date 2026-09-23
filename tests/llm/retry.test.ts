@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { backoffMs, retryAfterMs } from '../../src/llm/retry.js';
+import { backoffMs, retryAfterMs } from '../../src/plugins/sph-llm/retry.js';
 
 describe('retry', () => {
   it('Retry-After 秒数封顶 60s', () => {

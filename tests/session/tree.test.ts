@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { lineage, loadTip, messagesOnPath } from '../../src/session/tree.js';
+import { lineage, loadTip, messagesOnPath } from '../../src/plugins/sph-session/tree.js';
 import type { SessionRecord } from '../../src/session/types.js';
 
 function msg(id: string, parentId: string | null, content: string): SessionRecord {

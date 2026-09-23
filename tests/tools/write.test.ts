@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import { PathEscapeError } from '../../src/workspace/boundary.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
-import { writeTool } from '../../src/tools/write.js';
+import { writeTool } from '../../src/plugins/sph-tools/write.js';
 
 function ctx(root: string): ToolContext {
   return {

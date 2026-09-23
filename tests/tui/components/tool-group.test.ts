@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { TUI, TuiMouseEvent } from '../../../src/tui/screen/index.js';
-import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from '../../../src/tui/components/tool-execution.js';
-import { ToolGroupComponent } from '../../../src/tui/components/tool-group.js';
-import { selectRow } from '../../../src/tui/components/selectable-row.js';
+import type { TUI, TuiMouseEvent } from '../../../src/plugins/sph-tui/screen/index.js';
+import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from '../../../src/plugins/sph-tui/components/tool-execution.js';
+import { ToolGroupComponent } from '../../../src/plugins/sph-tui/components/tool-group.js';
+import { selectRow } from '../../../src/plugins/sph-tui/components/selectable-row.js';
 
 let renderCount = 0;
 let viewportCount = 0;
@@ -263,7 +263,7 @@ describe('思考正文统一中性灰', () => {
   it('详情里的标题/列表/序号/行内码全部压成 toolTitle 灰', async () => {
     // 思考内容是 markdown：全局主题会给列表序号上紫、行内码上蓝——
     // 推理记录是过程层，用户要求整体退成中性灰，一个彩字都不留。
-    const { theme } = await import('../../../src/tui/theme/theme.js');
+    const { theme } = await import('../../../src/plugins/sph-tui/theme/theme.js');
     const gray = colorsOf(theme.fg('toolTitle', 'x'))[0];
     const group = new ToolGroupComponent(ui);
     group.beginThinking();

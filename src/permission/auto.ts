@@ -1,5 +1,5 @@
 import type { ApprovalRequest } from './policy.js';
-import type { LlmClient, TokenUsage } from '../llm/openai.js';
+import type { LlmClient, TokenUsage } from '../llm/client.js';
 import { errorMessage } from '../util.js';
 
 export interface ClassifierVerdict {

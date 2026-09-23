@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { TuiAltScreen } from '../../src/tui/screen/tui-alt-screen.js';
-import type { Terminal } from '../../src/tui/screen/terminal.js';
-import { showMessageDialog, showSelectDialog } from '../../src/tui/dialogs.js';
-import { PALETTE } from '../../src/tui/theme/palettes.js';
-import { theme } from '../../src/tui/theme/theme.js';
-import { renderMcpReport, renderSkillsReport } from '../../src/tui/reports.js';
-import { runTui, type TuiDeps } from '../../src/tui/interactive-mode.js';
+import { TuiAltScreen } from '../../src/plugins/sph-tui/screen/tui-alt-screen.js';
+import type { Terminal } from '../../src/plugins/sph-tui/screen/terminal.js';
+import { showMessageDialog, showSelectDialog } from '../../src/plugins/sph-tui/dialogs.js';
+import { PALETTE } from '../../src/plugins/sph-tui/theme/palettes.js';
+import { theme } from '../../src/plugins/sph-tui/theme/theme.js';
+import { renderMcpReport, renderSkillsReport } from '../../src/plugins/sph-tui/reports.js';
+import { runTui, type TuiDeps } from '../../src/plugins/sph-tui/interactive-mode.js';
 import type { ProviderDeclaration } from '../../src/config/registry.js';
 import { PluginHost } from '../../src/plugins/host.js';
 import { discoverPlugins } from '../../src/plugins/loader.js';
@@ -17,9 +17,9 @@ import { McpHub } from '../../src/plugins/sph-mcp/hub.js';
 import { testHostFacts } from '../plugins/host-fixture.js';
 import type { McpService } from '../../src/plugins/services.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
-import { JobBoard } from '../../src/runtime/jobs.js';
+import { JobBoard } from '../../src/plugins/sph-schedule/jobs.js';
 import { EMPTY_TODO } from '../../src/plugins/services.js';
-import { JsonlSession } from '../../src/session/store.js';
+import { JsonlSession } from '../../src/plugins/sph-session/store.js';
 
 /**
  * 只写不读的假终端：记录写入，让用例能在渲染结果里搜文本。
@@ -329,10 +329,10 @@ describe('斜杠命令打通到弹窗', () => {
         // 弹窗按 markdown 渲染：反引号被吃掉，而行内码是**带颜色**的，所以
         // "tools: " 与 "mcp" 之间夹着 SGR 序列。先剥色再断言，否则匹配的是转义序列。
         const plain = screen.replace(/\[[0-9;]*m/g, '');
+        // 报告现在有十几个插件，一屏只看得到按名字排在最前的。工具行的全文在 reports.test.ts。
         assert.match(plain, /Plugins \(\d+\)/, '弹窗里应当渲染出上报标题');
-        assert.match(plain, /sph-mcp/, '内置插件应当在列表里');
-        assert.match(plain, /tools: mcp/, '插件贡献的工具要写出来，否则「工具为什么不见了」查不出来');
-        assert.match(plain, /services: sph-mcp/);
+        assert.match(plain, /sph-llm/, '按名字排第一的内置插件应当在视口里');
+        assert.match(plain, /services: sph-llm/);
         assert.equal(screen.includes('Unknown command'), false);
       } finally {
         plugins.dispose();

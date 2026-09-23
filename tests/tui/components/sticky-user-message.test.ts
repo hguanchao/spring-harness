@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { renderLayoutFrame } from '../../../src/tui/screen/layout.js';
-import { visibleWidth } from '../../../src/tui/screen/utils.js';
-import { BLOCK_GAP, Text, VStack } from '../../../src/tui/screen/primitives.js';
-import { ScrollView } from '../../../src/tui/screen/scroll-view.js';
+import { renderLayoutFrame } from '../../../src/plugins/sph-tui/screen/layout.js';
+import { visibleWidth } from '../../../src/plugins/sph-tui/screen/utils.js';
+import { BLOCK_GAP, Text, VStack } from '../../../src/plugins/sph-tui/screen/primitives.js';
+import { ScrollView } from '../../../src/plugins/sph-tui/screen/scroll-view.js';
 import {
   computeStickyLayout,
   compositeStickyUserMessages,
   HEADER_CONTENT_GAP,
   userMessageBubbleY,
   type PromptDescriptor,
-} from '../../../src/tui/components/sticky-user-message.js';
-import { UserMessageComponent } from '../../../src/tui/components/user-message.js';
+} from '../../../src/plugins/sph-tui/components/sticky-user-message.js';
+import { UserMessageComponent } from '../../../src/plugins/sph-tui/components/user-message.js';
 
 function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\][^\x07]*\x07/g, '');

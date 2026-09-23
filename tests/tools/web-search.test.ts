@@ -8,7 +8,7 @@ import {
   parseSearchArgs,
   unwrapDdgHref,
   WEB_SEARCH_MAX_QUERIES,
-} from '../../src/tools/web-search.js';
+} from '../../src/plugins/sph-tools/web-search.js';
 
 describe('parseSearchArgs', () => {
   it('dedupes and rejects empty or oversized query lists', () => {

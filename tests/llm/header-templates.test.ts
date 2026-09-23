@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { expandHeaderTemplates } from '../../src/llm/stream-client.js';
+import { expandHeaderTemplates } from '../../src/plugins/sph-llm/stream-client.js';
 
 describe('expandHeaderTemplates', () => {
   it('{randN} 展开为指定长度的 base62 随机值', () => {

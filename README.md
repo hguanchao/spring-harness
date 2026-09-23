@@ -115,7 +115,7 @@ Plugins are discovered from three roots. On a name clash the higher one wins as 
 
 | Root | Scope | Form |
 |---|---|---|
-| `src/plugins/*` | Bundled with sph (`sph-mcp`, `sph-todo`, `sph-plan`, `sph-sandbox`, `sph-subagent`), compiled into `dist/` | Directory with `index.ts` |
+| `src/plugins/*` | Bundled with sph. The product is these plugins: `sph-llm`, `sph-tools`, `sph-skills`, `sph-session`, `sph-storage`, `sph-loop`, `sph-schedule`, `sph-tui`, plus `sph-mcp`, `sph-todo`, `sph-plan`, `sph-sandbox`, `sph-subagent` | Directory with `index.ts` |
 | `~/.sph/plugins/*` | Your own, every project | Directory or single file |
 | `<workspace>/.sph/plugins/*` | Project-local — **loaded only when the workspace is trusted** | Directory or single file |
 
@@ -206,24 +206,24 @@ Malformed session lines are skipped rather than failing the file. Multiple `sph`
 
 ```
 src/
-├── cli/         entry, arg parsing, runtime assembly (bootstrap), output formats
-├── agent/       loop.ts (the turn loop) · prompt.ts · compact.ts · tool-run.ts
-│                memory.ts (AGENTS.md) · recap.ts
-├── tools/       core tools + capability sets and permission helpers
-├── llm/         protocol adapters, SSE client, retry, error classification, compat caps
-├── tui/         terminal UI: screen/ (framework) + components/ (app)
-├── sandbox/     confinement policy and the off-mode spawn; OS backends live in sph-sandbox
-├── session/     JSONL store, event folding, repair, locking, export
-├── plugins/     plugin contract, discovery/loader, host, service seams, and the
-│                bundled plugins: sph-mcp, sph-todo, sph-plan, sph-sandbox, sph-subagent
-├── runtime/     in-process shared resources: jobs, spill, worktrees
-├── permission/  approval policy + the LLM safety reviewer + grant store
-├── config/      TOML load/validate, models.json registry, surgical save
+├── cli/         entry, arg parsing, runtime assembly. bootstrap asks plugins for services
+├── agent/       turn contract (driver.ts) and the event protocol. The loop itself is sph-loop
+├── llm/         client seam only (LlmClient, reasoning effort). Adapters live in sph-llm
+├── tools/       tool contract and the registry. The tools themselves live in sph-tools
+├── session/     SessionPort only. JSONL, lock, fold, and export live in sph-session
+├── sandbox/     mode, fail-closed, read-only write denial. OS backends live in sph-sandbox
+├── permission/  approval policy. This stays in the host: it is the safety check, not a feature
+├── config/      which plugins are disabled, credentials, models.json
 ├── workspace/   path boundary, root resolution, trust
-└── skills/      SKILL.md catalog scanning
+└── plugins/     host, loader, seams, and the bundled implementations:
+                 sph-llm, sph-tools, sph-skills, sph-session, sph-storage,
+                 sph-loop, sph-schedule, sph-tui,
+                 sph-mcp, sph-todo, sph-plan, sph-sandbox, sph-subagent
 ```
 
-`src/plugins/services.ts` holds the seams: data shapes plus interfaces, no implementation. Core keeps them so `/mcps`, session folding, and plan-mode checks can name those capabilities without importing a plugin — otherwise disabling one would not even compile. This is the same split dsh uses (`@deepseek-ai/dsh-mcp-client` provides `ctx.mcp` over a seam core owns).
+Startup resolves `sph-llm`, `sph-session`, `sph-loop`, and `sph-schedule` by service name. If one of those is disabled, sph exits instead of running a turn with a missing half. `sph-sandbox` is the other required piece for `workspace` and `read-only`, and a same-named third-party plugin cannot replace it. Tools are not a service: `sph-tools` registers them into an otherwise empty tool table.
+
+`src/plugins/services.ts` holds the seams. The host names a capability without importing its implementation, which is the same split dsh uses.
 
 `sph-subagent` follows the pi-subagents split: agent definitions and the `subagent` / `send_subagent_message` tools live in the plugin, while the child session, depth budget, approval, and event protocol stay in the turn loop. Built-in agents are `explore` (read-only) and `general`. A markdown file in `~/.sph/agents/` or `<workspace>/.sph/agents/` adds or replaces one; the workspace directory is read only when the workspace is trusted. A file looks like this:
 

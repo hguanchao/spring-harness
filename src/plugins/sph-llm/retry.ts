@@ -1,0 +1,61 @@
+/**
+ * LLM 请求重试策略。
+ *
+ * 已开始流式输出后不重试，避免向用户重复吐字。
+ * 429 常见 Retry-After 数秒到几十秒：3 次 / 总等待 <6s 会直接报错，
+ * 默认 {@link DEFAULT_MAX_RETRIES} 次、退避封顶 20s、Retry-After 封顶 60s。
+ */
+
+export { DEFAULT_MAX_RETRIES } from '../../llm/client.js';
+
+export class RetryableError extends Error {
+  readonly status?: number;
+  readonly retryAfterMs?: number;
+
+  constructor(message: string, status?: number, retryAfterMs?: number) {
+    super(message);
+    this.name = 'RetryableError';
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** 429/408/5xx 与网络层异常可重试；鉴权、参数类 4xx 重试无意义。 */
+export function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+export function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 60_000);
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) return Math.max(0, Math.min(date - Date.now(), 60_000));
+  return undefined;
+}
+
+export function backoffMs(attempt: number, base = 1000, hint?: number): number {
+  if (hint !== undefined) return hint;
+  const jitter = Math.floor(Math.random() * base * 0.25);
+  return Math.min(base * 2 ** attempt + jitter, 20_000);
+}
+
+/** 可被 AbortSignal 打断的 sleep；被中止时直接抛出，不进入下一轮重试。 */
+export function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'));
+      return;
+    }
+    const timer = setTimeout(finish, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('aborted'));
+    };
+    function finish(): void {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}

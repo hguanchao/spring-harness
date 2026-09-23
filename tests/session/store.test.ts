@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { JsonlSession, listSessions, resumeOrCreate } from '../../src/session/store.js';
+import { JsonlSession, listSessions, resumeOrCreate } from '../../src/plugins/sph-session/store.js';
 
 function fixture(): { dir: string; dispose: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'sph-sessions-'));

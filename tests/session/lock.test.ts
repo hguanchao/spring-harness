@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { acquireSessionLock, SessionLockedError, hasOtherLiveSession, hasOtherLiveSessionIn, lockPath } from '../../src/session/lock.js';
+import { acquireSessionLock, SessionLockedError, hasOtherLiveSession, hasOtherLiveSessionIn, lockPath } from '../../src/plugins/sph-session/lock.js';
 
 /**
  * `hasOtherLiveSession` 决定 Windows 沙箱退出时要不要撤销 `~/.sph` 的共享写授权

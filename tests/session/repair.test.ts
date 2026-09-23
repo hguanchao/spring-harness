@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { closeInterruptedTurn, findDanglingToolCalls, INTERRUPTED_TOOL, repairDanglingTools } from '../../src/session/repair.js';
-import { JsonlSession } from '../../src/session/store.js';
+import { closeInterruptedTurn, findDanglingToolCalls, INTERRUPTED_TOOL, repairDanglingTools } from '../../src/plugins/sph-session/repair.js';
+import { JsonlSession } from '../../src/plugins/sph-session/store.js';
 import type { SessionMessage } from '../../src/session/types.js';
 
 function msg(partial: Omit<SessionMessage, 'type' | 'ts'>): SessionMessage {

@@ -10,17 +10,14 @@ import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { ConfigError, loadConfig } from '../config/load.js';
 import { loadRegistry } from '../config/registry.js';
 import { sphModelsPath, sphSpillRoot } from '../home.js';
-import { SpillStore } from '../runtime/spill.js';
-import type { TokenUsage } from '../llm/openai.js';
+import type { TokenUsage } from '../llm/client.js';
+import { SESSION_SERVICE, STORAGE_SERVICE, UI_SERVICE, type SessionService, type StorageService, type UiService } from '../plugins/services.js';
 // 注意：TUI 模块**不要**在顶层 import。它（连同 marked）约 300ms 的加载
 // 成本只有交互路径才值得付；--help / sessions / export / -p 全都不需要它。
 // 下面两处按需动态 import。
-import { sessionDirFor } from '../session/path.js';
-import { foldSessionState } from '../session/fold.js';
-import { exportHtml, exportJson, exportMarkdown } from '../session/export.js';
-import { JsonlSession, listSessions, type SessionInfo } from '../session/store.js';
+import { sessionService } from '../plugins/sph-session/index.js';
+import type { SessionInfo } from '../plugins/services.js';
 import { resolveWorkspaceRoot } from '../workspace/root.js';
-import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
 
 function printSessionInfos(infos: SessionInfo[]): void {
   for (const info of infos) {
@@ -34,18 +31,18 @@ function printSessionInfos(infos: SessionInfo[]): void {
 
 /** sessions 子命令：列出本工作区的主会话（或按关键词过滤），不进入 agent 运行时。 */
 async function runSessionsCommand(workspaceRoot: string, search?: string): Promise<void> {
-  const dir = sessionDirFor(workspaceRoot);
-  const infos = await listSessions(dir, { search });
+  const dir = sessionService.sessionDirFor(workspaceRoot);
+  const infos = await sessionService.list(dir, { search });
   printSessionInfos(infos);
   if (infos.length === 0) process.stdout.write(search ? `no session contains "${search}"\n` : 'no sessions yet\n');
 }
 
 async function runExportCommand(workspaceRoot: string, sessionId?: string, format: 'md' | 'json' | 'html' = 'md'): Promise<void> {
-  const dir = sessionDirFor(workspaceRoot);
+  const dir = sessionService.sessionDirFor(workspaceRoot);
   // export 是只读命令：不创建会话，没有可导出内容时报错退出。
   let id = sessionId;
   if (!id) {
-    const infos = await listSessions(dir);
+    const infos = await sessionService.list(dir);
     id = infos[0]?.id;
     if (!id) {
       process.stderr.write('no sessions to export\n');
@@ -59,8 +56,12 @@ async function runExportCommand(workspaceRoot: string, sessionId?: string, forma
     process.exitCode = 1;
     return;
   }
-  const session = new JsonlSession(dir, id);
-  const body = format === 'json' ? exportJson(session) : format === 'html' ? exportHtml(session) : exportMarkdown(session);
+  const session = sessionService.open(dir, id);
+  const body = format === 'json'
+    ? sessionService.exportJson(session)
+    : format === 'html'
+      ? sessionService.exportHtml(session)
+      : sessionService.exportMarkdown(session);
   process.stdout.write(body);
 }
 
@@ -124,76 +125,21 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
     throw error;
   }
 
-  // 到这一步确定要进 TUI，才付加载成本。
-  const { runTui, confirmWorkspaceTrust, createScreen } = await import('../tui/index.js');
-
-  // 未信任时先 start 替代屏幕画信任页；主界面接手同一块屏，中间不退。
-  let ui: ReturnType<typeof createScreen> | undefined;
+  // 信任页和主界面都由 sph-tui 提供。未信任时 bootstrap 先装内置插件，让信任页画出来。
   let runtime: Runtime | undefined;
   let deferredError: string | undefined;
   try {
-    const needsTrustUi = !args.trust && !isWorkspaceTrusted(workspaceRoot);
-    if (needsTrustUi) {
-      ui = createScreen(workspaceRoot);
-      const decision = confirmWorkspaceTrust(workspaceRoot, ui);
-      ui.start();
-      if (!(await decision)) {
-        process.exitCode = 2;
-        return;
-      }
-      rememberTrustedWorkspace(workspaceRoot);
-    }
-
-    runtime = await bootstrap(args, workspaceRoot, 'error', undefined, (error) => {
+    runtime = await bootstrap(args, workspaceRoot, 'confirm', undefined, (error) => {
       deferredError = error.message;
     });
     if (!runtime) return;
-    const rt = runtime;
-    await runTui({
-      workspaceRoot,
-      sessionDir: rt.sessionDir,
-      contextWindow: rt.config.contextWindow,
-      sandbox: rt.sandbox,
-      session: rt.session,
-      mcp: () => rt.mcp(),
-      reloadMcp: () => rt.reloadMcp(),
-      refreshMcpPreferences: () => rt.refreshMcpPreferences(),
-      mcpPreferences: rt.mcpPreferences,
-      pluginReport: () => rt.plugins.report(),
-      pluginServices: rt.plugins,
-      todos: rt.todos,
-      jobs: rt.jobs,
-      approvalMode: args.approval ?? rt.config.approval ?? 'ask',
-      permissionRules: rt.config.permissions,
-      subagentApproval: rt.config.subagentApproval,
-      configPath: rt.configPath,
-      authLabel: rt.config.apiKey === '' ? 'Logged in with HTTP headers' : 'Logged in with API key',
-      providerName: rt.config.provider,
-      models: () => rt.registry.providers,
-      resolveModel: (model, provider) => rt.resolveModel({ model, provider }),
-      // bootstrap 已把 --model（含 provider/id 限定）折叠进 config.model；这里拿到的就是生效模型。
-      model: rt.config.model,
-      effort: args.effort ?? rt.config.reasoningEffort,
-      maxTokens: args.maxTokens ?? rt.config.maxTokens,
-      makeClient: (overrides) => rt.makeClient(overrides),
-      makeAuxClient: (model) => rt.makeAuxClient(model),
-      // --model 是本次进程的显式选择，不该被会话里记录的模型覆盖；切换会话时仍然尊重会话记录。
-      modelPinned: args.model !== undefined,
-      compactModel: rt.config.compactModel,
-      reviewModel: rt.config.reviewModel,
-      spillRoot: sphSpillRoot(),
-      spillThreshold: rt.config.spillThreshold,
-      maxSubagentDepth: rt.config.subagentMaxDepth,
-      maxSessionTokens: rt.config.maxSessionTokens,
-      worktrees: rt.worktrees,
-      tools: rt.tools,
-      sessions: rt.sessions,
-      driver: rt.driver,
-      claimSession: (id) => rt.claimSession(id),
-      ...(ui === undefined ? {} : { ui }),
-    });
+    const screen = runtime.plugins.get<UiService>(UI_SERVICE);
+    if (!screen) {
+      deferredError = 'interactive mode needs the sph-tui plugin';
+      return;
+    }
+    await screen.run(runtime, args);
   } finally {
-    ui?.stop({ preserveScreen: true });
     runtime?.cleanup();
     // 装配失败写在替代屏幕里会被 1049l 清掉，退屏后再打到普通终端。
     if (deferredError !== undefined) process.stderr.write(`${deferredError}\n`);
@@ -225,7 +171,8 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       session.appendEvent('usage', { ...usage, purpose });
     };
     // 恢复的会话带着跨轮次状态：任务目标与上次失败要进提示词，否则「继续」时模型是失忆的。
-    const folded = foldSessionState(session.readAll());
+    const folded = runtime.plugins.get<SessionService>(SESSION_SERVICE)?.fold(session.readAll())
+      ?? { depth: 0, failures: [], planMode: false };
     const output = args.outputFormat === 'json'
       ? createJsonOutput({ sessionId: session.id })
       : createTextOutput();
@@ -265,7 +212,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
         : undefined,
       compactClient,
       onAuxUsage: recordAuxUsage,
-      spill: new SpillStore(join(sphSpillRoot(), session.id), config.spillThreshold),
+      spill: runtime.plugins.get<StorageService>(STORAGE_SERVICE)?.open(join(sphSpillRoot(), session.id), config.spillThreshold),
       worktrees: runtime.worktrees,
     });
     process.stdout.write(output.finalLine());

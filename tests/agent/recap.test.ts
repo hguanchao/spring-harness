@@ -13,8 +13,8 @@ import {
   recapGate,
   recapInstruction,
   shouldSuppressAutoRecapDisplay,
-} from '../../src/agent/recap.js';
-import type { ChatMessage, LlmClient, StreamDelta } from '../../src/llm/openai.js';
+} from '../../src/plugins/sph-loop/recap.js';
+import type { ChatMessage, LlmClient, StreamDelta } from '../../src/plugins/sph-llm/openai.js';
 import type { SessionMessage } from '../../src/session/types.js';
 
 function user(content: string): SessionMessage {

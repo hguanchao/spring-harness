@@ -7,7 +7,7 @@ import {
   initialRequestCaps,
   isOfficialOpenAI,
   type RequestCaps,
-} from '../../src/llm/compat.js';
+} from '../../src/plugins/sph-llm/compat.js';
 
 /** 降级用例需要 key/retention 都开着，才能断言报文剥的是哪一位。 */
 function cacheOn(caps = initialRequestCaps('gpt-4o', true)): RequestCaps {

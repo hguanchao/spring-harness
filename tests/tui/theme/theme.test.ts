@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Markdown } from '../../../src/tui/screen/markdown.js';
-import { PALETTE } from '../../../src/tui/theme/palettes.js';
+import { Markdown } from '../../../src/plugins/sph-tui/screen/markdown.js';
+import { PALETTE } from '../../../src/plugins/sph-tui/theme/palettes.js';
 import {
   getMarkdownTheme,
   oscResetCanvasBackground,
   oscSetCanvasBackground,
   Theme,
   theme,
-} from '../../../src/tui/theme/theme.js';
+} from '../../../src/plugins/sph-tui/theme/theme.js';
 
 /** 只看前景色 SGR，忽略加粗/斜体等修饰。 */
 const FG = /\x1b\[38;(?:5;\d+|2;\d+;\d+;\d+)m/g;

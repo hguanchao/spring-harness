@@ -6,8 +6,22 @@
  * 会和 load → registry 形成环，所以下沉一层。
  */
 
-import { SESSION_AFFINITY_FORMATS, type CompatProfile, type SessionAffinityFormat } from '../llm/compat.js';
 import { ConfigError } from './errors.js';
+
+/** 会话亲和头形态。`off` 不发；其余按厂商常见名字。 */
+export const SESSION_AFFINITY_FORMATS = ['openai', 'openrouter', 'off'] as const;
+export type SessionAffinityFormat = (typeof SESSION_AFFINITY_FORMATS)[number];
+
+/**
+ * 用户在 `[compat]` 里声明的覆盖。省略的字段走 URL 推断。
+ * 类型留在宿主：配置解析不能依赖 sph-llm 的实现。
+ */
+export interface CompatProfile {
+  promptCacheKey?: boolean;
+  promptCacheRetention?: boolean;
+  streamOptions?: boolean;
+  sessionAffinity?: SessionAffinityFormat;
+}
 
 /** 上游 API 协议形态；决定请求端点、鉴权头与消息编码方式。 */
 export const API_PROTOCOLS = ['chat-completions', 'responses', 'anthropic-messages'] as const;

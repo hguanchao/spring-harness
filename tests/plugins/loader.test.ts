@@ -268,7 +268,21 @@ describe('内置插件确实随包发布', () => {
       userRoot: join(tmpdir(), 'definitely-not-a-plugins-dir'),
     }).candidates;
     const foundNames = found.map((candidate) => candidate.name);
-    for (const name of ['sph-mcp', 'sph-todo', 'sph-plan', 'sph-sandbox', 'sph-subagent']) {
+    for (const name of [
+      'sph-llm',
+      'sph-loop',
+      'sph-mcp',
+      'sph-plan',
+      'sph-sandbox',
+      'sph-schedule',
+      'sph-session',
+      'sph-skills',
+      'sph-storage',
+      'sph-subagent',
+      'sph-todo',
+      'sph-tools',
+      'sph-tui',
+    ]) {
       assert.ok(foundNames.includes(name), `内置插件里应有 ${name}，实际: ${foundNames.join(',')}`);
       assert.equal(found.find((c) => c.name === name)?.root, 'bundled');
     }

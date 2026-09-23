@@ -6,8 +6,8 @@
 
 ## 一、现状盘点
 
-核心工具：`read` `write` `edit` `glob` `grep` `ls` `bash` `pwsh` `skill` `ask_user` `web_search` `web_fetch` `jobs`。
-`mcp`、`todo`、`enter_plan_mode`、`exit_plan_mode`、`subagent`、`send_subagent_message` 由内置插件注册（`sph-mcp`、`sph-todo`、`sph-plan`、`sph-subagent`）。
+宿主工具表是空的。`read` `write` `edit` `glob` `grep` `ls` `bash` `pwsh` `skill` `ask_user` `web_search` `web_fetch` `jobs` 由 `sph-tools` 注册。
+`mcp`、`todo`、`enter_plan_mode`、`exit_plan_mode`、`subagent`、`send_subagent_message` 由 `sph-mcp`、`sph-todo`、`sph-plan`、`sph-subagent` 注册。
 
 ### 新增一个工具的真实成本
 

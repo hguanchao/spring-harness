@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { renderMcpReport, renderPluginsReport, renderSkillsReport } from '../../src/tui/reports.js';
+import { renderMcpReport, renderPluginsReport, renderSkillsReport } from '../../src/plugins/sph-tui/reports.js';
 import type { LoadedPlugin } from '../../src/plugins/host.js';
 import type { McpServerStatus } from '../../src/plugins/services.js';
 import type { McpSourceReport } from '../../src/plugins/services.js';
-import type { SkillEntry } from '../../src/skills/scan.js';
+import type { SkillEntry } from '../../src/plugins/sph-skills/scan.js';
 
 function skill(name: string, description: string, path = `/ws/skills/${name}/SKILL.md`): SkillEntry {
   return { name, description, path };

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { ABORTED_BEFORE_DISPATCH, runToolBatch, type ToolCallRequest } from '../../src/agent/tool-run.js';
-import { isConcurrencySafe } from '../../src/tools/index.js';
+import { ABORTED_BEFORE_DISPATCH, runToolBatch, type ToolCallRequest } from '../../src/plugins/sph-loop/tool-run.js';
+import { isConcurrencySafe } from '../../src/plugins/sph-tools/index.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

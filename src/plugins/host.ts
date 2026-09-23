@@ -15,7 +15,7 @@
 
 import { sphHome } from '../home.js';
 import { mergeChildEnv } from '../sandbox/env.js';
-import { ToolRegistry } from '../tools/index.js';
+import { ToolRegistry } from './sph-tools/index.js';
 import { clip, type ToolSpec } from '../tools/types.js';
 import { errorMessage } from '../util.js';
 import { canonicalize } from '../workspace/boundary.js';

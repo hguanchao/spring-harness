@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isRecord } from '../util.js';
 import { writeAtomically } from './save.js';
 import { parseApiProtocol, parseCompat, type ApiProtocol } from './primitives.js';
-import type { CompatProfile } from '../llm/compat.js';
+import type { CompatProfile } from './primitives.js';
 import { ConfigError } from './errors.js';
 
 /** 一个模型声明的容量与协议；`api` / `compat` 省略即继承 provider。 */

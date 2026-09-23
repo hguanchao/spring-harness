@@ -11,33 +11,34 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { anthropicAdapter } from '../llm/anthropic.js';
-import { openaiAdapter, type LlmClient, type ReasoningEffort } from '../llm/openai.js';
-import { responsesAdapter } from '../llm/responses.js';
-import type { ProtocolAdapter } from '../llm/stream-client.js';
-import { createSseClient } from '../llm/stream-client.js';
+import type { LlmClient, ReasoningEffort } from '../llm/client.js';
 import { PluginHost } from '../plugins/host.js';
 import { discoverPlugins, userPluginsRoot } from '../plugins/loader.js';
 import {
   EMPTY_TODO,
+  LOOP_SERVICE,
   MCP_SERVICE,
+  MODEL_SERVICE,
   SANDBOX_SERVICE,
+  SCHEDULER_SERVICE,
+  SESSION_SERVICE,
+  TODO_SERVICE,
+  UI_SERVICE,
+  type LoopService,
+  type ModelService,
   type SandboxBackendFactory,
   type McpPreferences,
   type McpReloadResult,
   type McpService,
+  type SchedulerService,
+  type SessionService,
+  type TodoService,
+  type UiService,
+  type WorktreePort,
 } from '../plugins/services.js';
-import { JobBoard } from '../runtime/jobs.js';
-import { TODO_SERVICE, type TodoService } from '../plugins/services.js';
-import { WorktreeStore } from '../runtime/worktrees.js';
 import { openSandbox } from '../sandbox/open.js';
 import { SandboxError, type SandboxHandle, type SandboxMode } from '../sandbox/types.js';
-import { acquireSessionLock, SessionLockedError } from '../session/lock.js';
-import { sessionDirFor } from '../session/path.js';
-import { jsonlSessionFactory, resumeOrCreate, setCurrentSession, JsonlSession } from '../session/store.js';
-import type { SessionFactory } from '../session/types.js';
-import { runTurn, type AgentDriver } from '../agent/loop.js';
-import { tools as coreTools } from '../tools/index.js';
+import type { SessionFactory, SessionPort } from '../session/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
 import {
@@ -48,11 +49,8 @@ import {
   type ModelRegistry,
   type ResolvedModel,
 } from '../config/registry.js';
-import { sphModelsPath } from '../home.js';
-import type { CompatProfile } from '../llm/compat.js';
+import { sphConfigPath, sphModelsPath } from '../home.js';
 import { applyProxy } from '../net/proxy.js';
-import { mergePresetHeaders } from '../llm/presets.js';
-import { sphConfigPath } from '../home.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
 
 export class CliError extends Error {
@@ -63,48 +61,6 @@ export class CliError extends Error {
     super(message);
     this.name = 'CliError';
   }
-}
-
-export interface ClientOptions {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  api: ApiProtocol;
-  reasoningEffort?: ReasoningEffort;
-  maxTokens?: number;
-  /** 附加静态请求头：穿透到 createSseClient，与协议默认头同名时以它为准。 */
-  headers?: Record<string, string>;
-  /** Anthropic prompt-cache 断点开关；省略视作开。 */
-  promptCache?: boolean;
-  /**
-   * 会话身份：OpenAI 系的 `prompt_cache_key` 与亲和头都从它来。
-   * 辅助 client 也传同一个 id——缓存路由按「桶」分机，不影响按前缀判定的缓存本身，
-   * 反而让主对话与压缩摘要尽量落在同一台机器上。
-   */
-  sessionId?: string;
-  /** `[compat]` 声明，覆盖 URL 推断。 */
-  compat?: CompatProfile;
-  /** 上游失败重试次数（不含首次）；省略走 client 内置默认。 */
-  maxRetries?: number;
-}
-
-const adapters = new Map<ApiProtocol, ProtocolAdapter>([
-  ['chat-completions', openaiAdapter],
-  ['responses', responsesAdapter],
-  ['anthropic-messages', anthropicAdapter],
-]);
-
-/** 注册或覆盖一种上游协议适配器。同名后写覆盖前写。 */
-export function registerAdapter(api: ApiProtocol, adapter: ProtocolAdapter): void {
-  adapters.set(api, adapter);
-}
-
-/** 按上游协议构造 client；三种协议共享同一 LlmClient 面，loop 无感知。 */
-export function createClient(options: ClientOptions): LlmClient {
-  const { api, ...conn } = options;
-  const adapter = adapters.get(api);
-  if (!adapter) throw new Error(`unknown api protocol: ${api}`);
-  return createSseClient(adapter, conn);
 }
 
 export interface BootstrapOptions {
@@ -144,10 +100,10 @@ export interface Runtime {
   /** config.toml 路径：TUI 把 /model、/effort、/permission 的选择写回这里。 */
   configPath: string;
   sandbox: SandboxHandle;
-  session: JsonlSession;
+  session: SessionPort;
   tools: ToolRegistry;
   sessions: SessionFactory;
-  driver: AgentDriver;
+  driver: LoopService['runTurn'];
   /** 插件宿主：工具表（核心 + 插件）、服务表、清理都归它。 */
   plugins: PluginHost;
   /**
@@ -163,9 +119,9 @@ export interface Runtime {
   readonly mcpPreferences: McpPreferences;
   /** todo 服务（todo 插件提供；缺席即不可用）。 */
   todos: TodoService;
-  jobs: JobBoard;
+  jobs: ReturnType<SchedulerService['create']>;
   /** 子代理 worktree 隔离的工作树仓库；cleanup 负责清退。 */
-  worktrees: WorktreeStore;
+  worktrees: WorktreePort;
   /** models.json 的声明：`/model` 列表与按模型解析协议都从这里来。 */
   readonly registry: ModelRegistry;
   /** 按模型 id 解析生效协议与容量声明；未声明的模型回落 provider 级。 */
@@ -238,6 +194,36 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   }
 
   if (options.trust) rememberTrustedWorkspace(options.workspaceRoot);
+
+  // 核心工具表是空的。read / write / shell 由 sph-tools 注册，模型、会话、循环、调度同理。
+  // 项目级插件受信任门保护——仓库里的 .sph/plugins 是会被执行的代码。
+  const openPlugins = async (trusted: boolean): Promise<PluginHost> => {
+    const host = new PluginHost({
+      coreTools: [],
+      workspaceRoot: options.workspaceRoot,
+      configPath: sphConfigPath(),
+    });
+    const discovered = discoverPlugins({
+      workspaceRoot: options.workspaceRoot,
+      userRoot: userPluginsRoot(),
+      trusted,
+      disabled: config.disabledPlugins,
+    });
+    // 内置插件被顶掉是合法的（就地打补丁），但必须说出来。sph-sandbox 例外：
+    // 同名第三方被发现阶段丢掉，内置后端留下，这里只报告那次被拒绝的替换。
+    for (const name of discovered.shadowed) {
+      process.stderr.write(`warning: plugin ${name} shadows the bundled one\n`);
+    }
+    for (const name of discovered.pinned) {
+      process.stderr.write(`warning: plugin ${name} cannot replace the bundled one; the built-in stays loaded\n`);
+    }
+    await host.load(discovered.candidates, discovered.shadowed, discovered.pinned);
+    for (const warning of host.warnings()) process.stderr.write(`warning: ${warning}\n`);
+    return host;
+  };
+
+  // 未信任时先只装内置和用户插件，好让界面插件画出信任页。同意之后再整表重装，
+  // 项目级插件才能进来。headless 没有人可问，这里直接拒绝。
   if (!isWorkspaceTrusted(options.workspaceRoot)) {
     if (options.untrusted === 'error') {
       throw new CliError(
@@ -245,43 +231,34 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         2,
       );
     }
+    const preview = await openPlugins(false);
+    const ui = preview.get<UiService>(UI_SERVICE);
     const ok = options.confirmUntrustedWorkspace
       ? await options.confirmUntrustedWorkspace(options.workspaceRoot)
-      : await confirmTrust(options.workspaceRoot);
+      : ui
+        ? await ui.confirmTrust(options.workspaceRoot)
+        : await confirmTrust(options.workspaceRoot);
+    preview.dispose();
     if (!ok) throw new CliError(`workspace is not trusted: ${options.workspaceRoot}`, 2);
     rememberTrustedWorkspace(options.workspaceRoot);
   }
-  // 走到这里工作区必定已信任（上面那道门要么早已通过，要么刚记住）。仍然显式取一次而不是
-  // 写死 true：插件发现与 MCP 项目级来源都吃这个值，将来信任门若挪了位置，这里不会静默
-  // 变成「永远信任」——那种失效方式不会有任何症状。
+  // 走到这里工作区必定已信任。仍然显式取一次而不是写死 true：插件发现吃这个值。
   const trusted = isWorkspaceTrusted(options.workspaceRoot);
+  const plugins = await openPlugins(trusted);
 
-  const sessionDir = sessionDirFor(options.workspaceRoot);
+  const requireService = <T>(name: string): T => {
+    const found = plugins.get<T>(name);
+    if (found !== undefined) return found;
+    plugins.dispose();
+    throw new CliError(`plugin service ${name} is not loaded`, 1);
+  };
+  const sessionApi = requireService<SessionService>(SESSION_SERVICE);
+  const model = requireService<ModelService>(MODEL_SERVICE);
+  const loop = requireService<LoopService>(LOOP_SERVICE);
+  const scheduler = requireService<SchedulerService>(SCHEDULER_SERVICE);
+
+  const sessionDir = sessionApi.sessionDirFor(options.workspaceRoot);
   mkdirSync(sessionDir, { recursive: true });
-
-  // 插件先于沙箱：confine 档位的后端由 sph-sandbox 提供，打开时才能取到工厂。
-  // 项目级插件受信任门保护——仓库里的 .sph/plugins 是会被执行的代码。
-  const plugins = new PluginHost({
-    coreTools,
-    workspaceRoot: options.workspaceRoot,
-    configPath: sphConfigPath(),
-  });
-  const discovered = discoverPlugins({
-    workspaceRoot: options.workspaceRoot,
-    userRoot: userPluginsRoot(),
-    trusted,
-    disabled: config.disabledPlugins,
-  });
-  // 内置插件被顶掉是合法的（就地打补丁），但必须说出来。sph-sandbox 例外：
-  // 同名第三方被发现阶段丢掉，内置后端留下，这里只报告那次被拒绝的替换。
-  for (const name of discovered.shadowed) {
-    process.stderr.write(`warning: plugin ${name} shadows the bundled one\n`);
-  }
-  for (const name of discovered.pinned) {
-    process.stderr.write(`warning: plugin ${name} cannot replace the bundled one; the built-in stays loaded\n`);
-  }
-  await plugins.load(discovered.candidates, discovered.shadowed, discovered.pinned);
-  for (const warning of plugins.warnings()) process.stderr.write(`warning: ${warning}\n`);
 
   // confine 档位必须有后端。插件缺席或装载失败 → 拒绝启动，而不是放开约束。
   const sandboxFactory = plugins.get<SandboxBackendFactory>(SANDBOX_SERVICE);
@@ -295,7 +272,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   }
 
   // 会话选择与 pi 对齐：默认新建；只有 `-c/--continue` 才续用最近一次主会话。
-  let session = await resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
+  let session = await sessionApi.resumeOrCreate(sessionDir, options.workspaceRoot, !options.continueSession);
   if (options.resumeId) {
     const file = join(sessionDir, `${options.resumeId}.jsonl`);
     if (!existsSync(file)) {
@@ -303,17 +280,17 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       plugins.dispose();
       throw new CliError(`session not found: ${options.resumeId} (see: sph sessions)`, 1);
     }
-    setCurrentSession(sessionDir, options.resumeId, options.workspaceRoot);
-    session = new JsonlSession(sessionDir, options.resumeId);
+    sessionApi.activate(sessionDir, options.resumeId, options.workspaceRoot);
+    session = sessionApi.open(sessionDir, options.resumeId);
   }
 
   let release: (() => void) | undefined;
   try {
-    release = acquireSessionLock(sessionDir, session.id);
+    release = sessionApi.acquireLock(sessionDir, session.id);
   } catch (error) {
     sandbox.dispose();
     plugins.dispose();
-    if (error instanceof SessionLockedError) throw new CliError(error.message, 1);
+    if (sessionApi.isLockError(error)) throw new CliError(error instanceof Error ? error.message : String(error), 1);
     throw error;
   }
 
@@ -339,8 +316,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   await reloadMcp();
 
   const todos = plugins.get<TodoService>(TODO_SERVICE) ?? EMPTY_TODO;
-  const jobs = new JobBoard();
-  const worktrees = new WorktreeStore();
+  const jobs = scheduler.create();
+  const worktrees = loop.createWorktrees();
 
   let cleaned = false;
   const cleanup = (): void => {
@@ -377,8 +354,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     sandbox,
     session,
     tools: plugins.tools(),
-    sessions: jsonlSessionFactory,
-    driver: runTurn,
+    sessions: sessionApi.factory,
+    driver: loop.runTurn,
     plugins,
     mcp,
 
@@ -386,7 +363,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     jobs,
     worktrees,
     claimSession(id) {
-      const next = acquireSessionLock(sessionDir, id);
+      const next = sessionApi.acquireLock(sessionDir, id);
       release?.();
       release = next;
     },
@@ -402,39 +379,39 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         ? findProvider(registry, config.provider)
         : findProvider(registry, overrides.provider);
       const resolved = resolveModel(provider, overrides.model, { apiOverride: overrides.api });
-      return createClient({
+      return model.createClient({
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         model: overrides.model,
         api: resolved.api,
         reasoningEffort: overrides.effort,
         maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
-        headers: mergePresetHeaders(provider.baseUrl, provider.headers),
+        headers: provider.headers,
         promptCache: config.promptCache,
         sessionId: session.id,
         compat: resolved.compat,
         maxRetries: config.maxRetries,
       });
     },
-    makeAuxClient(model) {
-      if (model === undefined) return undefined;
+    makeAuxClient(auxModel) {
+      if (auxModel === undefined) return undefined;
       // 没配 [aux].provider 就是与主端点同源。辅助模型的协议与 compat 按 aux provider
       // 的声明解析——「便宜的辅助模型」因此跨厂商也成立。
       const auxProvider = config.aux?.provider === undefined
         ? findProvider(registry, config.provider)
         : findProvider(registry, config.aux.provider);
       const sharesMainEndpoint = auxProvider.name === config.provider;
-      const resolved = resolveModel(auxProvider, model);
-      return createClient({
+      const resolved = resolveModel(auxProvider, auxModel);
+      return model.createClient({
         baseUrl: auxProvider.baseUrl,
         apiKey: auxProvider.apiKey,
-        model,
+        model: auxModel,
         api: resolved.api,
         reasoningEffort: config.reasoningEffort,
         // max_tokens 只在同源时继承：不同厂商的输出上限不同，把主模型的限额发给别人的模型
         // 会直接 400。跨端点时交给端点默认值（anthropic 适配层自带 8192 兜底）。
         maxTokens: sharesMainEndpoint ? config.maxTokens : undefined,
-        headers: mergePresetHeaders(auxProvider.baseUrl, auxProvider.headers),
+        headers: auxProvider.headers,
         promptCache: config.promptCache,
         sessionId: session.id,
         compat: resolved.compat,

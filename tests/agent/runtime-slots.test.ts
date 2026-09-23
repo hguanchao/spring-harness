@@ -3,15 +3,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { runTurn } from '../../src/agent/loop.js';
-import type { AgentEvent } from '../../src/agent/events.js';
-import type { LlmClient, StreamDelta } from '../../src/llm/openai.js';
+import { runTurn } from '../../src/plugins/sph-loop/loop.js';
+import type { AgentEvent } from '../../src/plugins/sph-loop/events.js';
+import type { LlmClient, StreamDelta } from '../../src/plugins/sph-llm/openai.js';
 import type { SandboxHandle } from '../../src/sandbox/types.js';
 import type { Approver } from '../../src/permission/policy.js';
 import { ToolRegistry } from '../../src/tools/registry.js';
 import type { ToolSpec } from '../../src/tools/types.js';
 import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../../src/session/types.js';
-import { messagesOf } from '../../src/session/query.js';
+import { messagesOf } from '../../src/plugins/sph-session/query.js';
 
 class MemorySession implements SessionPort {
   readonly records: SessionRecord[] = [];

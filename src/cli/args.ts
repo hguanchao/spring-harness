@@ -1,5 +1,5 @@
 import { API_PROTOCOLS, parseSandboxMode, type ApiProtocol } from '../config/load.js';
-import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/openai.js';
+import { REASONING_EFFORTS, type ReasoningEffort } from '../llm/client.js';
 import type { ApprovalMode } from '../permission/policy.js';
 import type { SandboxMode } from '../sandbox/types.js';
 

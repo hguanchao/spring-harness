@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Markdown } from '../../../src/tui/screen/markdown.js';
-import { getMarkdownTheme, theme } from '../../../src/tui/theme/theme.js';
+import { Markdown } from '../../../src/plugins/sph-tui/screen/markdown.js';
+import { getMarkdownTheme, theme } from '../../../src/plugins/sph-tui/theme/theme.js';
 
 const STRIP = /\x1b\[[0-9;]*m/g;
 

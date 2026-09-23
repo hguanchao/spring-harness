@@ -7,7 +7,7 @@ import {
   matchesKey,
   parseKey,
   setKittyProtocolActive,
-} from '../../../src/tui/screen/keys.js';
+} from '../../../src/plugins/sph-tui/screen/keys.js';
 
 afterEach(() => {
   setKittyProtocolActive(false);

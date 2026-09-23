@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { RecapMessageComponent } from '../../../src/tui/components/recap.js';
-import { BLOCK_GAP, stripTerminalSequences, visibleWidth } from '../../../src/tui/screen/index.js';
+import { RecapMessageComponent } from '../../../src/plugins/sph-tui/components/recap.js';
+import { BLOCK_GAP, stripTerminalSequences, visibleWidth } from '../../../src/plugins/sph-tui/screen/index.js';
 
 /** 组件按主题上色（theme.fg 始终发 ANSI），断言前先剥掉转义序列。 */
 function plain(lines: string[]): string[] {

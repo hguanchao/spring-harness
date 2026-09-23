@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
-import { searchReplaceTool } from '../../src/tools/search-replace.js';
+import { searchReplaceTool } from '../../src/plugins/sph-tools/search-replace.js';
 
 function ctx(root: string): ToolContext {
   return {

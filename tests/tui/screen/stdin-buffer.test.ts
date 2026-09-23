@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { StdinBuffer } from '../../../src/tui/screen/stdin-buffer.js';
+import { StdinBuffer } from '../../../src/plugins/sph-tui/screen/stdin-buffer.js';
 
 function collect(buffer: StdinBuffer): { data: string[]; paste: string[] } {
   const data: string[] = [];

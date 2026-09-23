@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { inferEndpointPreset, mergePresetHeaders } from '../../src/llm/presets.js';
+import { inferEndpointPreset, mergePresetHeaders } from '../../src/plugins/sph-llm/presets.js';
 
 describe('endpoint presets', () => {
   it('maps known hosts to a protocol', () => {

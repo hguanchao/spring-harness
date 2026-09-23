@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from '../../src/agent/prefix-tracker.js';
+import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from '../../src/plugins/sph-loop/prefix-tracker.js';
 
 function snapshot(overrides: Partial<PrefixSnapshot> = {}): PrefixSnapshot {
   return {

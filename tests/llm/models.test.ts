@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { displayNameForModel } from '../../src/llm/models.js';
+import { displayNameForModel } from '../../src/plugins/sph-llm/models.js';
 
 describe('displayNameForModel', () => {
   it('连字符版本号收成点号', () => {

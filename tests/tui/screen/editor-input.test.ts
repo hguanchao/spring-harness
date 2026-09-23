@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { TUI } from '../../../src/tui/screen/index.js';
-import { Editor } from '../../../src/tui/screen/editor.js';
+import type { TUI } from '../../../src/plugins/sph-tui/screen/index.js';
+import { Editor } from '../../../src/plugins/sph-tui/screen/editor.js';
 
 const UNDO = '\x1f';
 const BACKSPACE = '\x7f';

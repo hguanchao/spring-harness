@@ -1,10 +1,15 @@
-import type { FileObservation } from './observe.js';
 import type { PluginServices } from '../plugins/types.js';
-import type { JobBoard } from '../runtime/jobs.js';
-import type { TodoService } from '../plugins/services.js';
+import type { JobBoardPort } from '../plugins/services.js';
+import type { SkillEntry, TodoService } from '../plugins/services.js';
 import { assertWriteAllowed } from '../sandbox/policy.js';
 import type { SandboxMode } from '../sandbox/types.js';
-import type { SkillEntry } from '../skills/scan.js';
+
+/** 本轮读过或写过的路径。实现在 sph-tools，循环与写工具只依赖这三个方法。 */
+export interface FileObservation {
+  noteRead(abs: string): void;
+  noteWritten(abs: string): void;
+  denyIfUnseen(abs: string): ToolResult | undefined;
+}
 
 export interface ToolResult {
   ok: boolean;
@@ -23,7 +28,7 @@ export interface ToolContext {
   skills: SkillEntry[];
   /** todo 服务；todo 插件被禁用时不可用。核心工具只有 todo 工具用它。 */
   todos: TodoService;
-  jobs: JobBoard;
+  jobs: JobBoardPort;
   /**
    * 插件提供的服务表。核心工具用不到它；插件工具靠它取兄弟插件的服务
    * （如 `sph-mcp` 的 hub）。缺席的服务取到 undefined——调用方必须处理。

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
-import { createSseClient } from '../../src/llm/stream-client.js';
-import { openaiAdapter, type ChatMessage } from '../../src/llm/openai.js';
-import { responsesAdapter } from '../../src/llm/responses.js';
-import { ContextOverflowError } from '../../src/llm/errors.js';
-import { RetryableError } from '../../src/llm/retry.js';
+import { createSseClient } from '../../src/plugins/sph-llm/stream-client.js';
+import { openaiAdapter, type ChatMessage } from '../../src/plugins/sph-llm/openai.js';
+import { responsesAdapter } from '../../src/plugins/sph-llm/responses.js';
+import { ContextOverflowError } from '../../src/plugins/sph-llm/errors.js';
+import { RetryableError } from '../../src/plugins/sph-llm/retry.js';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {

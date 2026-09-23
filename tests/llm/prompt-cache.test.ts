@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_KEY_MAX_LENGTH } from '../../src/llm/prompt-cache.js';
+import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_KEY_MAX_LENGTH } from '../../src/plugins/sph-llm/prompt-cache.js';
 
 describe('clampPromptCacheKey', () => {
   it('不超过上限时原样返回', () => {

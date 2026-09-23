@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildSystemPrompt, sessionStateMessage } from '../../src/agent/prompt.js';
+import { buildSystemPrompt, sessionStateMessage } from '../../src/plugins/sph-loop/prompt.js';
 import { explorePrompt, generalPrompt } from '../../src/plugins/sph-subagent/prompt.js';
-import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from '../../src/agent/compact.js';
+import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from '../../src/plugins/sph-loop/compact.js';
 import { CLASSIFIER_SYSTEM } from '../../src/permission/auto.js';
-import { memoryToPrompt, touchInstructionBlock, type MemoryFile } from '../../src/agent/memory.js';
-import { EXPLORE_TOOLS, tools } from '../../src/tools/index.js';
+import { memoryToPrompt, touchInstructionBlock, type MemoryFile } from '../../src/plugins/sph-loop/memory.js';
+import { EXPLORE_TOOLS, tools } from '../../src/plugins/sph-tools/index.js';
 
 /**
  * Prompt 断言。

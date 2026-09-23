@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { grepTool } from '../../src/tools/grep.js';
+import { grepTool } from '../../src/plugins/sph-tools/grep.js';
 import { PathEscapeError } from '../../src/workspace/boundary.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';

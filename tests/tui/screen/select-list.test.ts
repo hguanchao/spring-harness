@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { SelectItem, SelectListTheme } from '../../../src/tui/screen/select-list.js';
-import { SelectList } from '../../../src/tui/screen/select-list.js';
-import type { TuiMouseEvent } from '../../../src/tui/screen/tui.js';
+import type { SelectItem, SelectListTheme } from '../../../src/plugins/sph-tui/screen/select-list.js';
+import { SelectList } from '../../../src/plugins/sph-tui/screen/select-list.js';
+import type { TuiMouseEvent } from '../../../src/plugins/sph-tui/screen/tui.js';
 
 const UP = '\x1b[A';
 const DOWN = '\x1b[B';

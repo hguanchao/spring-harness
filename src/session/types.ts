@@ -16,6 +16,13 @@ export interface SessionEvent {
   parentId?: string | null;
 }
 
+/** 一次工具失败的折叠摘要。循环把它写进下一轮提示，避免恢复后重蹈覆辙。 */
+export interface SessionFailure {
+  tool: string;
+  excerpt: string;
+  ts: string;
+}
+
 /**
  * 用户以 @路径 提及的文件附件。content 保持用户消息原文（`@路径` 原样留在正文里），
  * 投影层负责把附件拼成模型可见的 `<attached-files>` 块——存储与展示都不受污染。
@@ -73,6 +80,8 @@ export interface SessionPort {
   /** 当前分支头。旧线性会话可缺。 */
   readonly tip?: string;
   setTip?(id: string): void;
+  /** 当前分支上的记录。没有会话树的实现可以不提供，调用方退回 readAll。 */
+  readPath?(): SessionRecord[];
 }
 
 export interface SessionFactory {

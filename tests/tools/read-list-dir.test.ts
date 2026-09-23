@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { listDirTool } from '../../src/tools/list-dir.js';
-import { readFileTool } from '../../src/tools/read-file.js';
+import { listDirTool } from '../../src/plugins/sph-tools/list-dir.js';
+import { readFileTool } from '../../src/plugins/sph-tools/read-file.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 

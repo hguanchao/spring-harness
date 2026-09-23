@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { GLOB_MAX_RESULTS, globToRegExp, globTool, matchGlob } from '../../src/tools/glob.js';
+import { GLOB_MAX_RESULTS, globToRegExp, globTool, matchGlob } from '../../src/plugins/sph-tools/glob.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 

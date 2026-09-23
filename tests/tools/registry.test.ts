@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { defaultTools, tools } from '../../src/tools/index.js';
+import { defaultTools, tools } from '../../src/plugins/sph-tools/index.js';
 
 describe('default tool table flags', () => {
   it('只读探索工具可并行，写工具不行；explore 集合不含 write', () => {

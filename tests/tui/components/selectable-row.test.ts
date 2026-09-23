@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { LayoutBox, LayoutFrame } from '../../../src/tui/screen/layout.js';
-import type { Component } from '../../../src/tui/screen/tui.js';
+import type { LayoutBox, LayoutFrame } from '../../../src/plugins/sph-tui/screen/layout.js';
+import type { Component } from '../../../src/plugins/sph-tui/screen/tui.js';
 import {
   asSelectableRow,
   compositeRowSelection,
   selectRow,
-} from '../../../src/tui/components/selectable-row.js';
+} from '../../../src/plugins/sph-tui/components/selectable-row.js';
 
 function box(component: Component, rect: { x: number; y: number; width: number; height: number }): LayoutBox {
   return { component, rect, clip: { ...rect }, children: [], layer: 0 };

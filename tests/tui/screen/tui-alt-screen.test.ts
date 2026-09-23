@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applySelectionHighlight, paintScreenDiff } from '../../../src/tui/screen/tui-alt-screen.js';
+import { applySelectionHighlight, paintScreenDiff } from '../../../src/plugins/sph-tui/screen/tui-alt-screen.js';
 
 describe('paintScreenDiff', () => {
   it('第一帧清屏并写出每一行', () => {
@@ -83,7 +83,7 @@ describe('applySelectionHighlight', () => {
 
 describe('CURSOR_MARKER', () => {
   it('是 sph 的 APC，不含 pi', async () => {
-    const { CURSOR_MARKER } = await import('../../../src/tui/screen/tui.js');
+    const { CURSOR_MARKER } = await import('../../../src/plugins/sph-tui/screen/tui.js');
     assert.equal(CURSOR_MARKER.includes('pi'), false);
     assert.ok(CURSOR_MARKER.includes('sph'));
   });

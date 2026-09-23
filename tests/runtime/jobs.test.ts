@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createSteeringInbox, STEERING_QUEUE_LIMIT } from '../../src/runtime/jobs.js';
+import { createSteeringInbox, STEERING_QUEUE_LIMIT } from '../../src/plugins/sph-schedule/jobs.js';
 
 describe('createSteeringInbox', () => {
   it('push/drain 保持 SubagentInbox 语义：drain 全量取出并清空', () => {

@@ -6,7 +6,7 @@ import {
   CacheMissTracker,
   cacheHitRate,
   type CacheSample,
-} from '../../src/llm/cache-stats.js';
+} from '../../src/plugins/sph-llm/cache-stats.js';
 
 function sample(promptTokens: number, cachedTokens?: number, extra: Partial<CacheSample> = {}): CacheSample {
   return { promptTokens, ...(cachedTokens === undefined ? {} : { cachedTokens }), ...extra };

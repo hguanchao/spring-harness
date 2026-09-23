@@ -3,10 +3,7 @@
  * 只覆盖 prompt / abort / quit，给脚本嵌 sph 用，不是完整 pi RPC。
  */
 import { createInterface } from 'node:readline';
-import { runTurn } from '../agent/loop.js';
 import { HeadlessApprover } from '../permission/policy.js';
-import { jsonlSessionFactory } from '../session/store.js';
-import { defaultTools } from '../tools/index.js';
 import { createJsonOutput } from './output.js';
 import type { Runtime } from './bootstrap.js';
 import { isRecord } from '../util.js';
@@ -51,14 +48,14 @@ export async function runRpcLoop(runtime: Runtime, options: {
     abort = new AbortController();
     const output = createJsonOutput({ sessionId: session.id });
     try {
-      await (runtime.driver ?? runTurn)({
+      await runtime.driver({
         prompt: parsed.message,
         workspaceRoot: runtime.workspaceRoot,
         client,
         model: options.model,
         session,
-        tools: runtime.tools ?? defaultTools,
-        sessions: runtime.sessions ?? jsonlSessionFactory,
+        tools: runtime.tools,
+        sessions: runtime.sessions,
         sandbox,
         approver: new HeadlessApprover(options.approval, undefined, config.permissions),
         contextWindow: config.contextWindow,

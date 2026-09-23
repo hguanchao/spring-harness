@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { attachmentWireSuffix, collectFileMentions, parseFileMentions } from '../../src/agent/attachments.js';
+import { attachmentWireSuffix, collectFileMentions, parseFileMentions } from '../../src/plugins/sph-loop/attachments.js';
 import { READ_BYTE_LIMIT } from '../../src/workspace/boundary.js';
 
 describe('parseFileMentions', () => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { generateSessionTitle, sanitizeSessionTitle, SESSION_TITLE_MAX_CHARS } from '../../src/tui/session-title.js';
-import type { LlmClient, StreamDelta } from '../../src/llm/openai.js';
+import { generateSessionTitle, sanitizeSessionTitle, SESSION_TITLE_MAX_CHARS } from '../../src/plugins/sph-tui/session-title.js';
+import type { LlmClient, StreamDelta } from '../../src/plugins/sph-llm/openai.js';
 
 function fakeClient(reply: string | Error, onCall?: (messages: Array<{ role: string; content: string }>) => void): LlmClient {
   return {
