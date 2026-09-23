@@ -259,6 +259,11 @@ export function renderPluginsReport(input: {
         ? '- services: none'
         : `- services: ${plugin.services.map((name) => `\`${name}\``).join(', ')}`,
     );
+    lines.push(
+      plugin.commands.length === 0
+        ? '- commands: none'
+        : `- commands: ${plugin.commands.map((name) => `\`/${name}\``).join(', ')}`,
+    );
     lines.push(...plugin.warnings.map((warning) => `- warning: ${plain(warning)}`));
   }
 

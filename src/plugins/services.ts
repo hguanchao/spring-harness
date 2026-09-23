@@ -266,6 +266,12 @@ export type SandboxBackendFactory = (
 export const SANDBOX_SERVICE = 'sph-sandbox';
 
 // ---------------------------------------------------------------------------
+// 留在宿主、不做成插件的四件事：
+// - 配置：决定装哪些插件、用哪把钥匙，必须先于插件装载。
+// - 信任：项目级插件是会被执行的代码，门必须在装载之前。
+// - 审批：一次写或一条命令能不能发生，是安全策略，不是功能模块。
+// - 沙箱档位与只读拒写：引擎在 sph-sandbox，策略不能缺席。该插件被钉死，同名目录换不掉它。
+//
 // 子代理目录接缝
 //
 // plan mode 要知道一次 subagent 调用会不会写文件，而这取决于 agent 定义，不取决于
@@ -290,7 +296,8 @@ export const SUBAGENT_SERVICE = 'sph-subagent';
 
 import type { LlmClient, ReasoningEffort } from '../llm/client.js';
 import type { ApiProtocol, CompatProfile } from '../config/primitives.js';
-import type { SessionFactory, SessionPort, SessionRecord } from '../session/types.js';
+import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../session/types.js';
+import type { sessionEventData } from '../session/fold.js';
 
 /** 构造一个模型客户端需要的全部参数。`api` 选择协议适配器，其余交给传输层。 */
 export interface ModelClientOptions {
@@ -369,6 +376,10 @@ export interface SessionService {
   factory: SessionFactory;
   list(dir: string, options?: { search?: string; includeSubagents?: boolean }): Promise<SessionInfo[]>;
   fold(records: readonly SessionRecord[]): FoldedSessionView;
+  /** 记录格式。换存储实现时可以换折叠和事件形状，循环按这一面读写。 */
+  readonly events: typeof sessionEventData;
+  closeInterruptedTurn(session: SessionPort, messages: SessionMessage[]): number;
+  lastAssistant(messages: readonly SessionMessage[]): SessionMessage | undefined;
   exportMarkdown(session: SessionPort): string;
   exportJson(session: SessionPort): string;
   exportHtml(session: SessionPort): string;
@@ -396,7 +407,7 @@ export interface WorktreePort {
 }
 
 import type { AgentDriver } from '../agent/driver.js';
-import type { JobBoardPort } from '../runtime/scheduler.js';
+import type { JobBoardPort, JobRecord } from '../runtime/scheduler.js';
 
 export type { JobBoardPort };
 
@@ -411,6 +422,8 @@ export const LOOP_SERVICE = 'sph-loop';
 export interface SchedulerService {
   /** 进程内后台任务板。宿主负责创建，并在退出时 abortAll。 */
   create(): JobBoardPort;
+  /** 完成通知的正文。循环注入和界面唤醒都用它。 */
+  notificationText(job: JobRecord): string;
 }
 
 /** `sph-schedule` 服务的注册名。 */

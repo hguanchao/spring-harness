@@ -127,6 +127,8 @@ describe('sph-subagent 装载', () => {
       consume: () => undefined,
       warn: () => {},
       clip: (text) => text,
+      registerCommand: () => {},
+      subscribe: () => {},
       onDispose: () => {},
     };
     setup(api);

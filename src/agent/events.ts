@@ -70,3 +70,17 @@ export type AgentEvent =
   | { type: 'done' };
 
 export type AgentListener = (event: AgentEvent) => void;
+
+/** 先交给界面或 headless，再交给插件订阅者。某个订阅者抛错不影响其余。 */
+export function combineListeners(primary: AgentListener, extra: readonly AgentListener[]): AgentListener {
+  return (event) => {
+    primary(event);
+    for (const listener of extra) {
+      try {
+        listener(event);
+      } catch {
+        // 订阅者是旁路，不能打断这一轮。
+      }
+    }
+  };
+}

@@ -25,6 +25,8 @@ function harness(): { api: PluginApi; tools: ToolSpec[]; services: Map<string, u
     consume: () => undefined,
     warn: () => {},
     clip: (text, limit = 32 * 1024) => (text.length <= limit ? text : text.slice(0, limit)),
+    registerCommand: () => {},
+    subscribe: () => {},
     onDispose: () => {},
   };
   return { api, tools, services };

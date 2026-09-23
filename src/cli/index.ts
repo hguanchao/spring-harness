@@ -9,15 +9,14 @@ import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { ConfigError, loadConfig } from '../config/load.js';
 import { loadRegistry } from '../config/registry.js';
-import { sphModelsPath, sphSpillRoot } from '../home.js';
+import { sphConfigPath, sphModelsPath, sphSpillRoot } from '../home.js';
+import { combineListeners } from '../agent/events.js';
 import type { TokenUsage } from '../llm/client.js';
-import { SESSION_SERVICE, STORAGE_SERVICE, UI_SERVICE, type SessionService, type StorageService, type UiService } from '../plugins/services.js';
-// 注意：TUI 模块**不要**在顶层 import。它（连同 marked）约 300ms 的加载
-// 成本只有交互路径才值得付；--help / sessions / export / -p 全都不需要它。
-// 下面两处按需动态 import。
-import { sessionService } from '../plugins/sph-session/index.js';
-import type { SessionInfo } from '../plugins/services.js';
+import { PluginHost } from '../plugins/host.js';
+import { discoverPlugins, userPluginsRoot } from '../plugins/loader.js';
+import { SESSION_SERVICE, STORAGE_SERVICE, UI_SERVICE, type SessionInfo, type SessionService, type StorageService, type UiService } from '../plugins/services.js';
 import { resolveWorkspaceRoot } from '../workspace/root.js';
+import { isWorkspaceTrusted } from '../workspace/trust.js';
 
 function printSessionInfos(infos: SessionInfo[]): void {
   for (const info of infos) {
@@ -29,8 +28,45 @@ function printSessionInfos(infos: SessionInfo[]): void {
   }
 }
 
+/**
+ * 只装 sph-session。同名替换会进来，模型、沙箱和 MCP 不会。
+ * 插件被关掉或装载失败时返回 undefined，不退回内置实现。
+ */
+async function loadSessionService(workspaceRoot: string): Promise<SessionService | undefined> {
+  let disabled: string[] = [];
+  try {
+    disabled = loadConfig().disabledPlugins;
+  } catch {
+    disabled = [];
+  }
+  const host = new PluginHost({
+    coreTools: [],
+    workspaceRoot,
+    configPath: sphConfigPath(),
+  });
+  const discovered = discoverPlugins({
+    workspaceRoot,
+    userRoot: userPluginsRoot(),
+    trusted: isWorkspaceTrusted(workspaceRoot),
+    disabled,
+  });
+  const only = discovered.candidates.filter((candidate) => candidate.name === 'sph-session');
+  await host.load(only, discovered.shadowed.filter((name) => name === 'sph-session'), []);
+  const service = host.get<SessionService>(SESSION_SERVICE);
+  if (!service) {
+    for (const warning of host.warnings()) process.stderr.write(`warning: ${warning}\n`);
+  }
+  return service;
+}
+
 /** sessions 子命令：列出本工作区的主会话（或按关键词过滤），不进入 agent 运行时。 */
 async function runSessionsCommand(workspaceRoot: string, search?: string): Promise<void> {
+  const sessionService = await loadSessionService(workspaceRoot);
+  if (!sessionService) {
+    process.stderr.write('sph-session is not loaded\n');
+    process.exitCode = 1;
+    return;
+  }
   const dir = sessionService.sessionDirFor(workspaceRoot);
   const infos = await sessionService.list(dir, { search });
   printSessionInfos(infos);
@@ -38,6 +74,12 @@ async function runSessionsCommand(workspaceRoot: string, search?: string): Promi
 }
 
 async function runExportCommand(workspaceRoot: string, sessionId?: string, format: 'md' | 'json' | 'html' = 'md'): Promise<void> {
+  const sessionService = await loadSessionService(workspaceRoot);
+  if (!sessionService) {
+    process.stderr.write('sph-session is not loaded\n');
+    process.exitCode = 1;
+    return;
+  }
   const dir = sessionService.sessionDirFor(workspaceRoot);
   // export 是只读命令：不创建会话，没有可导出内容时报错退出。
   let id = sessionId;
@@ -200,7 +242,7 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       depth: folded.depth,
       maxSubagentDepth: config.subagentMaxDepth,
       maxSessionTokens: config.maxSessionTokens,
-      listener: output.listener,
+      listener: combineListeners(output.listener, runtime.plugins.turnListeners()),
       services: runtime.plugins,
       todos,
       jobs,

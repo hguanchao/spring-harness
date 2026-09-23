@@ -37,6 +37,8 @@ function harness(): {
     consume: () => undefined,
     warn: () => {},
     clip: (text, limit = 32 * 1024) => (text.length <= limit ? text : text.slice(0, limit)),
+    registerCommand: () => {},
+    subscribe: () => {},
     onDispose: (fn) => disposers.push(fn),
   };
   return { api, tools, services, disposers };

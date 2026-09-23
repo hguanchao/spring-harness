@@ -226,7 +226,7 @@ describe('renderMcpReport', () => {
 
 describe('renderPluginsReport', () => {
   function plugin(overrides: Partial<LoadedPlugin> & { name: string }): LoadedPlugin {
-    return { entries: ['/x/index.ts'], root: 'bundled', tools: [], services: [], warnings: [], ...overrides };
+    return { entries: ['/x/index.ts'], root: 'bundled', tools: [], services: [], commands: [], warnings: [], ...overrides };
   }
 
   it('列出每个插件的来源、工具与服务', () => {
@@ -245,6 +245,7 @@ describe('renderPluginsReport', () => {
     assert.match(text, /- services: `sph-mcp`/);
     // 没有工具/服务的插件要显式写 none，而不是留空行让人以为被截断。
     assert.match(text, /- tools: none/);
+    assert.match(text, /- commands: none/);
     assert.match(text, /### todo/);
     assert.match(text, /~\/\.sph\/plugins/);
   });

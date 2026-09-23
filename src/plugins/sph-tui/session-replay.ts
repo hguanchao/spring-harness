@@ -11,8 +11,8 @@
 
 import { isSessionStateMessage } from '../sph-loop/prompt.js';
 import { messagesOf } from '../sph-session/query.js';
-import { closeInterruptedTurn } from '../sph-session/repair.js';
-import { foldSessionState, type SessionFailure } from '../sph-session/fold.js';
+import { closeInterruptedTurn } from '../../session/repair.js';
+import { foldSessionState, type SessionFailure } from '../../session/fold.js';
 import type { SessionMessage, SessionRecord } from '../../session/types.js';
 import type { SessionPort } from '../../session/types.js';
 import type { CustomEditor } from './components/custom-editor.js';

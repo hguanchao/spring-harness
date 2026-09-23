@@ -24,6 +24,8 @@
  * 在类型检查阶段卡住——坏插件在运行时才炸的话，用户看到的是启动横幅里的一条警告。
  */
 
+import type { AgentListener } from '../agent/events.js';
+import type { SessionPort } from '../session/types.js';
 import type { ToolContext, ToolSpec } from '../tools/types.js';
 
 /**
@@ -91,6 +93,35 @@ export interface PluginApi {
   clip(text: string, limit?: number): string;
   /** 登记清理回调；逆序执行，单个回调抛错不影响其余。 */
   onDispose(fn: () => void): void;
+  /**
+   * 注册一条斜杠命令。名字与内置命令或别的插件撞车会抛错。
+   * 界面把它并进 `/` 菜单；headless 没有菜单，命令只在交互模式可用。
+   */
+  registerCommand(command: PluginCommand): void;
+  /** 订阅一轮对话的事件。宿主在自己的监听器之后调用，订阅者抛错不会打断这一轮。 */
+  subscribe(listener: AgentListener): void;
+}
+
+/** 插件斜杠命令看到的界面能力。不把整个 TUI 交出去。 */
+export interface PluginCommandContext {
+  argument: string;
+  workspaceRoot: string;
+  session: SessionPort;
+  services: PluginServices;
+  /** 当前是否有一轮在跑。 */
+  busy: boolean;
+  /** 与这一轮共享的计划模式开关。界面没有时缺省。 */
+  planMode?: { active: boolean };
+  notify(message: string, level?: 'dim' | 'warn' | 'error' | 'success'): void;
+  /** 用这段文字再开一轮。忙时由界面拒绝。 */
+  runPrompt(prompt: string): Promise<void>;
+}
+
+export interface PluginCommand {
+  /** 不带斜杠。小写字母、数字、连字符。 */
+  name: string;
+  description: string;
+  run(ctx: PluginCommandContext): void | Promise<void>;
 }
 
 /** 对象形式的插件：默认导出 `{ name, setup }`。 */

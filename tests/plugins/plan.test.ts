@@ -24,6 +24,8 @@ function harness(catalog?: SubagentCatalog): { api: PluginApi; tools: ToolSpec[]
     consume: <T>(name: string): T | undefined => (name === SUBAGENT_SERVICE ? catalog as T : undefined),
     warn: () => {},
     clip: (text, limit = 32 * 1024) => (text.length <= limit ? text : text.slice(0, limit)),
+    registerCommand: () => {},
+    subscribe: () => {},
     onDispose: () => {},
   };
   return { api, tools, services };

@@ -42,6 +42,19 @@ export const STEERING_QUEUE_LIMIT = 8;
 
 export type TaskDoneListener = (job: JobRecord) => void;
 
+/**
+ * 完成通知的正文。循环注入和界面唤醒共用这一份，避免两边各写一种。
+ * 带 session id，模型据此能续接，不必再查 jobs。
+ */
+export function jobNotificationText(job: JobRecord): string {
+  const ok = job.status === 'done' && job.exitCode === 0;
+  const body = ok ? job.result || '(no output)' : job.stderr || '(failed with no output)';
+  const footer = job.subagentSessionId
+    ? `\n\n[subagent session: ${job.subagentSessionId} — continue with subagent(resume_from: "${job.subagentSessionId}")]`
+    : '';
+  return `[background task ${ok ? 'completed' : 'FAILED'}: ${job.command} — runtime notification, not a user request; do not start this work again unless the result shows it failed]\n${body}${footer}`;
+}
+
 /** 替换 sph-schedule 时实现这一面即可。 */
 export interface JobBoardPort {
   startTask(label: string, task: (signal: AbortSignal, job: JobRecord) => Promise<string>): string;

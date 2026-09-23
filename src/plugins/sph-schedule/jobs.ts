@@ -10,7 +10,7 @@ import {
 import { errorMessage } from '../../util.js';
 
 export type { JobBoardPort, JobRecord, SteeringInbox, SubagentInbox, TaskDoneListener } from '../../runtime/scheduler.js';
-export { STEERING_QUEUE_LIMIT } from '../../runtime/scheduler.js';
+export { STEERING_QUEUE_LIMIT, jobNotificationText } from '../../runtime/scheduler.js';
 
 /** 造一个带查看与搬回能力的运行中输入队列。界面用它；测试注入即可。 */
 export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox & { full(): boolean } {
@@ -49,21 +49,6 @@ export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox
       queue.splice(Math.max(0, Math.min(index, queue.length)), 0, text);
     },
   };
-}
-
-/**
- * 完成通知的正文格式。loop 每步注入与 TUI 唤醒共用同一份文案，避免两边漂移。
- * 带 session id footer：模型据此能 resume 或继续发消息，不必再查 jobs。
- */
-export function jobNotificationText(job: JobRecord): string {
-  const ok = job.status === 'done' && job.exitCode === 0;
-  const body = ok ? job.result || '(no output)' : job.stderr || '(failed with no output)';
-  const footer = job.subagentSessionId
-    ? `\n\n[subagent session: ${job.subagentSessionId} — continue with subagent(resume_from: "${job.subagentSessionId}")]`
-    : '';
-  // 说明来源与性质：这条是运行时生成的通知，不是用户发言，也不是待办。
-  // 不写清楚，模型会把它当成新指令去执行一遍，或当成用户提问去回答。
-  return `[background task ${ok ? 'completed' : 'FAILED'}: ${job.command} — runtime notification, not a user request; do not start this work again unless the result shows it failed]\n${body}${footer}`;
 }
 
 /**

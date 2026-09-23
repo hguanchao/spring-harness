@@ -23,7 +23,6 @@ export const COMMANDS: readonly CommandItem[] = [
   { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises' },
   { id: 'plugins', label: '/plugins', hint: 'List loaded plugins, what they provide, and what failed' },
   { id: 'mcps', label: '/mcps', hint: 'Manage MCP servers: status, enable/disable, add, remove, reload' },
-  { id: 'plan', label: '/plan', hint: 'Enter plan mode, or /plan off to leave' },
   { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
   { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions' },
   { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },

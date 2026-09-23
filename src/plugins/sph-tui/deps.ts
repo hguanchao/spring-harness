@@ -13,7 +13,8 @@ import type { LlmClient, ReasoningEffort } from '../sph-llm/openai.js';
 import type { McpReloadResult, McpPreferences, McpService } from '../services.js';
 import type { LoadedPlugin } from '../host.js';
 import type { PluginLoadFailure } from '../loader.js';
-import type { PluginServices } from '../types.js';
+import type { AgentListener } from '../../agent/events.js';
+import type { PluginCommand, PluginServices } from '../types.js';
 import type { ApprovalMode, PermissionRules, SubagentApprovalPolicy } from '../../permission/policy.js';
 import type { JobBoardPort } from '../services.js';
 import type { TodoService } from '../services.js';
@@ -63,6 +64,10 @@ export interface TuiDeps {
   pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[]; shadowed: string[]; pinned?: string[] };
   /** 插件服务表；loop 按接缝名取用（sph-mcp 的清单进提示词），插件工具也靠它取兄弟服务。 */
   pluginServices: PluginServices;
+  /** 插件注册的斜杠命令。内置命令同名时以内置为准。 */
+  pluginCommands?: readonly PluginCommand[];
+  /** 插件对一轮事件的订阅。界面先处理，再转给它们。 */
+  turnListeners?: readonly AgentListener[];
   /** todo 服务（todo 插件提供）。 */
   todos: TodoService;
   jobs: JobBoardPort;

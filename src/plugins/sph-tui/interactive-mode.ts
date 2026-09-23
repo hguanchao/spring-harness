@@ -28,7 +28,7 @@ import { loadUserTheme } from './theme/theme.js';
 import { sphModelsPath, sphThemePath } from '../../home.js';
 
 import { createSteeringInbox, STEERING_QUEUE_LIMIT, type SteeringInbox } from '../sph-schedule/jobs.js';
-import { jobNotificationText } from '../sph-schedule/jobs.js';
+
 import { runTurn } from '../sph-loop/loop.js';
 import { TouchMemory } from '../sph-loop/memory.js';
 import { buildSystemPrompt } from '../sph-loop/prompt.js';
@@ -51,10 +51,12 @@ import { upsertModelApi, type ProviderDeclaration } from '../../config/registry.
 import type { ApiProtocol } from '../../config/load.js';
 import type { LlmClient, ReasoningEffort, TokenUsage } from '../sph-llm/openai.js';
 import { SpillStore } from '../sph-storage/spill.js';
-import { sessionEventData, type SessionFailure } from '../sph-session/fold.js';
+import { combineListeners } from '../../agent/events.js';
+import { sessionEventData, type SessionFailure } from '../../session/fold.js';
+import { jobNotificationText } from '../../runtime/scheduler.js';
 import { jsonlSessionFactory } from '../sph-session/store.js';
 import { EMPTY_PLUGIN_SERVICES } from '../types.js';
-import { SESSION_SERVICE, STORAGE_SERVICE, type SessionService, type SpillStorePort, type StorageService } from '../services.js';
+import { SCHEDULER_SERVICE, SESSION_SERVICE, STORAGE_SERVICE, type SchedulerService, type SessionService, type SpillStorePort, type StorageService } from '../services.js';
 import { sessionService } from '../sph-session/index.js';
 import type { SessionPort } from '../../session/types.js';
 import { defaultTools } from '../sph-tools/index.js';
@@ -402,7 +404,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   private setupInput(): void {
-    const slashCommands: SlashCommand[] = COMMANDS.map((command) => ({
+    const slashCommands: SlashCommand[] = this.commandItems().map((command) => ({
       name: command.id,
       description: command.hint,
     }));
@@ -664,7 +666,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         depth: this.sessionDepth,
         maxSubagentDepth: this.deps.maxSubagentDepth,
         maxSessionTokens: this.deps.maxSessionTokens,
-        listener: this.listener,
+        listener: combineListeners(this.listener, this.deps.turnListeners ?? []),
         signal: controller.signal,
         services: this.deps.pluginServices,
         todos: this.deps.todos,
@@ -776,7 +778,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private wakeForCompletedJobs(): void {
     const notifications = this.deps.jobs.drainNotifications();
     if (notifications.length === 0) return;
-    const prompt = notifications.map(jobNotificationText).join('\n\n');
+    const notify = this.deps.pluginServices.get<SchedulerService>(SCHEDULER_SERVICE)?.notificationText
+      ?? (this.deps.pluginServices === EMPTY_PLUGIN_SERVICES ? jobNotificationText : undefined);
+    if (!notify) return;
+    const prompt = notifications.map(notify).join('\n\n');
     this.addNotice('Background task completed — continuing.', 'dim');
     void this.executeTurn(prompt);
   }
@@ -1249,7 +1254,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   // ------------------------------------------------------------------ 命令
 
   private async openCommandPalette(): Promise<void> {
-    const items: SelectItem[] = COMMANDS.map((command) => ({
+    const items: SelectItem[] = this.commandItems().map((command) => ({
       value: command.id,
       label: command.label,
       description: command.hint,
@@ -1263,8 +1268,24 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const name = COMMAND_ALIASES[rawName.toLowerCase()] ?? rawName.toLowerCase();
     const argument = rest.join(' ').trim();
 
+    const pluginCommand = (this.deps.pluginCommands ?? []).find((command) => command.name === name);
     if (!COMMAND_NAMES.has(name)) {
-      this.addNotice(`Unknown command: /${name} — type /help`, 'warn');
+      if (!pluginCommand) {
+        this.addNotice(`Unknown command: /${name} — type /help`, 'warn');
+        return;
+      }
+      await pluginCommand.run({
+        argument,
+        workspaceRoot: this.deps.workspaceRoot,
+        session: this.session,
+        services: this.deps.pluginServices,
+        busy: this.running,
+        planMode: this.plan,
+        notify: (message, level) => this.addNotice(message, level ?? 'dim'),
+        runPrompt: (prompt) => this.executeTurn(prompt),
+      });
+      this.applyEditorBorder();
+      this.ui.requestRender();
       return;
     }
 
@@ -1289,9 +1310,6 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         break;
       case 'mcps':
         await commandMcps(this);
-        break;
-      case 'plan':
-        await this.commandPlan(argument);
         break;
       case 'goal':
         await this.commandGoal(argument);
@@ -1327,7 +1345,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private async commandHelp(): Promise<void> {
     const lines: string[] = [];
     lines.push('## Commands');
-    for (const command of COMMANDS) lines.push(`- \`${command.label}\` — ${command.hint}`);
+    for (const command of this.commandItems()) lines.push(`- \`${command.label}\` — ${command.hint}`);
     // 别名不进上面的清单（与 grok-build 一致，菜单只列正名），但必须写出来，
     // 否则靠旧名字找到这里的人会以为命令被删了。
     const aliases = Object.entries(COMMAND_ALIASES).map(([alias, canonical]) => `\`/${alias}\` → \`/${canonical}\``);
@@ -1621,7 +1639,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
   /** 落一条 recap 事件：既是留档（/status、回放），也是自动 recap 的水印。 */
   private commitRecap(summary: string, auto: boolean, mainTurns: number, shown: boolean): void {
-    this.session.appendEvent('recap', sessionEventData.recap({ summary, auto, mainTurns, shown }));
+    this.session.appendEvent('recap', this.sessionEvents().recap({ summary, auto, mainTurns, shown }));
     this.lastRecapMainTurn = mainTurns;
   }
 
@@ -1649,38 +1667,20 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.ui.requestRender();
   }
 
-  // ------------------------------------------------------------------ 计划模式
-
-  private writePlanMode(active: boolean): void {
-    if (this.plan.active === active) {
-      this.addNotice(active ? 'Already in plan mode. /plan off to leave.' : 'Plan mode is already off.', 'dim');
-      return;
-    }
-    this.plan.active = active;
-    this.applyEditorBorder();
-    this.session.appendEvent('plan_mode', sessionEventData.planMode(active));
-    this.addNotice(
-      active
-        ? 'Plan mode on. Explore and design; writes are blocked until the plan is approved. /plan off to leave.'
-        : 'Plan mode off.',
-      'success',
-    );
-    this.ui.requestRender();
+  /** 内置命令在前。插件命令同名时不覆盖内置。 */
+  private commandItems(): { id: string; label: string; hint: string }[] {
+    const builtin = new Set(COMMANDS.map((command) => command.id));
+    const extra = (this.deps.pluginCommands ?? [])
+      .filter((command) => !builtin.has(command.name))
+      .map((command) => ({ id: command.name, label: `/${command.name}`, hint: command.description }));
+    return [...COMMANDS, ...extra];
   }
 
-  private async commandPlan(argument: string): Promise<void> {
-    if (argument === 'off') {
-      this.writePlanMode(false);
-      return;
-    }
-    if (!this.plan.active) this.writePlanMode(true);
-    else if (argument === '') this.addNotice('Already in plan mode. /plan off to leave.', 'dim');
-    if (argument === '') return;
-    if (this.running) {
-      this.addNotice('A turn is already running — the next step will use plan mode. Press Esc to interrupt.', 'warn');
-      return;
-    }
-    await this.executeTurn(argument);
+  private sessionEvents() {
+    const api = this.deps.pluginServices.get<SessionService>(SESSION_SERVICE);
+    if (api) return api.events;
+    if (this.deps.pluginServices === EMPTY_PLUGIN_SERVICES) return sessionEventData;
+    throw new Error('sph-session is not loaded');
   }
 
   private async reviewPlan(plan: string, title: string): Promise<{ approved: boolean; feedback?: string }> {
@@ -1734,7 +1734,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
   private writeGoal(text: string): void {
     this.goal = text.trim() === '' ? undefined : text.trim();
-    this.session.appendEvent('goal', sessionEventData.goal(this.goal ?? ''));
+    this.session.appendEvent('goal', this.sessionEvents().goal(this.goal ?? ''));
     this.addNotice(this.goal ? `Goal set: ${this.goal}` : 'Goal cleared.', 'success');
   }
 
@@ -1773,7 +1773,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.client = this.buildClient();
     this.session.appendEvent(
       'model_selection',
-      sessionEventData.modelSelection({ model, contextWindow: this.contextWindow, maxTokens: this.maxTokens }),
+      this.sessionEvents().modelSelection({ model, contextWindow: this.contextWindow, maxTokens: this.maxTokens }),
     );
     // provider 与 model 一起写回：下一个进程从 config.toml 读到的就是这次的选择。
     const error = this.writeConfig({ provider, model });

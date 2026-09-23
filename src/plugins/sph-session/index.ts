@@ -4,7 +4,9 @@
 import type { PluginApi } from '../types.js';
 import { SESSION_SERVICE, type SessionService } from '../services.js';
 import { exportHtml, exportJson, exportMarkdown } from './export.js';
-import { foldSessionState } from './fold.js';
+import { foldSessionState, sessionEventData } from '../../session/fold.js';
+import { closeInterruptedTurn } from '../../session/repair.js';
+import { lastAssistantMessage } from '../../session/query.js';
 import { acquireSessionLock, hasOtherLiveSessionIn, SessionLockedError } from './lock.js';
 import { sessionDirFor } from './path.js';
 import { jsonlSessionFactory, listSessions, setCurrentSession } from './store.js';
@@ -21,6 +23,9 @@ export const sessionService: SessionService = {
   factory: jsonlSessionFactory,
   list: (dir, options) => listSessions(dir, options),
   fold: (records) => foldSessionState(records),
+  events: sessionEventData,
+  closeInterruptedTurn,
+  lastAssistant: lastAssistantMessage,
   exportMarkdown,
   exportJson,
   exportHtml,

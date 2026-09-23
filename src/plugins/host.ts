@@ -21,7 +21,8 @@ import { errorMessage } from '../util.js';
 import { canonicalize } from '../workspace/boundary.js';
 import { isWorkspaceTrusted } from '../workspace/trust.js';
 import { loadPluginModules, type PluginCandidate, type PluginLoadFailure } from './loader.js';
-import { isPluginObject, type PluginApi, type PluginFactory, type PluginHostFacts, type PluginServices } from './types.js';
+import type { AgentListener } from '../agent/events.js';
+import { isPluginObject, type PluginApi, type PluginCommand, type PluginFactory, type PluginHostFacts, type PluginServices } from './types.js';
 
 /** 一个已装载插件的摘要，供 `sph plugins` 与诊断输出用。 */
 export interface LoadedPlugin {
@@ -32,6 +33,8 @@ export interface LoadedPlugin {
   tools: string[];
   /** 该插件提供的服务名。 */
   services: string[];
+  /** 该插件注册的斜杠命令。 */
+  commands: string[];
   /** 该插件自己报的问题（api.warn）与宿主判定的问题（重名、setup 抛错）。 */
   warnings: string[];
 }
@@ -47,6 +50,8 @@ interface PluginRecord {
   candidate: PluginCandidate;
   tools: ToolSpec[];
   services: string[];
+  commands: PluginCommand[];
+  listeners: AgentListener[];
   warnings: string[];
   disposers: Array<() => void>;
 }
@@ -89,6 +94,8 @@ export class PluginHost implements PluginServices {
         candidate,
         tools: [],
         services: [],
+        commands: [],
+        listeners: [],
         warnings: [],
         disposers: [],
       };
@@ -152,6 +159,13 @@ export class PluginHost implements PluginServices {
       onDispose: (fn: () => void): void => {
         record.disposers.push(fn);
       },
+      registerCommand: (command: PluginCommand): void => {
+        this.assertCommandNameFree(command.name);
+        record.commands.push(command);
+      },
+      subscribe: (listener: AgentListener): void => {
+        record.listeners.push(listener);
+      },
     };
     return api;
   }
@@ -189,6 +203,27 @@ export class PluginHost implements PluginServices {
     }
   }
 
+  /** 斜杠命令。界面并进菜单；同名时先注册的留下，后注册的在 setup 里已经失败。 */
+  commands(): readonly PluginCommand[] {
+    return this.records.flatMap((record) => record.commands);
+  }
+
+  /** 一轮对话的插件订阅者。宿主在自己的监听器之后调用。 */
+  turnListeners(): readonly AgentListener[] {
+    return this.records.flatMap((record) => record.listeners);
+  }
+
+  private assertCommandNameFree(commandName: string): void {
+    if (!/^[a-z][a-z0-9-]*$/.test(commandName)) {
+      throw new Error(`command "${commandName}" must be lowercase letters, digits, and hyphens`);
+    }
+    for (const other of this.records) {
+      if (other.commands.some((command) => command.name === commandName)) {
+        throw new Error(`command "${commandName}" collides with plugin "${other.candidate.name}"`);
+      }
+    }
+  }
+
   /** 核心 + 插件工具，合成最终工具表。 */
   tools(): ToolRegistry {
     const pluginTools = this.records.flatMap((record) => record.tools);
@@ -219,6 +254,7 @@ export class PluginHost implements PluginServices {
         root: record.candidate.root,
         tools: record.tools.map((tool) => tool.name),
         services: [...record.services],
+        commands: record.commands.map((command) => command.name),
         warnings: [...record.warnings],
       })),
       failures: [...this.failures],

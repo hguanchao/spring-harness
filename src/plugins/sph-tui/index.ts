@@ -48,6 +48,8 @@ const ui: UiService = {
       mcpPreferences: rt.mcpPreferences,
       pluginReport: () => rt.plugins.report(),
       pluginServices: rt.plugins,
+      pluginCommands: rt.plugins.commands(),
+      turnListeners: rt.plugins.turnListeners(),
       todos: rt.todos,
       jobs: rt.jobs,
       approvalMode: cli.approval ?? rt.config.approval ?? 'ask',

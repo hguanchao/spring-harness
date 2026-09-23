@@ -19,14 +19,15 @@ import { ContextOverflowError } from '../sph-llm/errors.js';
 import type { ChatMessage, TokenUsage } from '../sph-llm/openai.js';
 import { EMPTY_TODO, MCP_SERVICE, SCHEDULER_SERVICE, SESSION_SERVICE, SKILLS_SERVICE, TODO_SERVICE, todoEventData, type McpService, type SchedulerService, type SessionService, type SkillService, type TodoService } from '../services.js';
 import { EMPTY_PLUGIN_SERVICES, type PluginServices } from '../types.js';
-import { JobBoard, jobNotificationText, type JobRecord } from '../sph-schedule/jobs.js';
+import { JobBoard, type JobRecord } from '../sph-schedule/jobs.js';
+import { jobNotificationText } from '../../runtime/scheduler.js';
 import { WorktreeStore } from './worktrees.js';
 import { shellArgv } from '../../sandbox/shell-bin.js';
 import { errorMessage } from '../../util.js';
 import { jsonlSessionFactory } from '../sph-session/store.js';
-import { foldSessionState, sessionEventData } from '../sph-session/fold.js';
-import { lastAssistantMessage } from '../sph-session/query.js';
-import { closeInterruptedTurn } from '../sph-session/repair.js';
+import { foldSessionState, sessionEventData } from '../../session/fold.js';
+import { lastAssistantMessage } from '../../session/query.js';
+import { closeInterruptedTurn } from '../../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../../session/types.js';
 import { scanSkills } from '../sph-skills/scan.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -125,6 +126,10 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const sessions = options.sessions ?? sessionApi?.factory ?? bundled(services, jsonlSessionFactory);
   if (!sessions) throw new Error('sph-session is not loaded');
   const fold = sessionApi?.fold ?? bundled(services, foldSessionState);
+  const events = sessionApi?.events ?? bundled(services, sessionEventData);
+  const closeTurn = sessionApi?.closeInterruptedTurn ?? bundled(services, closeInterruptedTurn);
+  const lastAssistant = sessionApi?.lastAssistant ?? bundled(services, lastAssistantMessage);
+  const notify = services.get<SchedulerService>(SCHEDULER_SERVICE)?.notificationText ?? bundled(services, jobNotificationText);
   // 测试不装插件，直接扫技能目录。正式启动装了插件之后，关掉 sph-skills 就是空目录，
   // 不再回落到循环自己的那份扫描。
   const skills = services === EMPTY_PLUGIN_SERVICES
@@ -209,7 +214,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
   // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。
   const mirror: SessionMessage[] = options.session.readMessages();
-  closeInterruptedTurn(options.session, mirror);
+  if (!closeTurn) throw new Error('sph-session is not loaded');
+  closeTurn(options.session, mirror);
   // 用户消息先只进内存。首次模型活动再落盘——取消时 TUI 把原文放回输入框，
   // JSONL 里也不该留下一条没有回复的 user（对齐 grok cancel-rewind）。
   const pendingUser: SessionMessage = {
@@ -433,7 +439,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         subagentPrompt: input.systemPrompt,
         ...(input.mode === 'background' ? { inbox: childInbox } : {}),
       });
-      const last = lastAssistantMessage(childSession.readMessages());
+      const last = lastAssistant?.(childSession.readMessages());
       outcome = { ok: true, summary: last?.content || '(subagent produced no assistant text)' };
       // 结果带 session id footer：模型据此能 resume 或继续发消息，不必再查 jobs。
       return `${outcome.summary}\n\n[subagent session: ${childSession.id} — continue with subagent(resume_from: "${childSession.id}")]`;
@@ -506,7 +512,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       ? (active: boolean) => {
           if (!options.planMode || options.planMode.active === active) return;
           options.planMode.active = active;
-          options.session.appendEvent('plan_mode', sessionEventData.planMode(active));
+          if (!events) throw new Error('sph-session is not loaded');
+          options.session.appendEvent('plan_mode', events.planMode(active));
           options.listener?.({
             type: 'status',
             text: active
@@ -576,7 +583,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // 后台任务完成推送（grok-build 语义：完成唤醒父级）：轮次进行中收到即注入下一步。
     // 已收尾的轮次由 TUI 在 finally 里 drain 并自动开后续轮次；delivered 标记保证不重不漏。
     for (const job of jobs.drainNotifications()) {
-      appendMessage({ role: 'user', content: jobNotificationText(job) });
+      if (!notify) throw new Error('sph-schedule is not loaded');
+      appendMessage({ role: 'user', content: notify(job) });
     }
 
     // 父级/模型发来的消息（send_subagent_message）在下一步顶部入列——投递到
@@ -875,7 +883,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         });
         // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
         if (!result.ok) {
-          options.session.appendEvent('tool_result', sessionEventData.toolFailure(call.name, result.content));
+          if (!events) throw new Error('sph-session is not loaded');
+          options.session.appendEvent('tool_result', events.toolFailure(call.name, result.content));
         }
         options.listener?.({ type: 'tool_end', name: call.name, id: call.id, ok: result.ok, content: result.content });
       },

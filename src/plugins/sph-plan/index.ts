@@ -8,6 +8,7 @@
  */
 
 import type { PluginApi } from '../types.js';
+import { registerPlanCommand } from './command.js';
 import { registerPlanTools } from './tool.js';
 import setupCore from './plan-core.js';
 
@@ -16,4 +17,5 @@ export default function setup(api: PluginApi): void {
   // plan-core 的默认导出提供 PlanModeSeam 服务；tool.ts 注册两个工具。
   setupCore(api);
   registerPlanTools(api);
+  registerPlanCommand(api);
 }
