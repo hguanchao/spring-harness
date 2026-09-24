@@ -136,6 +136,31 @@ describe('task 工具', () => {
     assert.equal(result.ok, false);
     assert.match(result.content, /isolation must be "none" or "worktree"/);
   });
+
+  it('cancel 三种结果：未找到 / 已完成拒绝，运行中发出信号', async () => {
+    const spawned: Array<{ agent: string }> = [];
+    const aborted: string[] = [];
+    const c = ctx(spawned);
+    c.jobs = {
+      abort: (id: string) => {
+        aborted.push(id);
+        if (id === 'gone') return 'not_found';
+        if (id === 'done1') return 'done';
+        return 'cancelled';
+      },
+    } as ToolContext['jobs'];
+    const missing = await tool.execute({ action: 'cancel', id: 'gone', description: 'unused' }, c);
+    assert.equal(missing.ok, false);
+    assert.match(missing.content, /task not found/);
+    const finished = await tool.execute({ action: 'cancel', id: 'done1', description: 'unused' }, c);
+    assert.equal(finished.ok, false);
+    assert.match(finished.content, /already completed/);
+    const live = await tool.execute({ action: 'cancel', id: 'live1', description: 'unused' }, c);
+    assert.equal(live.ok, true);
+    assert.match(live.content, /cancel signal sent/);
+    assert.deepEqual(aborted, ['gone', 'done1', 'live1']);
+    assert.equal(spawned.length, 0);
+  });
 });
 
 describe('sph-subagent 装载', () => {

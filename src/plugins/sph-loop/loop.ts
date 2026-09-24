@@ -57,13 +57,20 @@ function windDownNote(limit: number): string {
  * 深度预算是第二道，工具集是第一道。点名的工具原样保留（含委托工具），
  * 嵌套只在定义明确授权、且深度预算允许时成立。
  */
-function resolveChildTools(registry: ToolRegistry, declared: readonly string[]): Set<string> {
+/**
+ * 子会话的可用工具集。导出仅供测试：行为在 spawn 路径上被 runChild 消费。
+ */
+export function resolveChildTools(registry: ToolRegistry, declared: readonly string[]): Set<string> {
   const base = declared.includes('*')
     ? registry.generalNames()
     : new Set(declared.filter((name) => registry.find(name)));
   if (declared.includes('*')) {
     base.delete('task');
     base.delete('send_subagent_message');
+    // todo 清单是同进程共享的 TodoService 实例：子代理写入会顶掉根会话正在看的
+    // 面板，todo 事件又分别落进两个会话文件，fold 回来互相覆盖。子代理的产出物
+    // 是最终报告，不该维护跨会话清单。显式点名的自定义定义不受此限——那是明确选择。
+    base.delete('todo');
   }
   return base;
 }

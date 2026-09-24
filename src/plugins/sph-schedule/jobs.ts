@@ -58,7 +58,8 @@ export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox
  */
 export class JobBoard implements JobBoardPort {
   private readonly jobs = new Map<string, JobRecord>();
-  private readonly taskController = new AbortController();
+  /** 每个任务自己的控制器：abort(id) 精确到达，abortAll 逐个转发。settle 时移除。 */
+  private readonly controllers = new Map<string, AbortController>();
   private readonly doneListeners: TaskDoneListener[] = [];
   /** 后台子代理收件箱：session id → inbox。只有仍在跑的子代理会有 inbox。 */
   private readonly inboxes = new Map<string, SubagentInbox>();
@@ -84,18 +85,23 @@ export class JobBoard implements JobBoardPort {
       exitCode: null,
     };
     this.jobs.set(job.id, job);
+    const controller = new AbortController();
+    this.controllers.set(job.id, controller);
     const notify = (): void => {
       for (const listener of this.doneListeners) listener(job);
     };
-    void task(this.taskController.signal, job)
+    void task(controller.signal, job)
       .then((result: string) => {
+        this.controllers.delete(job.id);
         job.status = 'done';
         job.exitCode = 0;
         job.result = result;
         notify();
       })
       .catch((error: unknown) => {
-        job.status = 'done';
+        this.controllers.delete(job.id);
+        // abort 触发的失败不是错误：状态改判为 cancelled，通知文案随之走 CANCELLED 分支。
+        job.status = controller.signal.aborted ? 'cancelled' : 'done';
         job.exitCode = 1;
         job.stderr = errorMessage(error);
         notify();
@@ -113,13 +119,14 @@ export class JobBoard implements JobBoardPort {
   }
 
   /**
-   * 取走所有已完成且未投递的记录。loop 每步注入与 TUI auto-wake 先到先得，
-   * delivered 标记保证同一份结果不会重复注入。
+   * 取走所有已结束且未投递的记录。loop 每步注入与 TUI auto-wake 先到先得，
+   * delivered 标记保证同一份结果不会重复注入。取消也是终态：cancelled 同样要投递，
+   * 否则父代理永远不知道任务为什么没等到结果。
    */
   drainNotifications(): JobRecord[] {
     const out: JobRecord[] = [];
     for (const job of this.jobs.values()) {
-      if (job.status === 'done' && !job.delivered) {
+      if (job.status !== 'running' && !job.delivered) {
         job.delivered = true;
         out.push(job);
       }
@@ -153,9 +160,23 @@ export class JobBoard implements JobBoardPort {
     return 'not_found';
   }
 
+  /**
+   * 取消指定任务。只发信号就返回——任务在下一个安全点（子代理是 runTurn 的
+   * 步边界或工具派发点）退出，状态改判和通知都发生在 settle 路径上，保证
+   * 「一条通知对应一次真实停止」。任务若不检查 signal，状态停留在 running：
+   * 与 abortAll 同一契约，不强杀。
+   */
+  abort(id: string): 'cancelled' | 'not_found' | 'done' {
+    const job = this.jobs.get(id);
+    if (!job) return 'not_found';
+    if (job.status !== 'running') return 'done';
+    this.controllers.get(id)?.abort();
+    return 'cancelled';
+  }
+
   /** 进程退出路径调用：后台任务全部放弃。 */
   abortAll(): void {
-    this.taskController.abort();
+    for (const controller of this.controllers.values()) controller.abort();
   }
 
   list(): JobRecord[] {

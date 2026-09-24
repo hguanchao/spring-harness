@@ -21,6 +21,82 @@ describe('后台 shell', () => {
   });
 });
 
+describe('按 id 取消', () => {
+  /**
+   * 在 signal 触发后退出的任务：与 runTurn 的安全点同款契约——观察 signal，
+   * 触发即失败。abort 事件是同步派发的，settle 只需冲刷微任务，无计时竞态。
+   */
+  function startStoppableTask(board: JobBoard, label: string, onJob?: (job: { subagentSessionId?: string }) => void): string {
+    return board.startTask(label, async (signal, job) => {
+      onJob?.(job);
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+      return 'unreachable';
+    });
+  }
+
+  async function settle(): Promise<void> {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it('abort 发信号即返回 cancelled；任务停下后状态改判，通知走 CANCELLED 分支', async () => {
+    const board = new JobBoard();
+    const id = startStoppableTask(board, 'explore 长任务');
+    await settle();
+    assert.equal(board.get(id)?.status, 'running');
+    assert.equal(board.abort(id), 'cancelled');
+    // settle 前状态不动：一条通知对应一次真实停止，而不是信号发出那一刻。
+    assert.equal(board.get(id)?.status, 'running');
+    await settle();
+    const job = board.get(id);
+    assert.equal(job?.status, 'cancelled');
+    const notifications = board.drainNotifications();
+    assert.equal(notifications.length, 1);
+    const text = jobNotificationText(notifications[0]!);
+    assert.match(text, /background task CANCELLED: explore 长任务/);
+    assert.equal(text.includes('resume_from'), false, '没有会话号就没有续接尾注');
+  });
+
+  it('取消通知保留子代理会话号：部分成果仍可 resume_from 捡回', async () => {
+    const board = new JobBoard();
+    const id = startStoppableTask(board, '调研任务', (job) => {
+      job.subagentSessionId = 'sub-abc123';
+    });
+    await settle();
+    assert.equal(board.abort(id), 'cancelled');
+    await settle();
+    const notifications = board.drainNotifications();
+    assert.equal(notifications.length, 1);
+    const text = jobNotificationText(notifications[0]!);
+    assert.match(text, /background task CANCELLED: 调研任务/);
+    assert.match(text, /task\(resume_from: "sub-abc123"\)/);
+  });
+
+  it('未知 id 返回 not_found，已完成返回 done，都不再发信号', async () => {
+    const board = new JobBoard();
+    assert.equal(board.abort('nope'), 'not_found');
+    const id = board.startTask('秒完任务', async () => 'ok');
+    await settle();
+    assert.equal(board.get(id)?.status, 'done');
+    assert.equal(board.abort(id), 'done');
+    assert.equal(board.drainNotifications().length, 1, '完成通知只有完成那一条');
+  });
+
+  it('abortAll 逐个转发：所有仍在跑的任务都收到信号', async () => {
+    const board = new JobBoard();
+    const a = startStoppableTask(board, '任务A');
+    const b = startStoppableTask(board, '任务B');
+    await settle();
+    board.abortAll();
+    await settle();
+    assert.equal(board.get(a)?.status, 'cancelled');
+    assert.equal(board.get(b)?.status, 'cancelled');
+    assert.equal(board.drainNotifications().length, 2);
+  });
+});
+
 describe('createSteeringInbox', () => {
   it('push/drain 保持 SubagentInbox 语义：drain 全量取出并清空', () => {
     const inbox = createSteeringInbox();

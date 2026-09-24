@@ -18,20 +18,21 @@ export function taskToolPrompt(): string {
     'background: true is only for fire-and-forget chores whose result this reply does not depend on; you are notified on completion.',
     'Set background false (the default) when your next action needs the child\'s report.',
     'action list and action get only re-read a background record. Completion arrives as a notification, so do not poll.',
+    'action cancel stops background work you no longer need (wrong direction, superseded, runaway). The child stops at its next safe point and the cancellation arrives as a notification — do not wait for it.',
   ].join(' ');
 }
 
 export function createTaskTool(loadAgents: () => readonly AgentDefinition[]): ToolSpec {
   return {
     name: 'task',
-    description:
-      `Start a child agent, or inspect background work you already started. action spawn (the default) runs a child with its own session and blocks until it finishes — its final report comes back as this tool's result. Use spawn for work that genuinely benefits from a separate context — a bounded question, an independent chunk of implementation — not for something one or two of your own tool calls would settle, and not to split one open-ended survey into several unbounded slices. The child sees only your prompt plus its own findings, so name the question, what you already know, and what done looks like. Use spawn whenever your answer depends on the child's findings, and send several task calls in the same reply to run them in parallel (up to ${SUBAGENT_CONCURRENCY}). Nesting is flat by default (depth 1): a subagent cannot spawn its own subagents, and a call beyond the configured depth budget fails with an explicit depth error. agent names a definition (built-in: explore, research, writer, general); its tools and prompt come from that definition. background: true is ONLY for fire-and-forget chores whose result your reply does not depend on — it returns a task id immediately and you are notified when it completes. action list and action get only re-read that record; completion already arrives as a notification, so do not poll. Long-running work goes here, not through a background shell. isolation: worktree runs the child in an isolated git worktree (its result reports the path). resume_from: pass a completed subagent's session id to continue its conversation.`,
+  description:
+    `Start a child agent, or inspect background work you already started. action spawn (the default) runs a child with its own session and blocks until it finishes — its final report comes back as this tool's result. Use spawn for work that genuinely benefits from a separate context — a bounded question, an independent chunk of implementation — not for something one or two of your own tool calls would settle, and not to split one open-ended survey into several unbounded slices. The child sees only your prompt plus its own findings, so name the question, what you already know, and what done looks like. Use spawn whenever your answer depends on the child's findings, and send several task calls in the same reply to run them in parallel (up to ${SUBAGENT_CONCURRENCY}). Nesting is flat by default (depth 1): a subagent cannot spawn its own subagents, and a call beyond the configured depth budget fails with an explicit depth error. agent names a definition (built-in: explore, research, writer, general); its tools and prompt come from that definition. background: true is ONLY for fire-and-forget chores whose result your reply does not depend on — it returns a task id immediately and you are notified when it completes. action list and action get only re-read that record; completion already arrives as a notification, so do not poll. action cancel aborts background work still running — the child stops at its next safe point and a cancellation notification follows; its session stays resumable. Long-running work goes here, not through a background shell. isolation: worktree runs the child in an isolated git worktree (its result reports the path). resume_from: pass a completed subagent's session id to continue its conversation.`,
     concurrencySafe: true,
     prompt: taskToolPrompt(),
     schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['spawn', 'list', 'get'], description: 'spawn (default) starts a child agent. list and get inspect background work already started.' },
+        action: { type: 'string', enum: ['spawn', 'list', 'get', 'cancel'], description: 'spawn (default) starts a child agent. list and get inspect background work already started. cancel stops background work still running.' },
         prompt: { type: 'string', description: 'The full task prompt for the subagent to execute. Required for spawn.' },
         agent: { type: 'string', description: 'Agent definition name. Built-in: explore, research (both read-only), writer (documents), or general (can edit and run commands). Defaults to general.' },
         background: { type: 'boolean', description: 'Run detached and return a job id instead of blocking' },
@@ -41,7 +42,7 @@ export function createTaskTool(loadAgents: () => readonly AgentDefinition[]): To
         },
         isolation: { type: 'string', enum: ['none', 'worktree'], description: 'worktree runs the child in an isolated git worktree' },
         resume_from: { type: 'string', description: 'Subagent session id to continue a completed subagent conversation' },
-        id: { type: 'string', description: 'Background task id for action get' },
+        id: { type: 'string', description: 'Background task id for action get / cancel' },
       },
       required: ['description'],
     },
@@ -52,6 +53,14 @@ export function createTaskTool(loadAgents: () => readonly AgentDefinition[]): To
         const job = ctx.jobs.get(asString(args, 'id'));
         if (!job) return { ok: false, content: 'task not found' };
         return { ok: true, content: clip(JSON.stringify(job, null, 2)) };
+      }
+      if (action === 'cancel') {
+        const id = asString(args, 'id');
+        const outcome = ctx.jobs.abort(id);
+        if (outcome === 'not_found') return { ok: false, content: `task not found: ${id}` };
+        if (outcome === 'done') return { ok: false, content: `task ${id} already completed — nothing to cancel` };
+        // 取消是异步生效的：信号已发，真正的停止以 CANCELLED 通知为准。
+        return { ok: true, content: `cancel signal sent to task ${id} — it stops at its next safe point; a notification will confirm` };
       }
       if (action !== 'spawn') return { ok: false, content: `unknown action: ${action}` };
       const prompt = asString(args, 'prompt');
