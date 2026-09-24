@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { join } from 'node:path';
 import type { PluginHostFacts } from '../types.js';
 import { openHttpLink, openSseLink, type JsonRpcMessage, type RemoteLink } from './remote.js';
@@ -11,6 +11,42 @@ import { cmdArgumentLine, resolveWindowsCommand } from './win-command.js';
  */
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 关掉 stdio 子进程，并放开它占着的管道。
+ *
+ * Windows 上 `cmd.exe /c` 拉起的 MCP 会把管道继承给孙进程。只 `kill` 直接子进程时，
+ * 孙进程还握着管道，父进程的 socket 不结束，事件循环退不掉，shell 提示符就不回来。
+ */
+export function stopStdioChild(child: ChildProcessWithoutNullStreams): void {
+  const pid = child.pid;
+  if (process.platform === 'win32' && pid !== undefined) {
+    // 必须先于 child.kill()。先杀掉 cmd 会让孙进程改挂到别处，随后的 taskkill /T 就找不到它。
+    const root = process.env.SystemRoot ?? 'C:\\Windows';
+    try {
+      execFileSync(join(root, 'System32', 'taskkill.exe'), ['/pid', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+    } catch {
+      try {
+        child.kill();
+      } catch {
+        // 进程已经退出，或 taskkill 不可用时直接子进程也杀不掉。
+      }
+    }
+  } else {
+    try {
+      child.kill();
+    } catch {
+      // 进程从未成功启动或已经退出。
+    }
+  }
+  child.stdin.destroy();
+  child.stdout.destroy();
+  child.stderr.destroy();
+  child.unref();
 }
 
 export interface McpServerConfig {
@@ -485,11 +521,7 @@ export class McpHub {
         write: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
         close: () => {
           dead = true;
-          try {
-            child.kill();
-          } catch {
-            // 进程从未成功启动或已退出——没有需要清理的东西。
-          }
+          stopStdioChild(child);
         },
         alive: () => !dead && child.exitCode === null && child.pid !== undefined,
       },
@@ -499,6 +531,9 @@ export class McpHub {
       buffer: '',
     };
     child.stdout.on('data', (chunk: string) => this.onData(conn, spec.name, chunk));
+    // destroy() 在对端已断时会抛 error。没人听就会变成未捕获异常。
+    child.stdout.on('error', () => {});
+    child.stderr.on('error', () => {});
     child.on('exit', () => {
       dead = true;
       if (child.exitCode !== null || child.signalCode !== null) {

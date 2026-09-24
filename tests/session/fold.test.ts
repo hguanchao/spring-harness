@@ -7,6 +7,22 @@ function recapEvent(data: Record<string, unknown>): SessionRecord {
   return { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind: 'recap', data };
 }
 
+describe('foldSessionState agent', () => {
+  function agentEvent(name: unknown): SessionRecord {
+    return { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind: 'agent', data: { name } };
+  }
+
+  it('旧会话没有 agent 事件时不算选中', () => {
+    assert.equal(foldSessionState([]).agent, undefined);
+  });
+
+  it('后一条覆盖前一条，空名字是切回默认', () => {
+    assert.equal(foldSessionState([agentEvent('research'), agentEvent('')]).agent, '');
+    assert.equal(foldSessionState([agentEvent('writer')]).agent, 'writer');
+    assert.deepEqual(sessionEventData.agent('research'), { name: 'research' });
+  });
+});
+
 describe('foldSessionState recap', () => {
   it('starts with no watermark and no recap', () => {
     const state = foldSessionState([]);

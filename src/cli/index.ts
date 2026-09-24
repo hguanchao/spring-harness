@@ -171,6 +171,7 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
   // 信任页和主界面都由 sph-tui 提供。未信任时 bootstrap 先装内置插件，让信任页画出来。
   let runtime: Runtime | undefined;
   let deferredError: string | undefined;
+  let ran = false;
   try {
     runtime = await bootstrap(args, workspaceRoot, 'confirm', undefined, (error) => {
       deferredError = error.message;
@@ -181,12 +182,20 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
       deferredError = 'interactive mode needs the sph-tui plugin';
       return;
     }
+    ran = true;
     await screen.run(runtime, args);
   } finally {
     runtime?.cleanup();
     // 装配失败写在替代屏幕里会被 1049l 清掉，退屏后再打到普通终端。
     if (deferredError !== undefined) process.stderr.write(`${deferredError}\n`);
   }
+  // 退回主屏幕后必须结束进程。MCP 孙进程或控制台 stdin 还占着事件循环时，
+  // cmd 不打印目录提示符，用户要再按一次 Ctrl+C 才回到 shell。
+  if (!ran) return;
+  await new Promise<void>((resolve) => {
+    process.stdout.write('', () => resolve());
+  });
+  process.exit(process.exitCode ?? 0);
 }
 
 /** headless 路径：一次 runTurn 后退出。除装配外与旧实现逐行一致。 */
@@ -242,9 +251,11 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
       contextWindow: config.contextWindow,
       depth: folded.depth,
       maxSubagentDepth: config.subagentMaxDepth,
+      maxTurns: config.maxTurns,
       maxSessionTokens: config.maxSessionTokens,
       listener: combineListeners(output.listener, runtime.plugins.turnListeners()),
       services: runtime.plugins,
+      hooks: runtime.plugins.hooks(),
       todos,
       jobs,
       goal: folded.goal,

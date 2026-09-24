@@ -17,7 +17,8 @@ export type AppKeybinding =
   | 'app.command'
   | 'app.help'
   | 'app.followUp'
-  | 'app.approval.cycle';
+  | 'app.approval.cycle'
+  | 'app.agent.cycle';
 
 export interface AppKeybindingDefinition {
   /** 主键位（用于提示文案）。 */
@@ -54,6 +55,11 @@ export const APP_KEYBINDINGS: Record<AppKeybinding, AppKeybindingDefinition> = {
     keys: ['shift+tab'],
     description: 'cycle approval mode (ask / auto / yolo)',
     when: 'always',
+  },
+  'app.agent.cycle': {
+    keys: ['ctrl+tab'],
+    description: 'cycle the session agent (research / writer / general / default)',
+    when: 'turn idle',
   },
 };
 

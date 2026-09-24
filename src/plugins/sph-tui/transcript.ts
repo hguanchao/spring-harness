@@ -258,7 +258,7 @@ export class TranscriptProjection {
   toggleToolExpansion(): void {
     const expand = !this.toolGroups.some((group) => group.isExpanded());
     for (const group of this.toolGroups) group.setExpanded(expand, false);
-    this.host.ui.requestRender();
+    this.host.ui.invalidateContent();
   }
 
   /** 轮次收尾：停流式、落思考链、撤 pending 工具行。 */

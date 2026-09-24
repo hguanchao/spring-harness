@@ -3,7 +3,7 @@
  *
  * 分层披露：分组展开只露一行成员摘要；再双击该行才出预览。
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
- * 内容塞进转录。
+ * 内容塞进转录。edit / write 成功后，组一展开就在行下给出短 diff，双击再放长。
  *
  * 前缀按状态：折叠 `▸`、展开 `▾`、失败 `×`，箭头与行文同色（muted）；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
@@ -16,6 +16,12 @@ import { DoubleClickTracker } from './interaction.js';
 import { armHoverHighlight } from './hover-highlight.js';
 import { handleSelectablePress, SELECTABLE_ROW } from './selectable-row.js';
 import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.js';
+import {
+  DIFF_EXPANDED_LINES,
+  DIFF_PREVIEW_LINES,
+  fileChangeFromArgs,
+  type FileChange,
+} from './tool-diff.js';
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
@@ -91,12 +97,11 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   pwsh: 'Pwsh',
   web_search: 'Search',
   web_fetch: 'Fetch',
-  subagent: 'Subagent',
+  task: 'Task',
   todo: 'Todo',
   skill: 'Skill',
   mcp: 'MCP',
   ask_user: 'Ask',
-  jobs: 'Job',
 };
 
 export function toolDisplayName(toolName: string): string {
@@ -165,7 +170,7 @@ export class ToolExecutionComponent extends Container {
   private result: ToolResultInput | undefined;
   private isPartial = true;
   private started = false;
-  /** 成员详情：组展开时仍为 false，只显示一行摘要。 */
+  /** 成员详情：组展开时仍为 false。edit / write 的短 diff 不依赖它。 */
   private expanded = false;
   /** Shell 预览后再双击一次为 true，给出全文。 */
   private fullDetail = false;
@@ -196,6 +201,8 @@ export class ToolExecutionComponent extends Container {
   /** 正文需要按新宽度/新内容重算。 */
   private bodyDirty = true;
   private bodyWidth = -1;
+  /** 同一份参数的对比结果。成功之后每帧重画标题时不再重跑对齐。 */
+  private changeCache: { args: Record<string, unknown>; change: FileChange | undefined } | undefined;
 
   constructor(toolName: string, toolCallId: string, args: Record<string, unknown>, ui: TUI) {
     super();
@@ -212,7 +219,7 @@ export class ToolExecutionComponent extends Container {
       // 悬停高亮：标题行铺浅底。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
       if (event.type === 'move' && this.setHovered(true)) {
         armHoverHighlight(() => this.setHovered(false));
-        this.ui.requestRender();
+        this.ui.invalidateContent();
       }
       if (event.button !== 'left') return undefined;
       // 分行路由（y 为组件内行号，0 = 标题行）：
@@ -260,6 +267,7 @@ export class ToolExecutionComponent extends Container {
 
   updateArgs(args: Record<string, unknown>): void {
     this.args = args;
+    this.changeCache = undefined;
     this.updateDisplay();
     this.onStateChange?.();
   }
@@ -268,12 +276,12 @@ export class ToolExecutionComponent extends Container {
     this.started = true;
     this.updateDisplay();
     this.onStateChange?.();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   setArgsComplete(): void {
     this.updateDisplay();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   updateResult(result: ToolResultInput, isPartial = false): void {
@@ -281,7 +289,7 @@ export class ToolExecutionComponent extends Container {
     this.isPartial = isPartial;
     this.updateDisplay();
     this.onStateChange?.();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /** 分组折叠成员详情时收回预览；不要用它来打开全文。 */
@@ -289,12 +297,13 @@ export class ToolExecutionComponent extends Container {
     this.expanded = expanded;
     if (!expanded) this.fullDetail = false;
     this.updateDisplay();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /**
    * 双击循环：收起 → 预览 →（bash / subagent）全文 → 收起。
    * Read / List / Grep 停在预览，不把整文件/整份清单打进转录。
+   * edit / write 收起时仍留 8 行 diff，展开后放到 80 行。
    */
   toggleDetail(): void {
     if (!this.expanded) {
@@ -307,7 +316,7 @@ export class ToolExecutionComponent extends Container {
       this.fullDetail = false;
     }
     this.updateDisplay();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   isExpanded(): boolean {
@@ -324,7 +333,7 @@ export class ToolExecutionComponent extends Container {
   attachSubagentMeta(meta: SubagentHeadParts): void {
     this.subagentMeta = meta;
     this.updateDisplay();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /**
@@ -335,7 +344,7 @@ export class ToolExecutionComponent extends Container {
   setActivity(text: string, error = false): void {
     this.activity = text === '' ? undefined : { text, error };
     this.updateDisplay();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /**
@@ -345,7 +354,7 @@ export class ToolExecutionComponent extends Container {
   setCounts(text: string): void {
     this.counts = text === '' ? undefined : { text };
     this.updateDisplay();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   hasResult(): boolean {
@@ -391,6 +400,7 @@ export class ToolExecutionComponent extends Container {
     const title = this.subagentMeta
       ? subagentTranscriptText(this.subagentMeta)
       : `${name}${summary ? ` ${summary}` : ''}${this.listEntrySuffix()}`;
+    const change = this.fileChange();
     const activitySuffix = this.activity
       ? this.activity.error
         ? theme.fg('error', ` · ${this.activity.text}`)
@@ -405,7 +415,7 @@ export class ToolExecutionComponent extends Container {
     this.titleLine = `${theme.fg(markColor, mark)} ${painted}`;
     this.countsLine = this.counts ? theme.fg('muted', ` · ${this.counts.text}`) : '';
     this.activityLine = activitySuffix;
-    this.hintLine = '';
+    this.hintLine = change ? this.changeStat(change) : '';
     this.titleDirty = true;
     this.bodyDirty = true;
   }
@@ -431,9 +441,30 @@ export class ToolExecutionComponent extends Container {
 
   /**
    * 详情按真实宽度折行，左缘 TOOL_DETAIL_INDENT。
-   * 组内默认不渲染；双击后给头尾预览，Shell 再双击一次给全文。
+   * 组内默认不渲染工具原文；双击后给头尾预览，Shell 再双击一次给全文。
+   * edit / write 成功时改画 diff，组展开就能看到，不必再点一次。
    */
+  /** 成功之后才对比。失败仍走原来的错误正文，避免把没落地的修改画成已改。 */
+  private fileChange(): FileChange | undefined {
+    if (this.status() !== 'success') return undefined;
+    if (this.toolName !== 'edit' && this.toolName !== 'write') return undefined;
+    if (this.changeCache?.args === this.args) return this.changeCache.change;
+    const change = fileChangeFromArgs(this.toolName, this.args);
+    this.changeCache = { args: this.args, change };
+    return change;
+  }
+
+  private changeStat(change: FileChange): string {
+    const all = change.replaceAll ? theme.fg('muted', ' · all') : '';
+    return `${theme.fg('muted', ' · ')}${theme.fg('success', `+${change.added}`)} ${theme.fg('error', `-${change.removed}`)}${all}`;
+  }
+
   private updateBody(width: number): void {
+    const change = this.fileChange();
+    if (change) {
+      this.bodyText.setText(this.paintChange(change, width));
+      return;
+    }
     const output = this.result?.content?.trim() ?? '';
     if (!output || (this.compact && !this.expanded)) {
       this.bodyText.setText('');
@@ -462,6 +493,30 @@ export class ToolExecutionComponent extends Container {
     const tail = visual.slice(-last).map((line) => `${pad}${paint(line)}`);
     const ellipsis = `${pad}${theme.fg('muted', (this.toolName === 'bash' || this.toolName === 'pwsh') && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
     this.bodyText.setText([...head, ellipsis, ...tail].join('\n'));
+  }
+
+  /**
+   * 组一展开就画短 diff（这一行此时仍是 compact）。双击后放到更长的上限。
+   * write 的行全是新增，先标明这是写入内容，不是相对旧文件的差异。
+   */
+  private paintChange(change: FileChange, width: number): string {
+    const pad = ' '.repeat(TOOL_DETAIL_INDENT);
+    const inner = Math.max(1, width - TOOL_DETAIL_INDENT);
+    const limit = this.expanded || this.fullDetail ? DIFF_EXPANDED_LINES : DIFF_PREVIEW_LINES;
+    const out: string[] = [];
+    const push = (plain: string, color: ThemeColor): void => {
+      for (const wrapped of wrapTextWithAnsi(plain, inner)) out.push(pad + theme.fg(color, wrapped));
+    };
+    if (change.writtenContent) push('written content', 'muted');
+    const shown = change.lines.slice(0, limit);
+    for (const line of shown) {
+      const prefix = line.kind === 'add' ? '+ ' : line.kind === 'del' ? '- ' : '  ';
+      const color: ThemeColor = line.kind === 'add' ? 'success' : line.kind === 'del' ? 'error' : 'muted';
+      push(prefix + line.text, color);
+    }
+    const rest = change.lines.length - shown.length;
+    if (rest > 0) push(`… ${rest} more`, 'muted');
+    return out.join('\n');
   }
 
   override render(width: number): string[] {

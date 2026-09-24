@@ -72,6 +72,7 @@ const ui: UiService = {
       spillRoot: sphSpillRoot(),
       spillThreshold: rt.config.spillThreshold,
       maxSubagentDepth: rt.config.subagentMaxDepth,
+      maxTurns: rt.config.maxTurns,
       maxSessionTokens: rt.config.maxSessionTokens,
       worktrees: rt.worktrees,
       tools: rt.tools,

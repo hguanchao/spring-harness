@@ -15,14 +15,14 @@
 
 import { sphHome } from '../home.js';
 import { mergeChildEnv } from '../sandbox/env.js';
-import { ToolRegistry } from './sph-tools/index.js';
+import { ToolRegistry } from '../tools/registry.js';
 import { clip, type ToolSpec } from '../tools/types.js';
 import { errorMessage } from '../util.js';
 import { canonicalize } from '../workspace/boundary.js';
 import { isWorkspaceTrusted } from '../workspace/trust.js';
 import { loadPluginModules, type PluginCandidate, type PluginLoadFailure } from './loader.js';
 import type { AgentListener } from '../agent/events.js';
-import { isPluginObject, type PluginApi, type PluginCommand, type PluginFactory, type PluginHostFacts, type PluginServices } from './types.js';
+import { isPluginObject, type PluginApi, type PluginCommand, type PluginFactory, type PluginHook, type PluginHostFacts, type PluginServices } from './types.js';
 
 /** 一个已装载插件的摘要，供 `sph plugins` 与诊断输出用。 */
 export interface LoadedPlugin {
@@ -51,6 +51,7 @@ interface PluginRecord {
   tools: ToolSpec[];
   services: string[];
   commands: PluginCommand[];
+  hooks: PluginHook[];
   listeners: AgentListener[];
   warnings: string[];
   disposers: Array<() => void>;
@@ -95,6 +96,7 @@ export class PluginHost implements PluginServices {
         tools: [],
         services: [],
         commands: [],
+        hooks: [],
         listeners: [],
         warnings: [],
         disposers: [],
@@ -151,7 +153,12 @@ export class PluginHost implements PluginServices {
         this.serviceMap.set(serviceName, service);
         record.services.push(serviceName);
       },
-      consume: <T>(serviceName: string): T | undefined => this.serviceMap.get(serviceName) as T | undefined,
+      consume: <T>(serviceName: string): T | undefined => {
+        if (serviceName === 'sph-tool-list') {
+          return [...this.options.coreTools, ...this.records.flatMap((row) => row.tools)] as T;
+        }
+        return this.serviceMap.get(serviceName) as T | undefined;
+      },
       warn: (message: string): void => {
         record.warnings.push(message);
       },
@@ -165,6 +172,9 @@ export class PluginHost implements PluginServices {
       },
       subscribe: (listener: AgentListener): void => {
         record.listeners.push(listener);
+      },
+      registerHook: (hook: PluginHook): void => {
+        record.hooks.push(hook);
       },
     };
     return api;
@@ -225,6 +235,10 @@ export class PluginHost implements PluginServices {
   }
 
   /** 核心 + 插件工具，合成最终工具表。 */
+  hooks(): PluginHook[] {
+    return this.records.flatMap((record) => record.hooks);
+  }
+
   tools(): ToolRegistry {
     const pluginTools = this.records.flatMap((record) => record.tools);
     return new ToolRegistry([...this.options.coreTools, ...pluginTools]);

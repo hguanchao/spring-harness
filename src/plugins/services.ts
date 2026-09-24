@@ -286,6 +286,11 @@ export const SANDBOX_SERVICE = 'sph-sandbox';
 export interface SubagentCatalog {
   /** 未知名字返回 undefined。 */
   find(name: string): { writes: boolean } | undefined;
+  /**
+   * 根会话选中的代理：工具名和追加的角色段。
+   * 未知名字返回 undefined，调用方退回全部工具。
+   */
+  seat(name: string): { tools: ReadonlySet<string>; prompt: string } | undefined;
 }
 
 /** `sph-subagent` 服务的注册名。 */
@@ -329,6 +334,8 @@ export interface SkillEntry {
   name: string;
   description: string;
   path: string;
+  /** frontmatter 写了 user-invocable 时，出现在 `/` 命令里，由用户送进一轮。 */
+  userInvocable?: boolean;
 }
 
 export interface SkillScan {

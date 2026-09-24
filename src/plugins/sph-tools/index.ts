@@ -8,7 +8,7 @@ import { skillTool } from './skill.js';
 import { askUserTool } from './ask-user.js';
 import { globTool } from './glob.js';
 import { webFetchTool, webSearchTool } from './web-search.js';
-import { jobsTool } from './jobs.js';
+
 import type { ToolSpec } from '../../tools/types.js';
 import { writeTool } from './write.js';
 import { ToolRegistry } from '../../tools/registry.js';
@@ -36,7 +36,6 @@ export const tools: ToolSpec[] = [
   tagged(skillTool, { concurrencySafe: true, explore: true, planSafe: true }),
   tagged(askUserTool, { explore: true, planSafe: true }),
   tagged(webSearchTool, { concurrencySafe: true, explore: true, planSafe: true }),
-  tagged(jobsTool, { concurrencySafe: true, planSafe: true }),
   tagged(webFetchTool, { concurrencySafe: true, explore: true, planSafe: true }),
 ];
 

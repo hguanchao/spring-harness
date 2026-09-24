@@ -80,6 +80,46 @@ describe(
         rmSync(temp, { recursive: true, force: true });
       }
     });
+
+    it('子进程 stdin 是有效句柄，读它会立刻遇到 EOF', { timeout: 60_000 }, async () => {
+      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
+      const { resolveBashBinary } = await import('../../../src/sandbox/shell-bin.js');
+      const workspace = mkdtempSync(join(tmpdir(), 'sph-token-stdin-'));
+      const temp = mkdtempSync(join(tmpdir(), 'sph-token-stdin-tmp-'));
+      writeFileSync(join(workspace, 'stdin.ps1'), [
+        'Add-Type -Namespace Sph -Name H -MemberDefinition @\'',
+        '[System.Runtime.InteropServices.DllImport("kernel32.dll")]',
+        'public static extern System.IntPtr GetStdHandle(int nStdHandle);',
+        '\'@',
+        '$n = [Sph.H]::GetStdHandle(-10).ToInt64()',
+        'if ($n -eq 0 -or $n -eq -1) { Write-Output "invalid $n"; exit 3 }',
+        'Write-Output "ok"',
+        '',
+      ].join('\n'));
+      const sandbox = new WindowsAclSandbox({
+        mode: 'workspace',
+        workspaceRoot: workspace,
+        sphHomeDir: workspace,
+        tempDir: temp,
+      });
+      try {
+        await sandbox.init();
+        const bash = resolveBashBinary();
+        const result = await sandbox.run({
+          command: bash.command,
+          // read 在空 stdin 上应立刻返回；句柄若是 NULL，后面的 GetStdHandle 会得到 0。
+          args: [...bash.prefixArgs, 'read -t 2 _ || true; powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File stdin.ps1'],
+          cwd: workspace,
+          timeoutMs: 30_000,
+        });
+        assert.equal(result.exitCode, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.match(result.stdout, /ok/);
+      } finally {
+        sandbox.dispose();
+        rmSync(workspace, { recursive: true, force: true });
+        rmSync(temp, { recursive: true, force: true });
+      }
+    });
   },
 );
 

@@ -7,7 +7,7 @@ import type { AgentListener } from './events.js';
 import type { LlmClient, TokenUsage } from '../llm/client.js';
 import type { Approver } from '../permission/policy.js';
 import type { SpillStorePort, TodoService, WorktreePort } from '../plugins/services.js';
-import type { PluginServices } from '../plugins/types.js';
+import type { PluginHook, PluginServices } from '../plugins/types.js';
 import type { JobBoardPort, SubagentInbox } from '../runtime/scheduler.js';
 import type { SandboxHandle } from '../sandbox/types.js';
 import type { FileAttachment, SessionFactory, SessionFailure, SessionPort } from '../session/types.js';
@@ -41,6 +41,8 @@ export interface RunTurnOptions {
   signal?: AbortSignal;
   /** 插件服务表。循环按名字取用；没装的能力取到 undefined，对应提示词段落随之消失。 */
   services?: PluginServices;
+  /** 工具前后和回合结束的钩子。省略等于没有钩子。 */
+  hooks?: readonly PluginHook[];
   /** todo 服务；省略时从插件服务表取。 */
   todos?: TodoService;
   jobs?: JobBoardPort;
@@ -62,6 +64,11 @@ export interface RunTurnOptions {
    * 超额调用在运行时拒绝。
    */
   maxSubagentDepth?: number;
+  /**
+   * 一轮的模型调用上限。省略不限制。
+   * 子会话在最后几步收束，到顶后把已有正文作为失败结果交回父代理。
+   */
+  maxTurns?: number;
   /** 压缩摘要专用 client；省略用主 client。 */
   compactClient?: LlmClient;
   /** 辅助调用产生的用量。记账，但不参与上下文水位。 */
@@ -73,7 +80,10 @@ export interface RunTurnOptions {
   /** 计划模式开关。enter/exit 会原地翻转，下一步重读。 */
   planMode?: { active: boolean };
   reviewPlan?: (plan: string, title: string) => Promise<{ approved: boolean; feedback?: string }>;
-  /** 子代理角色约束，追加在主系统提示词之后。正文由 sph-subagent 提供。 */
+  /**
+   * 追加在主系统提示词之后的角色约束。
+   * 子会话由派生时传入；根会话由 `/agent` 选中的定义传入。
+   */
   subagentPrompt?: string;
   /**
    * 会话累计 token 预算。0 或省略表示不限制。

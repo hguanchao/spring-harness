@@ -56,7 +56,24 @@ export function spawnAsUser(
   api.setHandleInformation(outRead[0], HANDLE_FLAG_INHERIT, 0);
   api.setHandleInformation(errRead[0], HANDLE_FLAG_INHERIT, 0);
 
-  const startup = emptyStartup(null, outWrite[0], errWrite[0]);
+  // stdin 必须是有效句柄。STARTF_USESTDHANDLES 配 NULL 时，子进程 GetStdHandle 得到空句柄，
+  // Gradle 会报 errno 6，而不是当成「不是控制台」。写端不继承并立刻关掉，读端才是 EOF，
+  // 效果与 < /dev/null 相同，又不会把父进程的输入交出去。
+  const inRead: [Handle] = [null];
+  const inWrite: [Handle] = [null];
+  if (api.createPipe(inRead, inWrite, sa, 0) === 0 || !inRead[0] || !inWrite[0]) {
+    api.closeHandle(outRead[0]);
+    api.closeHandle(outWrite[0]);
+    api.closeHandle(errRead[0]);
+    api.closeHandle(errWrite[0]);
+    if (inRead[0]) api.closeHandle(inRead[0]);
+    if (inWrite[0]) api.closeHandle(inWrite[0]);
+    throw lastError('CreatePipe', 'stdin');
+  }
+  api.setHandleInformation(inWrite[0], HANDLE_FLAG_INHERIT, 0);
+  api.closeHandle(inWrite[0]);
+
+  const startup = emptyStartup(inRead[0], outWrite[0], errWrite[0]);
   const pi = Buffer.alloc(koffi.sizeof(PROCESS_INFORMATION));
   const exe = resolveExecutable(command);
   const cmd = [exe, ...args].map(quoteCommandLineArg).join(' ');
@@ -75,6 +92,7 @@ export function spawnAsUser(
     startup,
     pi,
   );
+  api.closeHandle(inRead[0]);
   api.closeHandle(outWrite[0]);
   api.closeHandle(errWrite[0]);
   if (created === 0) throw lastError('CreateProcessAsUserW', cmd);

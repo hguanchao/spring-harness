@@ -40,6 +40,8 @@ export interface PluginServices {
   has(name: string): boolean;
   /** 已提供的服务名，供诊断输出。 */
   names(): string[];
+  /** 已登记的钩子。测试里的空服务表没有这一项。 */
+  hooks?(): readonly PluginHook[];
 }
 
 /**
@@ -100,6 +102,29 @@ export interface PluginApi {
   registerCommand(command: PluginCommand): void;
   /** 订阅一轮对话的事件。宿主在自己的监听器之后调用，订阅者抛错不会打断这一轮。 */
   subscribe(listener: AgentListener): void;
+  /**
+   * 登记一个钩子。没有钩子时工具和回合的路径不变。
+   * `beforeTool` 返回一段文字就是拒绝这次调用。`afterTool` 的 `deny` 把结果改成失败。
+   * `turnEnd` 只观察，抛错记成警告，不把已经完成的一轮改成失败。
+   */
+  registerHook(hook: PluginHook): void;
+}
+
+/** 一次工具调用在钩子里的样子。参数是模型给出的，不是指令。 */
+export interface ToolHookCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+export interface ToolHookResult {
+  ok: boolean;
+  content: string;
+}
+
+export interface PluginHook {
+  beforeTool?(call: ToolHookCall): string | undefined | Promise<string | undefined>;
+  afterTool?(call: ToolHookCall, result: ToolHookResult): { deny?: string } | undefined | Promise<{ deny?: string } | undefined>;
+  turnEnd?(info: { finishReason?: string }): void | Promise<void>;
 }
 
 /** 插件斜杠命令看到的界面能力。不把整个 TUI 交出去。 */

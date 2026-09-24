@@ -1,6 +1,25 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { createSteeringInbox, STEERING_QUEUE_LIMIT } from '../../src/plugins/sph-schedule/jobs.js';
+import { createSteeringInbox, JobBoard, STEERING_QUEUE_LIMIT } from '../../src/plugins/sph-schedule/jobs.js';
+import { jobNotificationText } from '../../src/runtime/scheduler.js';
+
+describe('后台 shell', () => {
+  it('完成后走和子代理同一条通知，没有会话号', async () => {
+    const board = new JobBoard();
+    const id = board.startTask('bash: echo hi', async () => 'exit 0\nstdout:\nhi', 'shell');
+    const listed = board.list();
+    assert.equal(listed[0]?.kind, 'shell');
+    assert.equal(listed[0]?.id, id);
+    await new Promise((resolve) => setImmediate(resolve));
+    const done = board.drainNotifications();
+    assert.equal(done.length, 1);
+    assert.equal(done[0]?.exitCode, 0);
+    const text = jobNotificationText(done[0]!);
+    assert.match(text, /background task completed: bash: echo hi/);
+    assert.equal(text.includes('resume_from'), false);
+    assert.equal(board.drainNotifications().length, 0);
+  });
+});
 
 describe('createSteeringInbox', () => {
   it('push/drain 保持 SubagentInbox 语义：drain 全量取出并清空', () => {

@@ -97,6 +97,8 @@ export interface TuiDeps {
   spillThreshold?: number;
   /** 子代理嵌套深度预算（config.subagent_max_depth）；省略用内置默认 1（扁平）。 */
   maxSubagentDepth?: number;
+  /** 一轮的模型调用上限（config.max_turns）；省略不限制。 */
+  maxTurns?: number;
   /** 会话累计 token 预算（config.max_session_tokens）；省略或 0 = 不限制。 */
   maxSessionTokens?: number;
   /** 子代理 worktree 隔离的工作树仓库（isolation: worktree 用）。 */

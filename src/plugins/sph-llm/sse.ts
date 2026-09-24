@@ -54,6 +54,17 @@ async function readIdle(
  * 统一处理网络错误分类（可重试判定）、HTTP 状态码与按行分割；
  * 何时算"流完成"由各协议的 onData 消费者自行判断。
  */
+/** onData 抛出的终态错误。读取层不再把它包成传输抖动。 */
+export class FatalStreamError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'FatalStreamError';
+    this.cause = cause;
+  }
+}
+
 /** 空流 / 空 JSON 是网关抖动，可重试，不当成模型已经答完。 */
 function emptyStreamError(contentType: string, hint: string): RetryableError {
   return new RetryableError(
@@ -189,7 +200,13 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
   let eventName: string | undefined;
   let dataLines: string[] = [];
   const emit = (payload: string): void => {
-    params.onData(payload);
+    try {
+      params.onData(payload);
+    } catch (error) {
+      // 协议 error 帧是终态。包成传输错误会让已有半截被当成断流交回，审核拒绝就收不了工。
+      if (error instanceof RetryableError) throw error;
+      throw new FatalStreamError(error);
+    }
     sawData = true;
   };
   const dispatch = (): void => {

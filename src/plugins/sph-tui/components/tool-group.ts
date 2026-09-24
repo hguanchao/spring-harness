@@ -252,7 +252,7 @@ export class ToolGroupComponent extends VStack {
     if (live && this.animTimer === undefined) {
       this.animTimer = setInterval(() => {
         // tick 里复查 isLive：组收尾即自停，不让定时器空转挂进程。
-        if (this.isLive()) this.ui.requestRender();
+        if (this.isLive()) this.ui.invalidateContent();
         else this.stopAnimation();
       }, SHIMMER_TICK_MS);
       this.animTimer.unref?.();
@@ -273,7 +273,7 @@ export class ToolGroupComponent extends VStack {
     tool.setCompact(true);
     tool.onStateChange = () => {
       this.markDirty();
-      this.ui.requestRender();
+      this.ui.invalidateContent();
     };
     this.tools.push(tool);
     this.members.push({ kind: 'tool', tool });
@@ -284,7 +284,7 @@ export class ToolGroupComponent extends VStack {
   beginThinking(): void {
     this.startThinking();
     this.markDirty();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   private startThinking(): ThinkingMember {
@@ -309,7 +309,7 @@ export class ToolGroupComponent extends VStack {
     if (index >= 0) this.members.splice(index, 1);
     this.currentThinking = undefined;
     this.markDirty();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   setThinking(text: string, running: boolean, durationMs?: number): void {
@@ -321,7 +321,7 @@ export class ToolGroupComponent extends VStack {
     this.markDirty();
     // 思考段在转录 ScrollView 里：必须 bump contentGeneration，视口通道会命中
     // 滚动缓存、增量看不见。listener 同帧也会 requestRender，框架会合并。
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   isExpanded(): boolean {
@@ -346,7 +346,7 @@ export class ToolGroupComponent extends VStack {
       }
     }
     this.markDirty();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /** 分组不在渲染树里时（折叠态），成员仍要收到失效通知。 */
@@ -379,7 +379,7 @@ export class ToolGroupComponent extends VStack {
     // 悬停高亮：汇总行铺浅底。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
     if (event.type === 'move' && this.setHeaderHovered(true)) {
       armHoverHighlight(() => this.setHeaderHovered(false));
-      this.ui.requestRender();
+      this.ui.invalidateContent();
     }
     if (event.button !== 'left') return undefined;
     const press = handleSelectablePress(this.headerRegion, event);
@@ -411,7 +411,7 @@ export class ToolGroupComponent extends VStack {
     if (member.click.accept(event.x, event.y)) {
       member.expanded = !member.expanded;
       this.markDirty();
-      this.ui.requestRender();
+      this.ui.invalidateContent();
     }
     return { handled: true };
   }

@@ -84,6 +84,11 @@ export interface SphConfig {
   /** 子代理嵌套深度预算：0 禁止派生，默认 1 层，避免子代理再派子代理。 */
   subagentMaxDepth: number;
   /**
+   * 一轮里的模型调用上限（config.toml 的 `max_turns`）。
+   * 省略不限制。配了之后子会话在最后几步收束，到顶把已有正文作为失败结果交回。
+   */
+  maxTurns?: number;
+  /**
    * Anthropic 协议打 prompt-cache 断点，默认开。
    * agent 每步都重发完整历史，缓存收益远大于一次性写入成本；端点不认这个字段时会在运行时
    * 自动降级（见 llm/compat.ts），所以只在明确要省掉缓存写入时才需要关掉。
@@ -198,6 +203,7 @@ export function loadConfig(options?: {
   const aux = parseAux(file.aux);
   const spillThreshold = parseSpillThreshold(file.spill_threshold);
   const subagentMaxDepth = parseSubagentMaxDepth(file.subagent_max_depth);
+  const maxTurns = parseMaxTurns(file.max_turns);
   const promptCache = parsePromptCache(file.prompt_cache);
   const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
   const maxRetries = parseMaxRetries(file.max_retries);
@@ -215,7 +221,7 @@ export function loadConfig(options?: {
     maxTokens,
     sandbox, reasoningEffort, approval, mcpServers,
     permissions, subagentApproval,
-    compactModel, reviewModel, aux, spillThreshold, proxy, subagentMaxDepth, promptCache,
+    compactModel, reviewModel, aux, spillThreshold, proxy, subagentMaxDepth, maxTurns, promptCache,
     maxSessionTokens, maxRetries, mcpPreferences, disabledPlugins,
   };
 }
@@ -276,6 +282,12 @@ function requireInt(value: unknown, min: number, message: string): number {
 function parseSubagentMaxDepth(value: unknown): number {
   if (value === undefined) return 1;
   return requireInt(value, 0, 'subagent_max_depth must be a non-negative integer (0 forbids delegation)');
+}
+
+/** 一轮的模型调用上限。省略不限制；0 没有意义，显式写 0 报错而不是悄悄关掉。 */
+function parseMaxTurns(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  return requireInt(value, 1, 'max_turns must be a positive integer');
 }
 
 /** 辅助模型名可选：空串与缺省同义（用主模型），非字符串才报错。 */

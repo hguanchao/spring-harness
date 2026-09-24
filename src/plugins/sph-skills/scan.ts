@@ -5,18 +5,19 @@ import type { SkillEntry, SkillScan } from '../services.js';
 
 export type { SkillEntry, SkillScan };
 
-function parseFrontmatter(text: string): { name?: string; description?: string } | undefined {
+function parseFrontmatter(text: string): { name?: string; description?: string; userInvocable?: boolean } | undefined {
   if (!text.startsWith('---')) return undefined;
   const end = text.indexOf('\n---', 3);
   if (end < 0) return undefined;
   const block = text.slice(3, end).replace(/^\r?\n/, '');
-  const out: { name?: string; description?: string } = {};
+  const out: { name?: string; description?: string; userInvocable?: boolean } = {};
   for (const line of block.split(/\r?\n/)) {
-    const match = /^(name|description)\s*:\s*(.+)$/.exec(line);
+    const match = /^(name|description|user-invocable)\s*:\s*(.+)$/.exec(line);
     if (!match) continue;
     const value = match[2].trim().replace(/^['"]|['"]$/g, '');
     if (match[1] === 'name') out.name = value;
-    else out.description = value;
+    else if (match[1] === 'description') out.description = value;
+    else out.userInvocable = value === 'true';
   }
   return out;
 }
@@ -44,7 +45,12 @@ function scanRoot(root: string, warnings: string[], byName: Map<string, SkillEnt
       warnings.push(`skipped skill without name/description frontmatter: ${skillPath}`);
       continue;
     }
-    byName.set(meta.name, { name: meta.name, description: meta.description, path: skillPath });
+    byName.set(meta.name, {
+      name: meta.name,
+      description: meta.description,
+      path: skillPath,
+      ...(meta.userInvocable ? { userInvocable: true } : {}),
+    });
   }
 }
 
@@ -61,13 +67,15 @@ export function skillRoots(
 ): string[] {
   return [
     join(userHome, '.agents', 'skills'),
+    join(userHome, '.claude', 'skills'),
     join(home, 'skills'),
     join(workspaceRoot, '.agents', 'skills'),
+    join(workspaceRoot, '.claude', 'skills'),
     join(workspaceRoot, '.sph', 'skills'),
   ];
 }
 
-/** 四个根后者覆盖前者；只认 skills/<name>/SKILL.md。 */
+/** 六个根后者覆盖前者；只认 skills/<name>/SKILL.md。 */
 export function scanSkills(
   workspaceRoot: string,
   home = sphHome(),

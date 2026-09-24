@@ -12,6 +12,7 @@ import { ToolRegistry } from '../../src/tools/registry.js';
 import type { ToolSpec } from '../../src/tools/types.js';
 import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../../src/session/types.js';
 import { messagesOf } from '../../src/plugins/sph-session/query.js';
+import { JobBoard } from '../../src/plugins/sph-schedule/jobs.js';
 
 class MemorySession implements SessionPort {
   readonly records: SessionRecord[] = [];
@@ -113,6 +114,7 @@ describe('runtime slots: four replacements still complete a turn', () => {
         session,
         tools,
         sessions,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,

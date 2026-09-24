@@ -301,7 +301,7 @@ export class Editor implements Component, Focusable {
 		if (this._focused === value) return;
 		this._focused = value;
 		// 边框与假光标随焦点变，必须立刻重绘，不能等下一次按键。
-		this.tui.requestRender();
+		this.tui.requestViewportRender();
 	}
 
 	protected tui: TUI;
@@ -419,7 +419,7 @@ export class Editor implements Component, Focusable {
 		const newPadding = Number.isFinite(padding) ? Math.max(0, Math.floor(padding)) : 0;
 		if (this.paddingX !== newPadding) {
 			this.paddingX = newPadding;
-			this.tui.requestRender();
+			this.tui.requestViewportRender();
 		}
 	}
 
@@ -431,7 +431,7 @@ export class Editor implements Component, Focusable {
 		const newMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
 		if (this.autocompleteMaxVisible !== newMaxVisible) {
 			this.autocompleteMaxVisible = newMaxVisible;
-			this.tui.requestRender();
+			this.tui.requestViewportRender();
 		}
 	}
 
@@ -2232,7 +2232,7 @@ export class Editor implements Component, Focusable {
 
 		if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
 			this.cancelAutocomplete();
-			this.tui.requestRender();
+			this.tui.requestViewportRender();
 			return;
 		}
 
@@ -2240,12 +2240,12 @@ export class Editor implements Component, Focusable {
 			const item = suggestions.items[0]!;
 			this.applyCompletion(this.autocompleteProvider, item, suggestions.prefix);
 			this.notifyChange();
-			this.tui.requestRender();
+			this.tui.requestViewportRender();
 			return;
 		}
 
 		this.applyAutocompleteSuggestions(suggestions, options.force ? "force" : "regular");
-		this.tui.requestRender();
+		this.tui.requestViewportRender();
 	}
 
 	private isAutocompleteRequestCurrent(
@@ -2349,7 +2349,7 @@ export class Editor implements Component, Focusable {
 			this.inlineMenu = { list, title: options.title, filterable: options.filterable === true, query: '', resolve };
 			list.onSelect = (item) => this.closeInlineMenu(item);
 			list.onCancel = () => this.closeInlineMenu(undefined);
-			this.tui.requestRender();
+			this.tui.requestViewportRender();
 		});
 	}
 
@@ -2371,7 +2371,7 @@ export class Editor implements Component, Focusable {
 		if (data === '\x7f' || data === '\b') {
 			menu.query = menu.query.slice(0, -1);
 			menu.list.setFilter(menu.query);
-			this.tui.requestRender();
+			this.tui.requestViewportRender();
 			return true;
 		}
 		if (data.length === 1 && data >= ' ' && data <= '~') {
@@ -2388,7 +2388,7 @@ export class Editor implements Component, Focusable {
 		if (extra === '') return;
 		menu.query += extra;
 		menu.list.setFilter(menu.query);
-		this.tui.requestRender();
+		this.tui.requestViewportRender();
 		// 一次粘贴只命中一条时直接打开。逐字输入仍要回车，避免打到一半就跳走。
 		if (text.length > 1 && menu.list.itemCount === 1) {
 			const item = menu.list.selectedItem();
@@ -2401,7 +2401,7 @@ export class Editor implements Component, Focusable {
 		if (!menu) return;
 		this.inlineMenu = undefined;
 		menu.resolve(item);
-		this.tui.requestRender();
+		this.tui.requestViewportRender();
 	}
 
 	/** 当前光标位于可补全上下文时重新触发；反复出现于删除/撤销后的路径。 */

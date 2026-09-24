@@ -446,6 +446,15 @@ export interface TUI extends Component {
 	stop(options?: TuiStopOptions): void;
 	renderNow(force?: boolean): void;
 	requestRender(force?: boolean): void;
+	/**
+	 * 只重画当前帧。有视口的界面不让滚动缓存失效；普通界面等同 requestRender。
+	 */
+	requestViewportRender(): void;
+	/**
+	 * 转录内容变了。滚动缓存按内容世代失效，不调这个，改过的行不会出现。
+	 * 滚动、选区、底栏动画用 requestViewportRender。
+	 */
+	invalidateContent(): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
 	/**
@@ -699,7 +708,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
-		this.requestRender();
+		this.requestViewportRender();
 
 		// Return handle for controlling this overlay
 		return {
@@ -715,7 +724,7 @@ export abstract class TuiBase extends Container implements TUI {
 						this.setFocus(topVisible?.component ?? entry.preFocus);
 					}
 					if (this.overlayStack.length === 0) this.terminal.hideCursor();
-					this.requestRender();
+					this.requestViewportRender();
 				}
 			},
 			setHidden: (hidden: boolean) => {
@@ -736,14 +745,14 @@ export abstract class TuiBase extends Container implements TUI {
 						this.setFocus(component);
 					}
 				}
-				this.requestRender();
+				this.requestViewportRender();
 			},
 			isHidden: () => entry.hidden,
 			focus: () => {
 				if (!this.overlayStack.includes(entry) || !this.isOverlayVisible(entry)) return;
 				entry.focusOrder = ++this.focusOrderCounter;
 				this.setFocus(component);
-				this.requestRender();
+				this.requestViewportRender();
 			},
 			unfocus: (unfocusOptions) => {
 				const isFocused = this.focusedComponent === component;
@@ -765,7 +774,7 @@ export abstract class TuiBase extends Container implements TUI {
 					} else {
 						this.clearOverlayFocusRestore();
 					}
-					this.requestRender();
+					this.requestViewportRender();
 					return;
 				}
 				this.clearOverlayFocusRestoreFor(entry);
@@ -774,7 +783,7 @@ export abstract class TuiBase extends Container implements TUI {
 					const fallbackTarget = topVisible && topVisible !== entry ? topVisible.component : entry.preFocus;
 					this.setFocus(unfocusOptions ? unfocusOptions.target : fallbackTarget);
 				}
-				this.requestRender();
+				this.requestViewportRender();
 			},
 			isFocused: () => this.focusedComponent === component,
 			getBounds: () => {
@@ -797,7 +806,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.setFocus(topVisible?.component ?? overlay.preFocus);
 		}
 		if (this.overlayStack.length === 0) this.terminal.hideCursor();
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	/** Check if there are any visible overlays */
@@ -917,6 +926,14 @@ export abstract class TuiBase extends Container implements TUI {
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
 		this.doRender();
+	}
+
+	requestViewportRender(): void {
+		this.requestRender();
+	}
+
+	invalidateContent(): void {
+		this.requestRender(true);
 	}
 
 	requestRender(force = false): void {

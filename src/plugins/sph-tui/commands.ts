@@ -30,6 +30,9 @@ export const COMMANDS: readonly CommandItem[] = [
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
   { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo' },
   { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
+  { id: 'prompts', label: '/prompts', hint: 'Insert a saved prompt template' },
+  { id: 'diff', label: '/diff', hint: 'Show the workspace git diff, read only' },
+  { id: 'fork', label: '/fork', hint: 'Continue this conversation in a new session' },
 ];
 
 /**

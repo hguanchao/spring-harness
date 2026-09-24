@@ -6,8 +6,8 @@
 
 ## 一、现状盘点
 
-宿主工具表是空的。`read` `write` `edit` `glob` `grep` `ls` `bash` `pwsh` `skill` `ask_user` `web_search` `web_fetch` `jobs` 由 `sph-tools` 注册。
-`mcp`、`todo`、`enter_plan_mode`、`exit_plan_mode`、`subagent`、`send_subagent_message` 由 `sph-mcp`、`sph-todo`、`sph-plan`、`sph-subagent` 注册。
+宿主工具表是空的。`read` `write` `edit` `glob` `grep` `ls` `bash` `pwsh` `skill` `ask_user` `web_search` `web_fetch` 由 `sph-tools` 注册。
+`mcp`、`todo`、`enter_plan_mode`、`exit_plan_mode`、`task`、`send_subagent_message` 由 `sph-mcp`、`sph-todo`、`sph-plan`、`sph-subagent` 注册。
 
 ### 新增一个工具的真实成本
 
@@ -94,7 +94,7 @@
 | 截图 / 桌面控制 | 超出编码 agent 职责边界，且平台专属，维护成本换不来对应价值 |
 | 改配置 / 加 MCP server 的工具 | 让模型能改自己的配置面，而配置里有 api_key——安全边界划不来 |
 | 记忆写入工具 | `AGENTS.md` 用 `edit` 就够了，专门开工具只是多一条"悄悄改指令文件"的通道 |
-| `sleep` / `wait` | jobs 已是推送语义，加了只会诱导模型去轮询等待 |
+| `sleep` / `wait` | task 的完成已是推送语义，加了只会诱导模型去轮询等待 |
 | MCP resources / prompts | 等有真实使用场景再说，现在加是猜测性设计 |
 | checkpoint / undo | 价值认同，但这是 **harness 层特性**（按轮快照文件内容），不是模型工具，工程量是另一个量级 |
 

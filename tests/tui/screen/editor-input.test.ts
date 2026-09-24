@@ -10,6 +10,8 @@ function editor(): Editor {
   const tui = {
     terminal: { rows: 24, columns: 80 },
     requestRender: () => {},
+    requestViewportRender: () => {},
+    invalidateContent: () => {},
   } as unknown as TUI;
   return new Editor(tui, {
     borderColor: (text) => text,

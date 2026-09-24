@@ -35,6 +35,7 @@ type SteerAction = 'cancel' | 'edit' | 'send' | 'down' | 'up';
 /** 挂起条需要的宿主能力：渲染、输入框草稿、与轮次中断的收口。 */
 export interface SteerBarHost {
   requestRender(): void;
+  invalidateContent(): void;
   /** 取回编辑后把焦点交回输入框。 */
   focusEditor(): void;
   /** 输入框草稿：[edit] 把消息取回到这里。 */
@@ -262,7 +263,7 @@ export class SteerBar {
     }
     // 单击行 = 选中（加粗标识）。
     this.cursor = row;
-    this.host.requestRender();
+    this.host.invalidateContent();
     return { handled: true };
   }
 
@@ -271,7 +272,7 @@ export class SteerBar {
     if (!this.inbox.move(index, delta)) return;
     this.editIndex = undefined;
     this.cursor = index + delta;
-    this.host.requestRender();
+    this.host.invalidateContent();
   }
 
   /** 取回选中条到输入框编辑：队列里删掉、记住原位置并冻结投递（提交后原位回插）。 */
@@ -283,7 +284,7 @@ export class SteerBar {
     this.host.editor.setText(current === '' ? text : `${current}\n\n${text}`);
     this.cursor = Math.min(index, this.inbox.peek().length - 1);
     this.host.focusEditor();
-    this.host.requestRender();
+    this.host.invalidateContent();
   }
 
   /** 删除选中条（不回填编辑器）。队列结构变化：冻结编辑的原位置失效。 */
@@ -292,7 +293,7 @@ export class SteerBar {
     // 队列结构变化：冻结编辑的原位置失效（同 ⇧J/⇧K 的处理）。
     this.editIndex = undefined;
     this.cursor = Math.min(index, this.inbox.peek().length - 1);
-    this.host.requestRender();
+    this.host.invalidateContent();
   }
 
   /** 强制立即发送选中条：中断当前轮，该条作为下一轮 prompt，其余消息保持原队列。 */

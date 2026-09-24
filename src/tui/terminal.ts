@@ -456,6 +456,9 @@ export class ProcessTerminal implements Terminal {
 		// re-interpreted after raw mode is disabled. This fixes a race condition
 		// where Ctrl+D could close the parent shell over SSH.
 		process.stdin.pause();
+		// Windows 控制台在 resume 之后，pause 仍可能占着事件循环，进程不退出，
+		// shell 提示符要再等一次 Ctrl+C（那时 raw mode 已关，才变成 SIGINT）。
+		process.stdin.unref();
 
 		// Restore raw mode state
 		if (process.stdin.setRawMode) {
@@ -531,6 +534,7 @@ export class ProcessTerminal implements Terminal {
 				this.progressInterval = setInterval(() => {
 					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
+				this.progressInterval.unref();
 			}
 		} else {
 			this.clearProgressInterval();

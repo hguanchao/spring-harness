@@ -101,11 +101,23 @@ export function resolvePwshBinary(): { command: string; prefixArgs: string[] } {
   return { command: found, prefixArgs };
 }
 
-/** 一次性命令的 argv：shell 二进制 + 前缀 + 脚本。loop 与 shell 工具共用，避免两处各拼一遍。 */
+function commandBaseName(command: string): string {
+  const normalized = command.replace(/\\/g, '/');
+  const name = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase();
+  return name.endsWith('.exe') ? name.slice(0, -4) : name;
+}
+
+/**
+ * 一次性命令的 argv：shell 二进制 + 前缀 + 脚本。loop 与 shell 工具共用，避免两处各拼一遍。
+ *
+ * bash 打开 pipefail：管道的退出码默认是最后一段，模型把构建输出接到 tail 时，
+ * Gradle 失败也会被报成 exit 0。只加在 bash 上——落到 /bin/sh（dash）时它不认识这个选项。
+ */
 export function shellArgv(script: string, kind: ShellKind = process.platform === 'win32' ? 'pwsh' : 'bash'): {
   command: string;
   args: string[];
 } {
   const shell = kind === 'pwsh' ? resolvePwshBinary() : resolveBashBinary();
-  return { command: shell.command, args: [...shell.prefixArgs, script] };
+  const pipefail = commandBaseName(shell.command) === 'bash' ? ['-o', 'pipefail'] : [];
+  return { command: shell.command, args: [...pipefail, ...shell.prefixArgs, script] };
 }

@@ -1,12 +1,12 @@
 # Spring Harness (`sph`)
 
-A personal, general-purpose agent runtime that runs on your own machine: one process, a terminal UI, and a tool-using LLM loop over a single workspace.
+A general-purpose agent runtime that runs on your own machine: one process, a terminal UI, and a tool-using LLM loop over a single workspace. Programming, research, writing, and organizing materials are all in scope.
 
-It is written from scratch in TypeScript with five runtime dependencies — no CLI framework, no third-party TUI toolkit, no HTTP client wrapper. The terminal widgets live in `src/tui` and are exported as `@spring-harness/cli/tui`. `sph-tui` is their only in-repo consumer, and the widget layer does not import the agent loop, sessions, or tools.
+It is written from scratch in TypeScript with five runtime dependencies — no CLI framework, no third-party TUI toolkit, no HTTP client wrapper. The terminal widgets live in `src/tui` and are only used by `sph-tui`. The widget layer does not import the agent loop, sessions, or tools.
 
-- **Agent loop** — multi-step tool calling with an explicit 32-step ceiling, parallel-safe tool batching, and results committed in model order.
+- **Agent loop** — multi-step tool calling with parallel-safe tool batching and results committed in model order. `max_turns` is optional; when set, a subagent winds down and returns what it already found instead of discarding the turn.
 - **Context management** — three-tier compaction (tool-result stubbing → LLM incremental summary → mechanical fold) plus recovery when a provider rejects the request as over-window.
-- **Subagents** — foreground fan-out (3 concurrent), background jobs with completion push, `resume_from`, and optional `git worktree` isolation. Flat tree by default.
+- **Subagents** — the `task` tool spawns them (foreground fan-out of 3, or background with completion push) and lists background records. `resume_from` and optional `git worktree` isolation. Flat tree by default.
 - **Sessions** — append-only JSONL per workspace; state (todos, goal, plan mode, token spend) is folded back on resume.
 - **Sandbox** — off unless you turn it on. `workspace` and `read-only` are a same-host file policy: Linux `bwrap` (Landlock if `bwrap` is missing), macOS Seatbelt, Windows restricted token + ACL. Reads and network stay on the host. Windows enforcement is partial.
 - **Three upstream protocols** — `chat-completions`, `responses`, `anthropic-messages`, with runtime parameter degradation so an endpoint that rejects `max_tokens` or `stream_options` is adapted to instead of failing.
@@ -67,6 +67,7 @@ Key facts:
 - `max_session_tokens` (default `0` = unlimited) caps cumulative prompt+completion tokens for the whole agent tree, including subagents and compaction. The count survives `--resume`; the turn stops before the next request when the budget is gone, and warns at 80%.
 - `max_retries` (default `10`) is how many times a failed upstream request is retried, not counting the first attempt. `0` fails immediately. Only 408/429/5xx, network errors, idle timeouts, and empty responses retry.
 - `subagent_max_depth` (default `1`) — `0` forbids delegation entirely.
+- `max_turns` (unset by default) — a positive integer cap on model calls in one turn. Omit it and a turn runs until the model stops. A subagent that reaches it is told to write up with a few steps left, then its last report comes back as a failed tool result marked with the step limit and a `resume_from` session id. The root session is not capped by this key.
 - `subagent_approval` (default `inherit`) — `strict` makes subagents fail closed: reviewed tools are denied without prompting, and the parent session's grants are not shared. `inherit` hands the child the same approver, grants included.
 - `[permissions]` — `allow` / `ask` / `deny` lists whose entries are `<tool>` or `<tool>:<pattern>` (`*` any run, `?` one character; no wildcard means an exact match). Rules are more specific than the mode, so they outrank it: **`deny` beats every mode including `yolo`**, `ask` also beats `yolo`, and `allow` skips the prompt. In headless mode an `ask` rule is a denial — there is nobody to ask.
 - `trusted = [...]` (top level) and `[grants]` record cross-session state in config.toml itself: trusted workspace roots, and per-project approval grants keyed by git repo root. Both are written by sph when you confirm a workspace or pick *always allow* in the approval dialog.
@@ -226,7 +227,7 @@ Startup resolves `sph-llm`, `sph-session`, `sph-loop`, and `sph-schedule` by ser
 
 `src/plugins/services.ts` holds the seams. The host names a capability without importing its implementation.
 
-Agent definitions and the `subagent` / `send_subagent_message` tools live in the plugin, while the child session, depth budget, approval, and event protocol stay in the turn loop. Built-in agents are `explore` (read-only) and `general`. A markdown file in `~/.sph/agents/` or `<workspace>/.sph/agents/` adds or replaces one; the workspace directory is read only when the workspace is trusted. A file looks like this:
+Agent definitions and the `task` / `send_subagent_message` tools live in the plugin, while the child session, depth budget, approval, and event protocol stay in the turn loop. `task` spawns a child (`action: spawn`, the default) and also lists or reads background records (`list`, `get`). Built-in agents are `explore` and `research` (read-only), `writer` (documents only), and `general`. `/agent <name>` seats one of them as this session: the next turn keeps only that definition's tools and appends its prompt. `/agent default` returns to every tool. The choice is an `agent` event, so it survives resume and compaction. A missing definition falls back to every tool. A markdown file in `~/.sph/agents/` or `<workspace>/.sph/agents/` adds or replaces one; the workspace directory is read only when the workspace is trusted. A file looks like this:
 
 ```markdown
 ---
@@ -245,7 +246,7 @@ One turn of `runTurn` looks like this:
 2. Project the session into a request, compacting if it is over the pressure line.
 3. Call the model, streaming text and reasoning to the UI.
 4. No tool calls and an explicit finish reason → done. Otherwise run the tool batch, committing results in model order.
-5. Persist, then repeat — up to 32 steps.
+5. Persist, then repeat until the model stops. A configured `max_turns` ends a subagent turn at that count.
 
 ## Development
 

@@ -56,7 +56,7 @@ export function planBlockedReason(name: string): string {
 export function createPlanSeam(catalog: () => SubagentCatalog | undefined): PlanModeSeam {
   return {
     isBlocked: (toolName, args) => {
-      if (toolName !== 'subagent') return undefined;
+      if (toolName !== 'task') return undefined;
       const requested = typeof args.agent === 'string' && args.agent.trim() !== '' ? args.agent.trim() : 'general';
       const writes = catalog()?.find(requested)?.writes;
       return writes !== false;

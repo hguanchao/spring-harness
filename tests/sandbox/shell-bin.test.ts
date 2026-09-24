@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -21,6 +22,33 @@ describe('Windows PowerShell 启动参数', {
     const { args } = shellArgv('npm test', 'pwsh');
     assert.equal(args[args.indexOf('-ExecutionPolicy') + 1], 'Bypass');
     assert.equal(args[args.length - 1], 'npm test');
+    assert.equal(args.includes('pipefail'), false);
+  });
+});
+
+function bashPipelineArgv(): ReturnType<typeof shellArgv> | undefined {
+  try {
+    return shellArgv('exit 3 | true', 'bash');
+  } catch {
+    return undefined;
+  }
+}
+
+const bashPipeline = bashPipelineArgv();
+
+describe('bash pipefail', {
+  skip: bashPipeline ? false : '没有可用的 bash',
+}, () => {
+  it('管道里前面的失败码会留下来，而不是被最后一段吃掉', async () => {
+    assert.ok(bashPipeline);
+    assert.deepEqual(bashPipeline.args.slice(0, 3), ['-o', 'pipefail', '-c']);
+    assert.equal(bashPipeline.args.at(-1), 'exit 3 | true');
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(bashPipeline.command, bashPipeline.args, { stdio: 'ignore', windowsHide: true });
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    assert.equal(code, 3);
   });
 });
 

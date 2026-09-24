@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { FileObservation, NOT_OBSERVED } from '../../src/plugins/sph-tools/observe.js';
+import { FileObservation, NOT_OBSERVED } from '../../src/tools/observe.js';
 import { EMPTY_PLUGIN_SERVICES } from '../../src/plugins/types.js';
 import type { ToolContext } from '../../src/tools/types.js';
 import { writeTool } from '../../src/plugins/sph-tools/write.js';

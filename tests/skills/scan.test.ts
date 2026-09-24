@@ -12,18 +12,39 @@ function writeSkill(root: string, name: string, description: string): void {
 }
 
 describe('skillRoots', () => {
-  it('四个根按「用户级 → ~/.sph → 工作区 .agents → 工作区 .sph」排列', () => {
+  it('六个根按「用户级 → ~/.sph → 工作区」排列，.claude 紧跟同级 .agents', () => {
     // 顺序即优先级：/skills 直接把它显示给用户，错序会让用户照着一份错的清单放文件。
     assert.deepEqual(skillRoots('/ws', join('/home', '.sph'), '/home'), [
       join('/home', '.agents', 'skills'),
+      join('/home', '.claude', 'skills'),
       join('/home', '.sph', 'skills'),
       join('/ws', '.agents', 'skills'),
+      join('/ws', '.claude', 'skills'),
       join('/ws', '.sph', 'skills'),
     ]);
   });
 });
 
 describe('scanSkills', () => {
+  it('user-invocable 为 true 时记在目录项上，工作区 .claude 覆盖用户级同名', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sph-skills-invoke-'));
+    const home = join(base, 'home');
+    const ws = join(base, 'ws');
+    try {
+      const dir = join(home, '.claude', 'skills', 'review');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'SKILL.md'), '---\nname: review\ndescription: user\nuser-invocable: true\n---\n', 'utf8');
+      const project = join(ws, '.claude', 'skills', 'review');
+      mkdirSync(project, { recursive: true });
+      writeFileSync(join(project, 'SKILL.md'), '---\nname: review\ndescription: workspace\n---\n', 'utf8');
+      const { catalog } = scanSkills(ws, join(base, 'sph-home'), home);
+      assert.equal(catalog[0]?.description, 'workspace');
+      assert.equal(catalog[0]?.userInvocable, undefined);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('同名技能以靠后的根为准：工作区覆盖用户级', () => {
     const base = mkdtempSync(join(tmpdir(), 'sph-skills-'));
     const home = join(base, 'home');

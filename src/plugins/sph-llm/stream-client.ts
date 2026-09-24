@@ -8,7 +8,7 @@ import {
 import { ContextOverflowError } from './errors.js';
 import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
 import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
-import { postSseStream } from './sse.js';
+import { FatalStreamError, postSseStream } from './sse.js';
 import { backoffMs, DEFAULT_MAX_RETRIES, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../../util.js';
 
@@ -68,8 +68,8 @@ const MAX_DEGRADATIONS = 8;
  * 三种协议共用的流式客户端。
  *
  * 两条不变量在这里：
- * 1. 传输失败不提交半截：失败的片段不进会话，同一步再打。
- *    思考或正文已经上屏也一样——重试会再流一遍，TUI 可能短暂重复，但不会留下空 assistant。
+ * 1. 还没流出任何内容时，传输失败整段重试。已经有正文、思考、工具参数或推理项时，
+ *    把半截交回循环：结束原因缺省标成 unknown，循环会续写，而不是把同一段再流一遍。
  *    参数降级只在尚未向用户输出任何内容时发生。
  * 2. 参数降级的结果记在**闭包**里（一个 client ≈ 一个进程/会话），同一会话内换完就不再踩，
  *    不必每步重交一次学费。
@@ -129,11 +129,16 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             },
           });
         } catch (error) {
-          // 半截流已经上屏：丢掉再报错就是「突然中断」。只对瞬时传输错误交回半截，
-          // 让 loop 再打一轮。协议层 error 事件（审核拒绝、上游业务失败）必须上抛，
-          // 否则会把失败当成 stop 收工。
           if (signal?.aborted) throw error;
           if (error instanceof ContextOverflowError) throw error;
+          if (error instanceof FatalStreamError) throw error.cause;
+          // 审核、鉴权这类终态不是 RetryableError，原样上抛。
+          // 瞬时断流且累积器里已经有内容：交回半截。结束原因还空着就标 unknown，
+          // 循环据此续写，而不是把已经上屏的字再流一遍。
+          const partial = finishStream(acc);
+          if (error instanceof RetryableError && !isEmptyReply(partial)) {
+            return { ...partial, finishReason: partial.finishReason ?? 'unknown' };
+          }
           throw error;
         }
         const result = finishStream(acc);

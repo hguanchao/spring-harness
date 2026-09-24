@@ -3,8 +3,8 @@
  * 不落盘——resume 后要重新读。本轮内 write 新建的文件记为已观察，随后 search_replace 不必再读。
  */
 import { existsSync } from 'node:fs';
-import { canonicalize, casefoldPath } from '../../workspace/boundary.js';
-import type { ToolResult } from '../../tools/types.js';
+import { canonicalize, casefoldPath } from '../workspace/boundary.js';
+import type { ToolResult } from './types.js';
 
 export const NOT_OBSERVED =
   'cannot modify: file has not been read — read the file, then retry';

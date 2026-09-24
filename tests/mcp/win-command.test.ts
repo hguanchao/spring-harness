@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { McpHub } from '../../src/plugins/sph-mcp/hub.js';
+import { McpHub, stopStdioChild } from '../../src/plugins/sph-mcp/hub.js';
 import { testHostFacts } from '../plugins/host-fixture.js';
 import { cmdArgumentLine, escapeCmdArgument, resolveWindowsCommand } from '../../src/plugins/sph-mcp/win-command.js';
 
@@ -157,6 +157,71 @@ describe('经 cmd.exe 启动 .cmd 启动器跑通 MCP 握手', { skip: process.p
       assert.fail(`20s 内没有连上：${JSON.stringify(hub.listServers().map((s) => s.problem ?? s.target))}`);
     } finally {
       hub.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe('stopStdioChild', { skip: process.platform === 'win32' ? false : '只对 Windows 有意义' }, () => {
+  it('cmd.exe /c 的孙进程一起退出，管道不再占着事件循环', { timeout: 15_000 }, async () => {
+    const { spawn } = await import('node:child_process');
+    const dir = mkdtempSync(join(tmpdir(), 'sph-tree-kill-'));
+    const pidFile = join(dir, 'pid');
+    const js = join(dir, 'hang.js');
+    writeFileSync(js, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`);
+    const cmd = join(dir, 'hang.cmd');
+    writeFileSync(cmd, `@echo off\r\n"${process.execPath}" "${js}"\r\n`);
+    const root = process.env.SystemRoot ?? 'C:\\Windows';
+    const child = spawn(join(root, 'System32', 'cmd.exe'), ['/d', '/s', '/c', cmd], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    child.on('error', () => {});
+    child.stdin?.on('error', () => {});
+    child.stdout?.on('error', () => {});
+    child.stderr?.on('error', () => {});
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(pidFile)) {
+        if (child.exitCode !== null) throw new Error(`cmd exited early (${child.exitCode})`);
+        if (Date.now() > deadline) throw new Error('grandchild did not start');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const grand = Number(readFileSync(pidFile, 'utf8'));
+      stopStdioChild(child);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('cmd did not exit')), 5_000);
+        if (child.exitCode !== null) {
+          clearTimeout(timer);
+          resolve();
+          return;
+        }
+        child.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      const gone = Date.now() + 3_000;
+      while (pidAlive(grand)) {
+        if (Date.now() > gone) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(pidAlive(grand), false, '孙进程应被 taskkill /T 关掉');
+    } finally {
+      try {
+        child.kill();
+      } catch {
+        // 已经退出
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });

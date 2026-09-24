@@ -27,6 +27,7 @@ function harness(catalog?: SubagentCatalog): { api: PluginApi; tools: ToolSpec[]
     registerCommand: () => {},
     subscribe: () => {},
     onDispose: () => {},
+    registerHook: () => {},
   };
   return { api, tools, services };
 }
@@ -54,13 +55,14 @@ describe('sph-plan 插件装载', () => {
         if (name === 'general') return { writes: true };
         return undefined;
       },
+      seat: () => undefined,
     });
     assert.equal(s.isBlocked('write', {}), undefined, '普通工具不覆盖，由 planSafe 决定');
     assert.equal(s.isBlocked('read', {}), undefined);
-    assert.equal(s.isBlocked('subagent', { agent: 'explore' }), false, '只读子代理放行');
-    assert.equal(s.isBlocked('subagent', { agent: 'general' }), true, '会写的子代理拦截');
-    assert.equal(s.isBlocked('subagent', {}), true, '省略 agent 时按 general，会写');
-    assert.equal(s.isBlocked('subagent', { agent: 'missing' }), true, '未知定义按会写');
+    assert.equal(s.isBlocked('task', { agent: 'explore' }), false, '只读子代理放行');
+    assert.equal(s.isBlocked('task', { agent: 'general' }), true, '会写的子代理拦截');
+    assert.equal(s.isBlocked('task', {}), true, '省略 agent 时按 general，会写');
+    assert.equal(s.isBlocked('task', { agent: 'missing' }), true, '未知定义按会写');
     assert.match(s.blockedReason('write'), /blocked in plan mode: write/);
   });
 

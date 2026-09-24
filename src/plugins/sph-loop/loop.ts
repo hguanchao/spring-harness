@@ -16,28 +16,39 @@ import { PLAN_MODE_SERVICE, type PlanModeSeam } from '../services.js';
 import { buildSystemPrompt, contextTailMessage, isContextTailMessage, isSessionStateMessage, sessionStateMessage } from './prompt.js';
 import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from './prefix-tracker.js';
 import { runToolBatch } from './tool-run.js';
-import { CacheMissTracker, describeCacheMiss } from '../sph-llm/cache-stats.js';
-import { ContextOverflowError } from '../sph-llm/errors.js';
-import type { ChatMessage, TokenUsage } from '../sph-llm/openai.js';
-import { EMPTY_TODO, MCP_SERVICE, SCHEDULER_SERVICE, SESSION_SERVICE, SKILLS_SERVICE, TODO_SERVICE, todoEventData, type McpService, type SchedulerService, type SessionService, type SkillService, type TodoService } from '../services.js';
+import { CacheMissTracker, describeCacheMiss } from '../../llm/cache-stats.js';
+import type { ChatMessage, TokenUsage } from '../../llm/client.js';
+import { EMPTY_TODO, MCP_SERVICE, SCHEDULER_SERVICE, SESSION_SERVICE, SKILLS_SERVICE, SUBAGENT_SERVICE, TODO_SERVICE, todoEventData, type McpService, type SchedulerService, type SessionService, type SkillService, type SubagentCatalog, type TodoService } from '../services.js';
 import { EMPTY_PLUGIN_SERVICES, type PluginServices } from '../types.js';
-import { JobBoard, type JobRecord } from '../sph-schedule/jobs.js';
+import type { JobRecord } from '../../runtime/scheduler.js';
 import { jobNotificationText } from '../../runtime/scheduler.js';
 import { WorktreeStore } from './worktrees.js';
 import { shellArgv } from '../../sandbox/shell-bin.js';
 import { errorMessage } from '../../util.js';
-import { jsonlSessionFactory } from '../sph-session/store.js';
 import { foldSessionState, sessionEventData } from '../../session/fold.js';
 import { lastAssistantMessage } from '../../session/query.js';
 import { closeInterruptedTurn } from '../../session/repair.js';
 import type { SessionMessage, SessionRecord } from '../../session/types.js';
-import { scanSkills } from '../sph-skills/scan.js';
 import type { ToolRegistry } from '../../tools/registry.js';
-import { FileObservation } from '../sph-tools/observe.js';
+import { FileObservation } from '../../tools/observe.js';
+import { toolDenied } from '../../tools/pipeline.js';
 import { SUBAGENT_CONCURRENCY, type ToolContext, type ToolResult } from '../../tools/types.js';
 import { existsSync } from 'node:fs';
 
-const MAX_STEPS = 32;
+/**
+ * 步数上限之前留出的收束窗口，只用于配了 maxTurns 的子会话。
+ *
+ * 模型看不到循环计数。不在这里说，它会把「继续补全」执行到被切断。
+ * 窗口内仍可补工具调用；最后一步不再给工具。上限本身不足一窗时，从第一步就提醒。
+ */
+const WIND_DOWN_STEPS = 4;
+
+function windDownNote(limit: number): string {
+  const left = Math.min(WIND_DOWN_STEPS, limit);
+  return `[step budget — ${left} step${left === 1 ? '' : 's'} remain, then this turn ends. Stop opening new work. `
+    + 'Write the report now: what you established or changed, the exact paths and identifiers, and what you did not finish. '
+    + 'One more tool call is only for a fact the report cannot do without.]';
+}
 
 /**
  * 把子代理定义里的工具名单收成实际可用集合。
@@ -51,7 +62,7 @@ function resolveChildTools(registry: ToolRegistry, declared: readonly string[]):
     ? registry.generalNames()
     : new Set(declared.filter((name) => registry.find(name)));
   if (declared.includes('*')) {
-    base.delete('subagent');
+    base.delete('task');
     base.delete('send_subagent_message');
   }
   return base;
@@ -59,6 +70,30 @@ function resolveChildTools(registry: ToolRegistry, declared: readonly string[]):
 
 /** 预算用掉多少就打一条 warn：留出「收尾并交付已有成果」的余地。 */
 const BUDGET_WARN_RATIO = 0.8;
+
+/**
+ * 根会话当前坐着的代理。
+ *
+ * 名字来自会话里最后一条 `agent` 事件。空名字是「切回默认」。
+ * 定义按调用时重读：用户刚丢进 `.sph/agents/` 的文件，下一轮就生效。
+ */
+function seatedAgent(options: RunTurnOptions): { tools: ReadonlySet<string>; prompt: string } | undefined {
+  const records = options.session.readAll();
+  let name = '';
+  let seen = false;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (!record || record.type !== 'event' || record.kind !== 'agent') continue;
+    const value = record.data.name;
+    if (typeof value !== 'string') continue;
+    name = value;
+    seen = true;
+    break;
+  }
+  if (!seen || name === '') return undefined;
+  const services = options.services ?? EMPTY_PLUGIN_SERVICES;
+  return services.get<SubagentCatalog>(SUBAGENT_SERVICE)?.seat(name);
+}
 
 /**
  * 活跃子代理 session id（进程级）：resume 校验「不在运行中」用。必须跨 runTurn 实例
@@ -123,9 +158,17 @@ function parseArgs(raw: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-/** 没装插件（测试）才用内置实现。正式启动缺服务就是缺，不退回 JSONL 或自建任务板。 */
+/**
+ * 没装插件（测试）才用内核里的折叠和通知文案。
+ * 会话工厂和任务板不在这里造：正式启动缺服务就失败，测试必须自己传入。
+ */
 function bundled<T>(services: PluginServices, value: T): T | undefined {
   return services === EMPTY_PLUGIN_SERVICES ? value : undefined;
+}
+
+/** 超窗只认错误名。循环不 import 模型插件，也不用 instanceof 绑死某一个类。 */
+function isContextOverflow(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ContextOverflowError';
 }
 
 export async function runTurn(options: RunTurnOptions): Promise<void> {
@@ -134,7 +177,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const registry = options.tools;
   const services = options.services ?? EMPTY_PLUGIN_SERVICES;
   const sessionApi = services.get<SessionService>(SESSION_SERVICE);
-  const sessions = options.sessions ?? sessionApi?.factory ?? bundled(services, jsonlSessionFactory);
+  const sessions = options.sessions ?? sessionApi?.factory;
   if (!sessions) throw new Error('sph-session is not loaded');
   // 压缩会换成新会话。闭包必须看到这份绑定，不能捕获 options.session。
   let active = options.session;
@@ -145,11 +188,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   const notify = services.get<SchedulerService>(SCHEDULER_SERVICE)?.notificationText ?? bundled(services, jobNotificationText);
   // 测试不装插件，直接扫技能目录。正式启动装了插件之后，关掉 sph-skills 就是空目录，
   // 不再回落到循环自己的那份扫描。
-  const skills = services === EMPTY_PLUGIN_SERVICES
-    ? scanSkills(options.workspaceRoot)
-    : (services.get<SkillService>(SKILLS_SERVICE)?.scan(options.workspaceRoot) ?? { catalog: [], warnings: [] });
+  const skills = services.get<SkillService>(SKILLS_SERVICE)?.scan(options.workspaceRoot) ?? { catalog: [], warnings: [] };
   for (const warning of skills.warnings) options.listener?.({ type: 'status', text: warning });
-  const jobs = options.jobs ?? services.get<SchedulerService>(SCHEDULER_SERVICE)?.create() ?? bundled(services, new JobBoard());
+  const jobs = options.jobs ?? services.get<SchedulerService>(SCHEDULER_SERVICE)?.create();
   if (!jobs) throw new Error('sph-schedule is not loaded');
   const mcp = services.get<McpService>(MCP_SERVICE);
   // todo 与 mcp 同一套缺席语义：插件被禁用时清单不可用。工具表里也不会有 todo 工具，
@@ -161,7 +202,13 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   // 系统提示在一轮内冻结，而且一轮和下一轮也是同一份：它是前缀的 message 0。
   // 日期、目录、目标这些会变的内容在尾部消息里，变了只追加，不改写这一段。
   // 计划模式的进出由工具结果和执行层负责，不靠改系统提示。
+  // 根会话选了代理时，工具和角色段都按那份定义收。子会话仍用派生时传入的集合。
+  // 没选、定义丢了、插件没装，都退回全工具，不让一条坏记录把会话锁死。
+  const seated = depth === 0 ? seatedAgent(options) : undefined;
+  const sessionTools = options.allowedTools ?? seated?.tools;
+  const rolePrompt = options.subagentPrompt ?? seated?.prompt;
   const promptInput = {
+    child: depth > 0,
     workspaceRoot: options.workspaceRoot,
     model: options.model,
     sandbox: options.sandbox.status.mode,
@@ -173,12 +220,15 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // 整段消失，而不是留下一句指向不存在工具的指令。`allowedTools` 为空时过去会放行
     // 全部段落——那会让被插件禁用/装载失败的工具（如 sph-mcp 没装时的 `mcp`）也留一段
     // 指令，所以这里按**工具表里真实存在的名字**收口。
-    allowedTools: options.allowedTools ?? new Set(registry.list().map((tool) => tool.name)),
-    toolPrompts: registry.list().flatMap((tool) => (tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : [])),
+    allowedTools: sessionTools ?? new Set(registry.list().map((tool) => tool.name)),
+    toolPrompts: registry.list().flatMap((tool) => {
+      const text = tool.prompt ?? tool.description;
+      return text ? [{ tool: tool.name, text }] : [];
+    }),
   };
   const systemBody = buildSystemPrompt(promptInput);
   // 子代理角色段追加在末尾：主提示词在前、角色约束在后。父会话不带这段，前缀互不影响。
-  const systemPrompt = options.subagentPrompt ? `${systemBody}\n\n${options.subagentPrompt}` : systemBody;
+  const systemPrompt = rolePrompt ? `${systemBody}\n\n${rolePrompt}` : systemBody;
   const contextText = contextTailMessage(promptInput);
   // token 预算：整棵代理树的累计量（自己的 usage + 各子代理 end 事件里的 tokens）。
   const budget = Math.max(0, Math.floor(options.maxSessionTokens ?? 0));
@@ -453,15 +503,37 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         memory,
         depth: depth + 1,
         maxSubagentDepth,
+        maxTurns: options.maxTurns,
         allowedTools: allowed,
         worktrees,
         subagentPrompt: input.systemPrompt,
         ...(input.mode === 'background' ? { inbox: childInbox } : {}),
       });
-      const last = lastAssistant?.(childSession.readMessages());
+      const childMessages = childSession.readMessages();
+      const last = lastAssistant?.(childMessages);
+      // 到顶那一步往往只有工具调用、正文为空。报告取最后一条非空正文，而不是这条空壳。
+      let written = '';
+      for (let i = childMessages.length - 1; i >= 0; i--) {
+        const row = childMessages[i];
+        if (row && row.role === 'assistant' && row.content.trim() !== '') {
+          written = row.content;
+          break;
+        }
+      }
+      const footer = `[subagent session: ${childSession.id} — continue with task(resume_from: "${childSession.id}")]`;
+      const stoppedAtLimit = childSession.readAll().some((record) =>
+        record.type === 'event' && record.kind === 'turn_end' && record.data.finishReason === 'step_limit');
+      // 到顶是未完成：正文仍交回，但工具结果必须失败，父代理才不会把半份当成结论。
+      // 会话号放在发现前面，长报告被截断时续接入口还在。
+      if (stoppedAtLimit) {
+        const findings = written || '(no findings written)';
+        const limit = options.maxTurns;
+        throw new Error(
+          `Stopped at the ${limit}-step limit before the task was finished.\n${footer}\n\nFindings so far:\n${findings}`,
+        );
+      }
       outcome = { ok: true, summary: last?.content || '(subagent produced no assistant text)' };
-      // 结果带 session id footer：模型据此能 resume 或继续发消息，不必再查 jobs。
-      return `${outcome.summary}\n\n[subagent session: ${childSession.id} — continue with subagent(resume_from: "${childSession.id}")]`;
+      return `${outcome.summary}\n\n${footer}`;
     } catch (error) {
       outcome = { ok: false, summary: errorMessage(error) };
       throw error;
@@ -496,6 +568,17 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     }
   };
 
+  const hooks = options.hooks ?? [];
+  const runTurnEnd = async (finishReason?: string): Promise<void> => {
+    for (const hook of hooks) {
+      if (!hook.turnEnd) continue;
+      try {
+        await hook.turnEnd({ finishReason });
+      } catch (error) {
+        options.listener?.({ type: 'status', level: 'warn', text: `turnEnd hook: ${errorMessage(error)}` });
+      }
+    }
+  };
   const observation = new FileObservation();
   const ctx: ToolContext = {
     workspaceRoot: options.workspaceRoot,
@@ -587,11 +670,30 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     },
   };
 
-  const allowed = options.allowedTools;
+  const allowed = sessionTools;
 
-  for (let step = 0; step < MAX_STEPS; step++) {
+  /** 最近一条非空 assistant 正文。收束步没有新正文时用它。 */
+  const latestAssistantText = (): string => {
+    for (let i = mirror.length - 1; i >= 0; i--) {
+      const row = mirror[i];
+      if (row && row.role === 'assistant' && row.content.trim() !== '') return row.content;
+    }
+    return '';
+  };
+
+  // 省略不限制。父会话即使配了也不收束：用户已经看着它的输出，打断一轮改动没有收益。
+  const turnLimit = depth > 0 && options.maxTurns !== undefined && options.maxTurns > 0
+    ? Math.floor(options.maxTurns)
+    : undefined;
+  let windDownSent = false;
+  for (let step = 0; turnLimit === undefined || step < turnLimit; step++) {
     if (options.signal?.aborted) throw new Error('aborted');
     assertBudget();
+    if (turnLimit !== undefined && !windDownSent && step >= turnLimit - WIND_DOWN_STEPS) {
+      windDownSent = true;
+      appendMessage({ role: 'user', content: windDownNote(turnLimit) });
+    }
+    const lastStep = turnLimit !== undefined && step === turnLimit - 1;
 
     // 后台任务完成推送：完成唤醒父级。轮次进行中收到即注入下一步。
     // 已收尾的轮次由 TUI 在 finally 里 drain 并自动开后续轮次；delivered 标记保证不重不漏。
@@ -716,7 +818,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       try {
         reply = await options.client.complete(
           projected,
-          registry.schemas(allowed),
+          // 最后一步不给工具：模型只能写正文。再给一次工具调用，结果会在提交前被丢掉。
+          lastStep ? [] : registry.schemas(allowed),
           options.signal,
           (delta) => {
             if (delta.thinking) {
@@ -759,7 +862,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         );
         break;
       } catch (error) {
-        const canRetry = error instanceof ContextOverflowError
+        const canRetry = isContextOverflow(error)
           && !overflowRetried
           && !streamed.text
           && !streamed.thinking
@@ -827,6 +930,25 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           ...(reply.thinkingSignature ? { thinkingSignature: reply.thinkingSignature } : {}),
         }
       : {};
+    // 最后一步的工具表是空的。模型仍返回工具调用时，那些调用没有结果可配，
+    // 丢掉它们，把已有正文当收束。先落盘再找：否则这条正文还不在 mirror 里。
+    if (lastStep && reply.toolCalls?.length && (reply.text ?? '').trim()) {
+      appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
+    }
+    if (lastStep && reply.toolCalls?.length) {
+      const content = latestAssistantText();
+      if (!content) throw new Error(`tool loop exceeded ${turnLimit} steps`);
+      options.listener?.({
+        type: 'status',
+        level: 'warn',
+        text: `Step limit reached (${turnLimit}). Report is what was already established.`,
+      });
+      active.appendEvent('turn_end', { depth, finishReason: 'step_limit' });
+      await runTurnEnd('step_limit');
+      options.listener?.({ type: 'done' });
+      return;
+    }
+
     if (!reply.toolCalls?.length) {
       // 只有明确的 stop/length/content-filter 且没有工具才退出。
       //
@@ -848,7 +970,15 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         continue;
       }
       appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
-      active.appendEvent('turn_end', { depth, finishReason: finish });
+      if (lastStep) {
+        options.listener?.({
+          type: 'status',
+          level: 'warn',
+          text: `Step limit reached (${turnLimit}). Report is what was already established.`,
+        });
+      }
+      active.appendEvent('turn_end', { depth, finishReason: lastStep ? 'step_limit' : finish });
+      await runTurnEnd(lastStep ? 'step_limit' : finish);
       options.listener?.({ type: 'done' });
       return;
     }
@@ -870,22 +1000,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       ...thinkingReplay,
     });
 
-    // 拒绝理由集中在一处判定：execute 只负责执行，提交由 runToolBatch 按模型序推进。
-    const denyReason = (name: string, args: Record<string, unknown> = {}): string | undefined => {
-      if (allowed && !allowed.has(name)) return `tool not allowed in this agent: ${name}`;
-      if (registry.isRootOnly(name) && depth > 0) return `tool only available to the root session: ${name}`;
-      if (!registry.find(name)) return `unknown tool: ${name}`;
-      if (options.planMode?.active) {
-        const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
-        // 插件可以按参数覆盖（只读子代理放行）。没有覆盖时按工具自己的 planSafe，
-        // 未声明即拦截：新注册的写工具不会因为不在某张名单里而被放开。
-        const verdict = planSeam?.isBlocked(name, args);
-        const blocked = verdict === true || (verdict !== false && !registry.isPlanSafe(name));
-        if (blocked) return planSeam?.blockedReason(name) ?? `blocked in plan mode: ${name}`;
-      }
-      return undefined;
-    };
-
+    const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
     await runToolBatch({
       calls: parsedCalls,
       isParallel: (name) => registry.isConcurrencySafe(name),
@@ -898,10 +1013,43 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         const parseError = parseErrors.get(call.id);
         if (parseError) return { ok: false, content: `invalid tool arguments: ${parseError}` };
         const tool = registry.find(call.name);
-        const denied = denyReason(call.name, call.arguments);
+        const denied = toolDenied(registry, call.name, call.arguments, {
+          allowed,
+          depth,
+          planMode: options.planMode?.active,
+          plan: planSeam,
+        });
         let result: ToolResult;
         if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${call.name}` };
-        else result = await tool.execute(call.arguments, ctx, call.id);
+        else {
+          let blocked: string | undefined;
+          for (const hook of hooks) {
+            if (!hook.beforeTool) continue;
+            try {
+              blocked = await hook.beforeTool({ name: call.name, args: call.arguments });
+            } catch (error) {
+              blocked = errorMessage(error);
+            }
+            if (blocked) break;
+          }
+          result = blocked
+            ? { ok: false, content: blocked }
+            : await tool.execute(call.arguments, ctx, call.id);
+          if (!blocked) {
+            for (const hook of hooks) {
+              if (!hook.afterTool) continue;
+              try {
+                const verdict = await hook.afterTool(
+                  { name: call.name, args: call.arguments },
+                  { ok: result.ok, content: result.content },
+                );
+                if (verdict?.deny) result = { ok: false, content: verdict.deny };
+              } catch (error) {
+                result = { ok: false, content: errorMessage(error) };
+              }
+            }
+          }
+        }
         // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
         // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
         if (options.spill && result.ok && !result.images?.length) {
@@ -933,5 +1081,19 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       active.appendEvent('todo', todoEventData(todos.list()) as unknown as Record<string, unknown>);
     }
   }
-  throw new Error(`tool loop exceeded ${MAX_STEPS} steps`);
+  // 配了上限的子会话：最后一步仍在调工具，且没有新正文。上一条非空正文也算收束。
+  // 父会话走不到这里——它的循环没有上限。
+  const leftover = latestAssistantText();
+  if (leftover && turnLimit !== undefined) {
+    options.listener?.({
+      type: 'status',
+      level: 'warn',
+      text: `Step limit reached (${turnLimit}). Report is what was already established.`,
+    });
+    active.appendEvent('turn_end', { depth, finishReason: 'step_limit' });
+    await runTurnEnd('step_limit');
+    options.listener?.({ type: 'done' });
+    return;
+  }
+  throw new Error(`tool loop exceeded ${turnLimit} steps`);
 }

@@ -42,6 +42,7 @@ export interface ReplayHost {
     goal?: string;
     lastFailure?: SessionFailure;
     planMode: boolean;
+    agent?: string;
     lastRecapMainTurn: number;
     depth: number;
   }): void;
@@ -97,6 +98,7 @@ function replayRecords(host: ReplayHost, records: readonly SessionRecord[]): voi
     goal: folded.goal,
     lastFailure: folded.failures.at(-1),
     planMode: folded.planMode,
+    agent: folded.agent,
     lastRecapMainTurn: folded.lastRecapMainTurn,
     depth: folded.depth,
   });

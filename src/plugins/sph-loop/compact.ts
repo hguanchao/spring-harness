@@ -1,7 +1,7 @@
 import { foldSessionState, sessionEventData } from '../../session/fold.js';
 import type { SessionFactory, SessionMessage, SessionPort } from '../../session/types.js';
 import { attachmentWireSuffix } from './attachments.js';
-import type { LlmClient, ChatMessage, TokenUsage } from '../sph-llm/openai.js';
+import type { LlmClient, ChatMessage, TokenUsage } from '../../llm/client.js';
 
 /** 最近 K 轮原文不动。一轮 = 一对 user/assistant（含其间 tool）。 */
 const KEEP_RECENT_TURNS = 4;
@@ -387,6 +387,7 @@ export function openCompactedSession(options: {
   }
   if (folded.goal) next.appendEvent('goal', sessionEventData.goal(folded.goal));
   if (folded.planMode) next.appendEvent('plan_mode', sessionEventData.planMode(true));
+  if (folded.agent !== undefined) next.appendEvent('agent', sessionEventData.agent(folded.agent));
   if (folded.todos.length > 0) next.appendEvent('todo', { items: folded.todos.map((item) => ({ ...item })) });
   for (const failure of folded.failures) {
     next.appendEvent('tool_result', { tool: failure.tool, ok: false, excerpt: failure.excerpt });

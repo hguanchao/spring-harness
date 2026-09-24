@@ -13,7 +13,7 @@
  */
 
 import { estimateTokens, toChatMessages, type CompactionEvent } from './compact.js';
-import type { ChatMessage, LlmClient, TokenUsage } from '../sph-llm/openai.js';
+import type { ChatMessage, LlmClient, TokenUsage } from '../../llm/client.js';
 import type { SessionMessage } from '../../session/types.js';
 
 /**

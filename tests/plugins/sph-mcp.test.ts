@@ -40,6 +40,7 @@ function harness(): {
     registerCommand: () => {},
     subscribe: () => {},
     onDispose: (fn) => disposers.push(fn),
+    registerHook: () => {},
   };
   return { api, tools, services, disposers };
 }

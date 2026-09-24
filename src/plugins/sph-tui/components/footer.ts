@@ -16,6 +16,8 @@ export interface FooterUsage {
 export interface FooterData {
   cwd: string;
   gitBranch?: string;
+  /** 当前代理定义名。空或省略表示默认全工具，状态栏不显示这一段。 */
+  agent?: string;
   model: string;
   /** 推理强度（未启用则省略）。 */
   effort?: string;
@@ -59,6 +61,7 @@ export class FooterComponent implements Component {
 
     push('📁', projectName);
     if (data.gitBranch) push('🌿', data.gitBranch);
+    if (data.agent) push('🧩', data.agent);
     push('🤖', data.model);
     if (data.effort) push('🧠', data.effort);
 

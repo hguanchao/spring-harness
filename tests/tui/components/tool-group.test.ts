@@ -6,14 +6,15 @@ import { ToolGroupComponent } from '../../../src/plugins/sph-tui/components/tool
 import { selectRow } from '../../../src/plugins/sph-tui/components/selectable-row.js';
 
 let renderCount = 0;
-let viewportCount = 0;
+let contentCount = 0;
 const ui = {
+  invalidateContent() {
+    contentCount++;
+  },
   requestRender: () => {
     renderCount++;
   },
-  requestViewportRender: () => {
-    viewportCount++;
-  },
+  requestViewportRender() {},
 } as unknown as TUI;
 const STRIP = /\x1b\[[0-9;]*m/g;
 
@@ -244,16 +245,16 @@ describe('ToolGroupComponent 空思考链', () => {
 });
 
 describe('ToolGroupComponent 流式思考的绘制通道', () => {
-  it('running 增量仍走 requestRender：思考段在转录里，视口通道会命中滚动缓存', () => {
+  it('running 增量刷新转录内容，不走只重画视口的通道', () => {
     renderCount = 0;
-    viewportCount = 0;
+    contentCount = 0;
     const group = new ToolGroupComponent(ui);
     group.beginThinking();
     renderCount = 0;
-    viewportCount = 0;
+    contentCount = 0;
     group.setThinking('逐步思考', true);
-    assert.ok(renderCount >= 1, `流式思考应 bump 转录 generation，实际 requestRender=${renderCount}`);
-    assert.equal(viewportCount, 0);
+    assert.ok(contentCount >= 1, `流式思考应刷新转录，实际 invalidateContent=${contentCount}`);
+    assert.equal(renderCount, 0);
   });
 });
 

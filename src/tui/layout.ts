@@ -295,7 +295,10 @@ function layoutComponent(
 		const scrollView = node.state as ScrollView;
 		const contentWidth = node.state.getContentWidth(safeWidth);
 		const viewportHeight = height === undefined ? 0 : Math.max(0, Math.floor(height));
+		// 视口高度变了（审批弹窗把转录区挤矮）不能用上一帧的内容高度算留白。
+		// 否则 pin 留白按旧高度算，弹窗下方会空出一大块。
 		let cached = takeScrollChildCache(scrollView, context.contentGeneration, contentWidth, node.state.scrollTop);
+		if (cached && viewportHeight > 0 && viewportHeight !== node.state.viewportHeight) cached = undefined;
 		if (!cached) {
 			const previousScrollTop = node.state.scrollTop;
 			const childBox = layoutComponent(

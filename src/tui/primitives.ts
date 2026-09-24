@@ -667,6 +667,7 @@ export class Loader extends Text {
 			this.currentFrame = (this.currentFrame + 1) % this.frames.length;
 			this.updateDisplay();
 		}, this.intervalMs);
+		this.intervalId.unref();
 	}
 
 	protected getRenderedIndicator(): string {

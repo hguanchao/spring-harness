@@ -54,7 +54,7 @@ export function createSteeringInbox(limit = STEERING_QUEUE_LIMIT): SteeringInbox
 /**
  * 后台任务与主 loop 脱钩；完成结果以「推送」送达：完成即触发
  * onTaskDone 回调并打上未投递标记，loop 在下一步顶部、TUI 在轮次收尾/空闲时 drain。
- * jobs 工具降级为状态快照，不再是获知完成的必要手段。
+ * task(action: list|get) 只是状态快照，不再是获知完成的必要手段。
  */
 export class JobBoard implements JobBoardPort {
   private readonly jobs = new Map<string, JobRecord>();
@@ -69,10 +69,14 @@ export class JobBoard implements JobBoardPort {
    * await 之前完成——record 在 task 启动前已存在，无时序问题。
    * 完成信号与结果写回 record，由调用方决定如何消费；JobBoard 不感知任务内部实现。
    */
-  startTask(label: string, task: (signal: AbortSignal, job: JobRecord) => Promise<string>): string {
+  startTask(
+    label: string,
+    task: (signal: AbortSignal, job: JobRecord) => Promise<string>,
+    kind: JobRecord['kind'] = 'subagent',
+  ): string {
     const job: JobRecord = {
       id: randomUUID().slice(0, 8),
-      kind: 'subagent',
+      kind,
       command: label,
       status: 'running',
       stdout: '',

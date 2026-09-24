@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { runTurn } from '../../src/plugins/sph-loop/loop.js';
-import { JsonlSession } from '../../src/plugins/sph-session/store.js';
+import { JsonlSession, jsonlSessionFactory } from '../../src/plugins/sph-session/store.js';
+import { JobBoard } from '../../src/plugins/sph-schedule/jobs.js';
 import { defaultTools } from '../../src/plugins/sph-tools/index.js';
 import { PluginHost } from '../../src/plugins/host.js';
 import { discoverPlugins } from '../../src/plugins/loader.js';
@@ -12,7 +13,7 @@ import type { AgentEvent } from '../../src/plugins/sph-loop/events.js';
 import type { ChatMessage, LlmClient, StreamDelta, TokenUsage } from '../../src/plugins/sph-llm/openai.js';
 import type { SandboxHandle } from '../../src/sandbox/types.js';
 import type { Approver } from '../../src/permission/policy.js';
-import type { ToolRegistry } from '../../src/tools/registry.js';
+import { ToolRegistry } from '../../src/tools/registry.js';
 
 const sandbox: SandboxHandle = {
   status: { mode: 'off', enforcement: 'none', platform: process.platform },
@@ -80,7 +81,9 @@ describe('会话 token 预算', () => {
             workspaceRoot: root,
             client: toolOnceClient(count),
             session,
-            tools: defaultTools,
+                tools: defaultTools,
+            sessions: jsonlSessionFactory,
+            jobs: new JobBoard(),
             sandbox,
             approver,
             contextWindow: 100_000,
@@ -111,6 +114,8 @@ describe('会话 token 预算', () => {
         client: toolOnceClient(count),
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -136,6 +141,8 @@ describe('会话 token 预算', () => {
         client: toolOnceClient(count),
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -162,7 +169,9 @@ describe('会话 token 预算', () => {
             workspaceRoot: root,
             client: toolOnceClient(count),
             session,
-            tools: defaultTools,
+                tools: defaultTools,
+            sessions: jsonlSessionFactory,
+            jobs: new JobBoard(),
             sandbox,
             approver,
             contextWindow: 100_000,
@@ -230,6 +239,8 @@ describe('参数降级进工作状态', () => {
         client,
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -279,6 +290,8 @@ describe('提示缓存未命中记录', () => {
         client: cacheClient(usage(20_000, 19_000), usage(21_000, 0)),
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -309,6 +322,8 @@ describe('提示缓存未命中记录', () => {
         client: cacheClient(usage(20_000, 19_000), usage(21_000, 20_000)),
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -332,6 +347,8 @@ describe('提示缓存未命中记录', () => {
         client: cacheClient(usage(20_000, 19_500), usage(21_000, 19_600)),
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -384,6 +401,8 @@ describe('系统提示词一轮内冻结', () => {
           client: planToggleClient(seen),
           session,
           tools: pluginHost.tools(),
+          sessions: jsonlSessionFactory,
+          jobs: new JobBoard(),
           services: pluginHost,
           sandbox,
           approver,
@@ -421,6 +440,8 @@ describe('截断流继续', () => {
         client,
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -454,6 +475,8 @@ describe('截断流继续', () => {
         client,
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 100_000,
@@ -484,7 +507,9 @@ describe('取消 rewind：首次响应前中止不落盘用户消息', () => {
             workspaceRoot: root,
             client,
             session,
-            tools: defaultTools,
+                tools: defaultTools,
+            sessions: jsonlSessionFactory,
+            jobs: new JobBoard(),
             sandbox,
             approver,
             contextWindow: 100_000,
@@ -495,6 +520,131 @@ describe('取消 rewind：首次响应前中止不落盘用户消息', () => {
       const records = session.readAll();
       assert.equal(records.some((row) => row.type === 'message' && row.role === 'user'), false);
       assert.equal(records.some((row) => row.type === 'event' && row.kind === 'turn_start'), false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('钩子', () => {
+  it('beforeTool 拒绝后不执行，afterTool 可以把成功改成失败，turnEnd 在收束时调用', async () => {
+    const { session, root, cleanup } = makeSession();
+    const seen: string[] = [];
+    const tools = new ToolRegistry([
+      {
+        name: 'ping',
+        description: 'ping',
+        schema: { type: 'object', properties: {} },
+        concurrencySafe: true,
+        execute: async () => {
+          seen.push('ran');
+          return { ok: true, content: 'pong' };
+        },
+      },
+      {
+        name: 'secret',
+        description: 'secret',
+        schema: { type: 'object', properties: {} },
+        concurrencySafe: true,
+        execute: async () => {
+          seen.push('secret');
+          return { ok: true, content: 'leaked' };
+        },
+      },
+    ]);
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client: {
+          async complete(): Promise<StreamDelta> {
+            if (seen.includes('ran')) return { text: 'done', finishReason: 'stop' };
+            return {
+              text: '',
+              finishReason: 'tool-calls',
+              toolCalls: [
+                { id: 'c1', name: 'ping', arguments: '{}' },
+                { id: 'c2', name: 'secret', arguments: '{}' },
+              ],
+            };
+          },
+        },
+        session,
+        tools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        hooks: [{
+          beforeTool(call) {
+            seen.push(`before:${call.name}`);
+            return call.name === 'secret' ? 'blocked by hook' : undefined;
+          },
+          afterTool(call, result) {
+            seen.push(`after:${call.name}:${result.ok}`);
+            return call.name === 'ping' ? { deny: 'reviewed and rejected' } : undefined;
+          },
+          turnEnd(info) {
+            seen.push(`end:${info.finishReason ?? ''}`);
+          },
+        }],
+      });
+      const rows = session.readMessages().filter((row) => row.role === 'tool');
+      assert.equal(rows.find((row) => row.toolCallId === 'c1')?.content, 'reviewed and rejected');
+      assert.equal(rows.find((row) => row.toolCallId === 'c2')?.content, 'blocked by hook');
+      assert.equal(seen.includes('ran'), true);
+      assert.equal(seen.includes('secret'), false);
+      assert.equal(seen.includes('after:secret:false'), false);
+      assert.equal(seen.at(-1), 'end:stop');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('根会话代理', () => {
+  it('选了 research 后，请求里没有写和 shell，并带上角色段', async () => {
+    const { session, root, cleanup } = makeSession();
+    session.appendEvent('agent', { name: 'research' });
+    const host = new PluginHost({
+      coreTools: defaultTools.list(),
+      workspaceRoot: root,
+      configPath: join(root, 'config.toml'),
+    });
+    const discovered = discoverPlugins({
+      workspaceRoot: root,
+      userRoot: join(root, 'no-user'),
+      disabled: ['sph-mcp', 'sph-todo', 'sph-plan', 'sph-sandbox'],
+    });
+    await host.load(discovered.candidates);
+    let tools: unknown[] = [];
+    let system = '';
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client: {
+          async complete(messages, schemas): Promise<StreamDelta> {
+            tools = schemas;
+            system = messages.find((row) => row.role === 'system')?.content ?? '';
+            return { text: 'done', finishReason: 'stop' };
+          },
+        },
+        session,
+        tools: host.tools(),
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        services: host,
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+      });
+      const names = tools.map((tool) => (tool as { function?: { name?: string } }).function?.name);
+      assert.equal(names.includes('read'), true);
+      assert.equal(names.includes('bash'), false);
+      assert.equal(names.includes('write'), false);
+      assert.match(system, /read-only research agent/);
     } finally {
       cleanup();
     }
@@ -517,7 +667,7 @@ describe('子代理审批策略', () => {
   const SPAWN: StreamDelta = {
     text: '',
     finishReason: 'tool-calls',
-    toolCalls: [{ id: 's1', name: 'subagent', arguments: '{"prompt":"child work","description":"child work","agent":"general"}' }],
+    toolCalls: [{ id: 's1', name: 'task', arguments: '{"prompt":"child work","description":"child work","agent":"general"}' }],
   };
   const SHELL: StreamDelta = {
     text: '',
@@ -537,6 +687,8 @@ describe('子代理审批策略', () => {
         client: scriptedClient([SPAWN, SHELL, DONE, DONE]),
         session,
         tools: await toolsWithSubagent(root),
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver: { decide: async () => { seen.push('parent'); return true; } },
         ...(subagentApprover === undefined ? {} : { subagentApprover }),
@@ -557,6 +709,202 @@ describe('子代理审批策略', () => {
 
   it('省略 subagentApprover 时沿用父会话的 approver（inherit）', async () => {
     assert.deepEqual(await spawnThenShell(), ['parent']);
+  });
+});
+
+describe('步数上限收束', () => {
+  const LIMIT = 6;
+
+  function toolForever(note: { calls: number; toolCounts: number[] }, textAt?: number): LlmClient {
+    return {
+      async complete(_messages, tools): Promise<StreamDelta> {
+        note.calls++;
+        note.toolCounts.push(Array.isArray(tools) ? tools.length : 0);
+        return {
+          text: note.calls === textAt ? 'plugins live in src/plugins' : '',
+          finishReason: 'tool-calls',
+          toolCalls: [{ id: `c${note.calls}`, name: 'glob', arguments: '{"pattern":"*.ts"}' }],
+        };
+      },
+    };
+  }
+
+  it('没配 maxTurns 的根会话不停在固定步数', async () => {
+    const { session, root, cleanup } = makeSession();
+    const note = { calls: 0, toolCounts: [] as number[] };
+    const stopAt = 40;
+    try {
+      await runTurn({
+        prompt: 'map the runtime',
+        workspaceRoot: root,
+        client: {
+          async complete(_messages, tools): Promise<StreamDelta> {
+            note.calls++;
+            note.toolCounts.push(Array.isArray(tools) ? tools.length : 0);
+            if (note.calls >= stopAt) return { text: 'done', finishReason: 'stop' };
+            return {
+              text: '',
+              finishReason: 'tool-calls',
+              toolCalls: [{ id: `c${note.calls}`, name: 'glob', arguments: '{"pattern":"*.ts"}' }],
+            };
+          },
+        },
+        session,
+        tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+      });
+      assert.equal(note.calls, stopAt);
+      assert.ok(note.toolCounts.every((count) => count > 0));
+      assert.equal(session.readMessages().some((row) => row.role === 'user' && row.content.includes('step budget')), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('配了上限的根会话也不收束', async () => {
+    const { session, root, cleanup } = makeSession();
+    const note = { calls: 0, toolCounts: [] as number[] };
+    try {
+      await runTurn({
+        prompt: 'map the runtime',
+        workspaceRoot: root,
+        client: {
+          async complete(): Promise<StreamDelta> {
+            note.calls++;
+            if (note.calls > LIMIT) return { text: 'done', finishReason: 'stop' };
+            return {
+              text: '',
+              finishReason: 'tool-calls',
+              toolCalls: [{ id: `c${note.calls}`, name: 'glob', arguments: '{"pattern":"*.ts"}' }],
+            };
+          },
+        },
+        session,
+        tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        maxTurns: LIMIT,
+      });
+      assert.equal(note.calls, LIMIT + 1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('子会话到顶后留下正文，最后一步不再附带工具', async () => {
+    const { session, root, cleanup } = makeSession();
+    const note = { calls: 0, toolCounts: [] as number[] };
+    const events: AgentEvent[] = [];
+    try {
+      await runTurn({
+        prompt: 'map the runtime',
+        workspaceRoot: root,
+        client: toolForever(note, 2),
+        session,
+        tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        depth: 1,
+        maxTurns: LIMIT,
+        listener: (event) => events.push(event),
+      });
+      assert.equal(note.calls, LIMIT);
+      assert.ok((note.toolCounts[1] ?? 0) > 0, '收束窗口内仍可补一次工具调用');
+      assert.equal(note.toolCounts[LIMIT - 1], 0, '最后一步不给工具');
+      assert.ok(session.readMessages().some((row) => row.role === 'user' && row.content.includes('steps remain')));
+      const end = session.readAll().find((row) => row.type === 'event' && row.kind === 'turn_end');
+      assert.equal(end && end.type === 'event' ? end.data.finishReason : undefined, 'step_limit');
+      assert.ok(events.some((event) => event.type === 'done'));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('子会话到顶且全程没有正文时仍失败', async () => {
+    const { session, root, cleanup } = makeSession();
+    const note = { calls: 0, toolCounts: [] as number[] };
+    try {
+      await assert.rejects(
+        () =>
+          runTurn({
+            prompt: 'map the runtime',
+            workspaceRoot: root,
+            client: toolForever(note),
+            session,
+                tools: defaultTools,
+            sessions: jsonlSessionFactory,
+            jobs: new JobBoard(),
+            sandbox,
+            approver,
+            contextWindow: 100_000,
+            depth: 1,
+            maxTurns: LIMIT,
+          }),
+        new RegExp(`tool loop exceeded ${LIMIT} steps`),
+      );
+      assert.equal(note.calls, LIMIT);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('子会话到顶时，父代理拿到失败结果、会话号和已有正文', async () => {
+    const { session, root, cleanup } = makeSession();
+    const events: AgentEvent[] = [];
+    let calls = 0;
+    try {
+      await runTurn({
+        prompt: 'hi',
+        workspaceRoot: root,
+        client: {
+          async complete(): Promise<StreamDelta> {
+            calls++;
+            // 父：派一个子代理，然后收尾。子：每步都调工具，第 2 步留一句正文。
+            if (calls === 1) {
+              return {
+                text: '',
+                finishReason: 'tool-calls',
+                toolCalls: [{ id: 's1', name: 'task', arguments: '{"prompt":"map plugins","description":"map plugins","agent":"general"}' }],
+              };
+            }
+            if (calls === LIMIT + 2) return { text: 'parent done', finishReason: 'stop' };
+            return {
+              text: calls === 3 ? 'plugins live in src/plugins' : '',
+              finishReason: 'tool-calls',
+              toolCalls: [{ id: `c${calls}`, name: 'glob', arguments: '{"pattern":"*.ts"}' }],
+            };
+          },
+        },
+        session,
+        tools: await toolsWithSubagent(root),
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        maxTurns: LIMIT,
+        listener: (event) => events.push(event),
+      });
+      const tool = session.readMessages().find((row) => row.role === 'tool' && row.toolName === 'task');
+      assert.ok(tool, '父会话应有一条 subagent 工具结果');
+      assert.match(tool?.content ?? '', new RegExp(`Stopped at the ${LIMIT}-step limit`));
+      assert.match(tool?.content ?? '', /resume_from/);
+      assert.match(tool?.content ?? '', /plugins live in src\/plugins/);
+      const end = events.find((event) => event.type === 'subagent_end');
+      assert.equal(end && end.type === 'subagent_end' ? end.ok : undefined, false);
+    } finally {
+      cleanup();
+    }
   });
 });
 
@@ -589,6 +937,8 @@ describe('压缩换会话', () => {
         },
         session,
         tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
         sandbox,
         approver,
         contextWindow: 8_000,

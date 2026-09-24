@@ -6,6 +6,8 @@ import { formatStatusElapsed, formatStatusTokens } from '../../../src/util.js';
 import { formatWorkingWarning, IdleStatus, WorkingLabel, WorkingStatusIndicator, workingWarningKey } from '../../../src/plugins/sph-tui/components/interaction.js';
 
 const ui = {
+  invalidateContent() {},
+  requestViewportRender() {},
   requestRender: () => {
     // Loader 动画会打这个钩子；测试只关心渲染结果。
   },

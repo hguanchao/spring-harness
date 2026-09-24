@@ -265,7 +265,7 @@ describe('空流与截断', () => {
     assert.equal(reply.text, 'via-json');
   });
 
-  it('只有思考链时流中断：重试整轮，不当成成功空回复', async () => {
+  it('只有思考链时流中断：交回半截，不把同一段再流一遍', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
@@ -277,7 +277,7 @@ describe('空流与截断', () => {
               if (pulled++ === 0) {
                 controller.enqueue(
                   new TextEncoder().encode(
-                    `data: ${JSON.stringify({ choices: [{ delta: { reasoning: 'hmm' } }] })}\n\n`,
+                    `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'hmm' } }] })}\n\n`,
                   ),
                 );
                 return;
@@ -299,11 +299,12 @@ describe('空流与截断', () => {
       promptCache: false,
     });
     const reply = await c.complete(messages, []);
-    assert.equal(reply.text, 'ok');
-    assert.equal(calls, 2);
+    assert.equal(reply.thinking, 'hmm');
+    assert.equal(reply.finishReason, 'unknown');
+    assert.equal(calls, 1);
   });
 
-  it('已经输出过正文后流中断：丢弃半截并重打', async () => {
+  it('已经输出过正文后流中断：交回半截，不再重打', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
@@ -322,12 +323,13 @@ describe('空流与截断', () => {
     const reply = await c.complete(messages, [], undefined, (delta) => {
       if (delta.text) seen.push(delta.text);
     });
-    assert.deepEqual(seen, ['partial', 'recovered']);
-    assert.equal(reply.text, 'recovered');
-    assert.equal(calls, 2);
+    assert.deepEqual(seen, ['partial']);
+    assert.equal(reply.text, 'partial');
+    assert.equal(reply.finishReason, 'unknown');
+    assert.equal(calls, 1);
   });
 
-  it('流内 error 帧报网关断流：判为传输抖动，丢半截重打', async () => {
+  it('流内 error 帧报网关断流：已有正文就交回，不重打', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
@@ -346,9 +348,10 @@ describe('空流与截断', () => {
     const reply = await c.complete(messages, [], undefined, (delta) => {
       if (delta.text) seen.push(delta.text);
     });
-    assert.deepEqual(seen, ['partial', 'recovered']);
-    assert.equal(reply.text, 'recovered');
-    assert.equal(calls, 2);
+    assert.deepEqual(seen, ['partial']);
+    assert.equal(reply.text, 'partial');
+    assert.equal(reply.finishReason, 'unknown');
+    assert.equal(calls, 1);
   });
 
   it('流内 error 帧命中审核措辞：终态直接失败，不重打', async () => {
@@ -412,27 +415,16 @@ describe('空流与截断', () => {
     assert.equal(reply.finishReason, 'stop');
   });
 
-  it('半截之后的协议 error 事件上抛，不当成 stop 收工', async () => {
-    let pulled = 0;
+  it('半截之后的非终态 error 帧交回已有正文，不当成 stop', async () => {
     globalThis.fetch = (async () =>
-      new Response(
-        new ReadableStream<Uint8Array>({
-          pull(controller) {
-            const encoder = new TextEncoder();
-            if (pulled++ === 0) {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'hi' } }] })}\n\n`),
-              );
-              return;
-            }
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: 'filtered' } })}\n\n`));
-            controller.close();
-          },
-        }),
-        { headers: { 'content-type': 'text/event-stream' } },
-      )) as typeof fetch;
+      sseResponse([
+        `data: ${JSON.stringify({ choices: [{ delta: { content: 'hi' } }] })}\n\n`,
+        `data: ${JSON.stringify({ error: { message: 'filtered' } })}\n\n`,
+      ])) as typeof fetch;
 
-    await assert.rejects(() => client().complete(messages, []), /filtered/);
+    const reply = await client().complete(messages, []);
+    assert.equal(reply.text, 'hi');
+    assert.equal(reply.finishReason, 'unknown');
   });
 });
 

@@ -43,6 +43,7 @@ import {
   type RecapContext,
 } from '../sph-loop/recap.js';
 import { scanSkills, skillRoots } from '../sph-skills/scan.js';
+import { builtinAgents } from '../sph-subagent/agents.js';
 import { createLlmClassifier } from '../../permission/auto.js';
 import { HeadlessApprover, type ApprovalMode, type ApprovalRequest, type Approver } from '../../permission/policy.js';
 import { createGrantStore } from '../../permission/store.js';
@@ -103,6 +104,7 @@ import { TranscriptProjection, type TranscriptHost } from './transcript.js';
 import { restoreSessionInto, type ReplayHost } from './session-replay.js';
 import { commandMcps } from './mcp-commands.js';
 import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from './session-commands.js';
+import { commandDiff, commandFork, commandPrompts, invocableSkillPrompt } from './workspace-commands.js';
 import { commandModel, commandProvider, commandEffort, commandPermission, cycleApprovalMode, type SettingsCommandHost } from './settings-commands.js';
 import type { TuiDeps } from './deps.js';
 
@@ -213,6 +215,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private sendAfterInterrupt?: string;
   /** 会话的持久化深度下限（resume 恢复），本轮 runTurn 从这里起步。 */
   private sessionDepth = 0;
+  /** 状态栏上的代理名。空字符串是默认全工具，不显示。 */
+  private agentName = '';
 
   private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
   private contextTokens?: number;
@@ -456,11 +460,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       // 一次按键就退出。焦点组件路径已由框架过滤，这里补齐 UI 层监听器。
       if (isKeyRelease(data)) return undefined;
       if (this.ui.hasOverlay()) {
-        // 浮层打开时只保留「取消」语义，其余按键交给浮层。
-        if (matchesAppKey(data, 'app.clear')) {
-          this.ui.hideOverlay();
-          return { consume: true };
-        }
+        // 浮层上的 Ctrl+C 也要计入「再按一次退出」。以前这里只 hideOverlay：
+        // 这一下不算退出连按，审批/消息框的 Promise 还不结束，空闲时的两次变成三次。
+        // 不吞掉按键，浮层自己的取消（Esc / Ctrl+C）才会 resolve。
+        if (matchesAppKey(data, 'app.clear')) this.handleCtrlC();
         return undefined;
       }
       if (matchesAppKey(data, 'app.tools.expand')) {
@@ -469,6 +472,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       }
       if (matchesAppKey(data, 'app.approval.cycle')) {
         cycleApprovalMode(this);
+        return { consume: true };
+      }
+      if (matchesAppKey(data, 'app.agent.cycle')) {
+        this.cycleAgent();
         return { consume: true };
       }
       if (matchesAppKey(data, 'app.clear')) {
@@ -491,12 +498,15 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     goal?: string;
     lastFailure?: SessionFailure;
     planMode: boolean;
+    agent?: string;
     lastRecapMainTurn: number;
     depth: number;
   }): void {
     this.goal = state.goal;
     this.lastFailure = state.lastFailure;
     this.plan.active = state.planMode;
+    this.agentName = state.agent ?? '';
+    if (state.agent) this.addNotice(`Agent: ${state.agent}`, 'dim');
     this.lastRecapMainTurn = state.lastRecapMainTurn;
     // 持久化深度下限：resume 出的子代理会话不能伪装成顶层继续派生（ds 的 delegationDepth 语义）。
     this.sessionDepth = state.depth;
@@ -533,6 +543,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
   public requestRender(): void {
     this.ui.requestRender();
+  }
+
+  public invalidateContent(): void {
+    this.ui.invalidateContent();
   }
 
   /** 焦点交回输入框（挂起条取回编辑后）。 */
@@ -586,7 +600,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         // 双击取回后重新挂起：插回原排序位而不是队尾（队列已被 drain 时越界收敛为追加）。
         // 提交即解冻：编辑期间轮次若已收尾，这里补开新轮，让编辑后的消息第一个发出。
         const head = this.steerBar.insertEdit(text);
-        this.ui.requestRender();
+        this.ui.invalidateContent();
         if (!this.running) {
           if (head !== undefined) {
             this.steerBar.dropFirst();
@@ -598,8 +612,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       } else {
         this.steerBar.push(text);
       }
-      // 挂起条随下一帧自动更新（steersBar 每帧动态渲染），不再弹 dim 通知。
-      this.ui.requestRender();
+      // 挂起条在转录里。不刷新内容世代，滚动缓存会继续画旧队列。
+      this.ui.invalidateContent();
       return;
     }
     await this.executeTurn(text, true);
@@ -613,13 +627,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     }
     this.followUps.push(text);
     this.addNotice(`Queued follow-up (${this.followUps.length}) — runs after this turn.`, 'dim');
-    this.ui.requestRender();
   }
 
   private async executeTurn(prompt: string, rewindable = false): Promise<void> {
     this.chatContainer.addChild(new UserMessageComponent(prompt, getMarkdownTheme()));
     this.pinLatestUserMessage();
-    this.ui.requestRender();
+    this.ui.invalidateContent();
 
     // 新轮次开始：正在生成的 recap 即使回来了也不再上屏（迟到的摘要会插在新一轮中间）。
     this.recapEpoch++;
@@ -665,10 +678,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         contextWindow: this.contextWindow,
         depth: this.sessionDepth,
         maxSubagentDepth: this.deps.maxSubagentDepth,
+        maxTurns: this.deps.maxTurns,
         maxSessionTokens: this.deps.maxSessionTokens,
         listener: combineListeners(this.listener, this.deps.turnListeners ?? []),
         signal: controller.signal,
         services: this.deps.pluginServices,
+        hooks: this.deps.pluginServices.hooks?.(),
         todos: this.deps.todos,
         jobs: this.deps.jobs,
         memory: new TouchMemory(this.deps.workspaceRoot),
@@ -742,12 +757,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       // 提醒一句，避免用户以为总结就是全部结论。
       if (this.projection.liveSubagentCount > 0) {
         const n = this.projection.liveSubagentCount;
-        this.addNotice(`${n} background subagent${n === 1 ? ' still running' : 's still running'} — /jobs to inspect.`, 'dim');
+        this.addNotice(`${n} background task${n === 1 ? ' still running' : 's still running'}.`, 'dim');
       }
       // 不在这里 refreshCounters()：用量已由 'usage' 事件在内存里累加，重读整个会话文件
       // 只是把同一份数据再算一遍（长会话可达数 MB）。只有切换/新建会话时才需要重算。
       this.ui.setFocus(this.editor);
-      this.ui.requestRender();
+      this.ui.invalidateContent();
       // 竞态收口：通知在轮次收尾瞬间到达时，onTaskDone 回调已被 running 挡掉，
       // 这里补一次 drain——否则结果要滞留到用户下一次发言才被注入。
       this.wakeForCompletedJobs();
@@ -854,8 +869,13 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
    * dock：底栏/子代理行，走视口通道，避免把整份转录当结构变化重排。
    */
   public paint(kind: 'transcript' | 'dock'): void {
-    if (kind === 'dock' && isViewportTUI(this.ui)) this.ui.requestViewportRender();
-    else this.ui.requestRender();
+    if (!isViewportTUI(this.ui)) {
+      this.ui.requestRender();
+      return;
+    }
+    // 转录变了才递增内容世代。底栏、滚动、选区只重画当前帧，不重排整份对话。
+    if (kind === 'transcript') this.ui.invalidateContent();
+    else this.ui.requestViewportRender();
   }
 
   /**
@@ -1043,7 +1063,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.chatContainer.addChild(new Text(theme.fg(color, ` ${text}`), 0, 0));
     // 内联菜单等异步流程经 Promise resolve 恢复时，晚于菜单关闭那次 nextTick 渲染；
     // 这里必须自行触发重渲染，否则新提示与头部数据要等下一次按键才上屏。
-    this.ui.requestRender();
+    this.paint('transcript');
   }
 
   private setStatusIndicator(indicator: WorkingStatusIndicator | undefined): void {
@@ -1134,7 +1154,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     // 计时器已在上方记录，所以「中断 + 立刻再按一次」仍可退出。
     if (this.abort) {
       this.handleInterrupt();
-      this.ui.requestRender();
+      this.ui.invalidateContent();
       return;
     }
 
@@ -1144,7 +1164,6 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     } else {
       this.addNotice('Press Ctrl+C again to quit.', 'dim');
     }
-    this.ui.requestRender();
   }
 
   private quit(): void {
@@ -1182,6 +1201,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     return {
       cwd: this.deps.workspaceRoot,
       gitBranch: this.gitBranch,
+      agent: this.agentName || undefined,
       model: this.model,
       effort: this.effort,
       contextWindow: this.contextWindow,
@@ -1191,6 +1211,24 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   // ------------------------------------------------------------------ ApprovalUi
+
+  /**
+   * 在内置代理间循环，并写一条 agent 事件。下一轮 runTurn 读这条事件收工具。
+   * 一轮正在跑时不切：这次请求的工具表已经发出去了。
+   */
+  private cycleAgent(): void {
+    if (this.abort) {
+      this.addNotice('A turn is running. Switch the agent after it finishes.', 'warn');
+      return;
+    }
+    const names = ['', ...builtinAgents().map((agent) => agent.name)];
+    const index = Math.max(0, names.indexOf(this.agentName));
+    const next = names[(index + 1) % names.length] ?? '';
+    this.agentName = next;
+    const events = this.sessionEvents();
+    this.session.appendEvent('agent', events.agent(next));
+    this.addNotice(next === '' ? 'Agent cleared. This session uses every tool.' : `Agent is now ${next}.`, 'success');
+  }
 
   approvalMode(): ApprovalMode {
     return this.approval;
@@ -1273,6 +1311,15 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const argument = rest.join(' ').trim();
 
     const pluginCommand = (this.deps.pluginCommands ?? []).find((command) => command.name === name);
+    const skill = scanSkills(this.deps.workspaceRoot).catalog.find((entry) => entry.userInvocable && entry.name === name);
+    if (skill && !COMMAND_NAMES.has(name) && !pluginCommand) {
+      if (this.running) {
+        this.addNotice('A turn is already running.', 'warn');
+        return;
+      }
+      await this.executeTurn(invocableSkillPrompt(skill));
+      return;
+    }
     if (!COMMAND_NAMES.has(name)) {
       if (!pluginCommand) {
         this.addNotice(`Unknown command: /${name} — type /help`, 'warn');
@@ -1289,7 +1336,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         runPrompt: (prompt) => this.executeTurn(prompt),
       });
       this.applyEditorBorder();
-      this.ui.requestRender();
+      this.ui.invalidateContent();
       return;
     }
 
@@ -1335,6 +1382,15 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         break;
       case 'export':
         await commandExport(this, argument);
+        break;
+      case 'prompts':
+        await commandPrompts(this);
+        break;
+      case 'diff':
+        await commandDiff(this);
+        break;
+      case 'fork':
+        commandFork(this);
         break;
       default:
         break;
@@ -1648,7 +1704,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       if (!auto) this.addNotice(`Recap failed: ${message(error)}`, 'error');
     } finally {
       this.recapInFlight = false;
-      this.ui.requestRender();
+      this.ui.invalidateContent();
     }
   }
 
@@ -1675,9 +1731,11 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         mcpTools: this.deps.mcp()?.listTools() ?? [],
         lazyMcpServers: (this.deps.mcp()?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
         allowedTools: new Set((this.deps.tools ?? defaultTools).list().map((tool) => tool.name)),
-        toolPrompts: (this.deps.tools ?? defaultTools).list().flatMap((tool) => (
-          tool.prompt ? [{ tool: tool.name, text: tool.prompt }] : []
-        )),
+        child: this.sessionDepth > 0,
+        toolPrompts: (this.deps.tools ?? defaultTools).list().flatMap((tool) => {
+          const text = tool.prompt ?? tool.description;
+          return text ? [{ tool: tool.name, text }] : [];
+        }),
         // 与 runTurn 同参。会变的事实不在 system 里，已经作为尾部消息写在会话中。
       }),
       contextWindow: this.contextWindow,
@@ -1696,7 +1754,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const block = new RecapMessageComponent('', true);
     this.chatContainer.addChild(block);
     this.pendingRecap = block;
-    this.ui.requestRender();
+    this.ui.invalidateContent();
     return block;
   }
 
@@ -1704,14 +1762,14 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     if (!block) return;
     this.chatContainer.removeChild(block);
     if (this.pendingRecap === block) this.pendingRecap = undefined;
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /** 把一行 recap 摘要挂进对话流。 */
   public addRecap(summary: string): void {
     this.projection.breakToolGroup();
     this.chatContainer.addChild(new RecapMessageComponent(summary));
-    this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   /** 内置命令在前。插件命令同名时不覆盖内置。 */
@@ -1720,7 +1778,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const extra = (this.deps.pluginCommands ?? [])
       .filter((command) => !builtin.has(command.name))
       .map((command) => ({ id: command.name, label: `/${command.name}`, hint: command.description }));
-    return [...COMMANDS, ...extra];
+    const skills = scanSkills(this.deps.workspaceRoot).catalog
+      .filter((entry) => entry.userInvocable && !builtin.has(entry.name))
+      .map((entry) => ({ id: entry.name, label: `/${entry.name}`, hint: entry.description }));
+    return [...COMMANDS, ...extra, ...skills];
   }
 
   private sessionEvents() {

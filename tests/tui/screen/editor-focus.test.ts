@@ -13,6 +13,8 @@ function makeEditor(): Editor {
   const tui = {
     terminal: { rows: 24, columns: 80 },
     requestRender: () => {},
+    requestViewportRender: () => {},
+    invalidateContent: () => {},
   } as unknown as TUI;
   const editor = new Editor(tui, {
     borderColor: (text) => `${IDLE}${text}${RESET}`,
@@ -48,6 +50,8 @@ describe('Editor 聚焦 / 失焦', () => {
     const tui = {
       terminal: { rows: 24, columns: 80 },
       requestRender: () => {},
+      requestViewportRender: () => {},
+      invalidateContent: () => {},
     } as unknown as TUI;
     const editor = new Editor(tui, {
       borderColor: (text) => `${PLAN}${text}${RESET}`,
@@ -86,6 +90,10 @@ describe('Editor 聚焦 / 失焦', () => {
       requestRender() {
         this.paints += 1;
       },
+      requestViewportRender() {
+        this.paints += 1;
+      },
+      invalidateContent() {},
     };
     const editor = new Editor(tui as unknown as TUI, {
       borderColor: (text) => text,

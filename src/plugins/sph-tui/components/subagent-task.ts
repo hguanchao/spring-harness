@@ -7,7 +7,7 @@
  * 转录里的工具行不共用这一套：那里只留 `Subagent N 描述 总耗时`。
  */
 
-import { Container, isViewportTUI, Text, truncateToWidth, visibleWidth, type TUI } from '../../../tui/index.js';
+import { Container, Text, truncateToWidth, visibleWidth, type TUI } from '../../../tui/index.js';
 import { theme } from '../theme/theme.js';
 import { formatDuration } from '../../../util.js';
 
@@ -68,6 +68,8 @@ export class SubagentTaskComponent extends Container {
       this.markDirty();
       this.paintDock();
     }, SPIN_MS);
+    // 退出时如果没走到 dispose，这个间隔不能把进程留在 shell 提示符前面。
+    this.timer.unref();
   }
 
   dispose(): void {
@@ -90,8 +92,7 @@ export class SubagentTaskComponent extends Container {
   }
 
   private paintDock(): void {
-    if (isViewportTUI(this.ui)) this.ui.requestViewportRender();
-    else this.ui.requestRender();
+    this.ui.invalidateContent();
   }
 
   private markDirty(): void {

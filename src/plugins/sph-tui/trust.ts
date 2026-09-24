@@ -219,6 +219,6 @@ export function confirmWorkspaceTrust(workspaceRoot: string, ui: ViewportTUI): P
     screen.onDecide = resolve;
     ui.setLayoutRoot(screen);
     ui.setFocus(screen);
-    ui.requestRender();
+    ui.invalidateContent();
   });
 }

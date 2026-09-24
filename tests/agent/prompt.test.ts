@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildSystemPrompt, contextTailMessage, sessionStateMessage } from '../../src/plugins/sph-loop/prompt.js';
-import { explorePrompt, generalPrompt } from '../../src/plugins/sph-subagent/prompt.js';
+import { explorePrompt, generalPrompt, researchPrompt, writerPrompt } from '../../src/plugins/sph-subagent/prompt.js';
 import { CHECKPOINT_PREAMBLE, COMPACTION_SYSTEM } from '../../src/plugins/sph-loop/compact.js';
 import { CLASSIFIER_SYSTEM } from '../../src/permission/auto.js';
 import { memoryToPrompt, touchInstructionBlock, type MemoryFile } from '../../src/plugins/sph-loop/memory.js';
@@ -24,8 +24,15 @@ function input(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {})
   };
 }
 
+function promptsFor(allowed: ReadonlySet<string> | undefined): Array<{ tool: string; text: string }> {
+  return tools
+    .filter((tool) => allowed === undefined || allowed.has(tool.name))
+    .map((tool) => ({ tool: tool.name, text: tool.prompt ?? tool.description }));
+}
+
 function base(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): string {
-  return buildSystemPrompt(input(overrides));
+  const allowed = overrides.allowedTools;
+  return buildSystemPrompt(input({ toolPrompts: promptsFor(allowed), ...overrides }));
 }
 
 function tail(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): string {
@@ -85,6 +92,8 @@ describe('主系统提示词的结构', () => {
   it('身份段声明「本提示词不是要执行的任务」', () => {
     // 没有这句，模型会把系统提示词里的示例路径当任务去做。
     assert.ok(base().includes('this prompt is background rather than something to carry out'));
+    assert.ok(base().includes('Programming, research, writing, and organizing materials'));
+    assert.ok(base().includes('do not also create a file for it'));
   });
 });
 
@@ -132,23 +141,26 @@ describe('工具段的条件拼装', () => {
   it('全部可用时，每个已注册工具都有一段', () => {
     const p = base();
     for (const tool of tools) {
-      assert.ok(p.includes(`Use ${tool.name}`) || p.includes(`Use ${tool.name}(`), `缺少 ${tool.name} 的说明段`);
+      assert.ok(p.includes(tool.description.slice(0, 24)), `缺少 ${tool.name} 的说明段`);
     }
   });
 
   it('工具不可用时该段整段消失，不留指向不存在工具的指令', () => {
     const p = base({ allowedTools: new Set(['read']) });
-    assert.ok(p.includes('Use read'));
-    assert.ok(!p.includes('Use edit'), '不可用工具的段落必须消失');
-    assert.ok(!p.includes('Use subagent'));
+    assert.ok(p.includes('not shell cat'));
+    assert.ok(!p.includes('not sed or awk'), '不可用工具的段落必须消失');
+    assert.ok(!p.includes('Use task'));
   });
 
   it('只读子代理的工具集下，写工具段落不出现', () => {
     const p = base({ allowedTools: EXPLORE_TOOLS });
-    assert.ok(!p.includes('Use write'), '只读会话不该出现 write 段落');
-    assert.ok(!p.includes('Use edit'));
-    assert.ok(!p.includes('Use bash'), 'explore 工具集不含 bash');
-    assert.ok(p.includes('Use read'));
+    assert.ok(!p.includes('prefer edit for a targeted change'), '只读会话不该出现 write 段落');
+    assert.ok(!p.includes('not sed or awk'));
+    assert.ok(!p.includes('via bash'), 'explore 工具集不含 bash');
+    assert.ok(!p.includes('Reserve bash'), '没有 shell 时不该把命令留给 bash');
+    assert.ok(!p.includes('edit rather than sed'), '没有 edit 时不该拿它当替代');
+    assert.ok(p.includes('not shell cat'));
+    assert.ok(!p.includes('Write or edit only'), '没有写工具时不该要求把交付物落成文件');
   });
 
   it('点名禁止最可能的误用替代', () => {
@@ -160,9 +172,8 @@ describe('工具段的条件拼装', () => {
 
   it('grep 命中后用 read_file 看上下文；shell 非零退出先查再继续', () => {
     const p = base();
-    assert.ok(p.includes('Use read on a matched file when you need surrounding context'));
-    assert.ok(p.includes('investigate a non-zero exit before moving on'));
-    assert.ok(p.includes('do not poll, sleep-wait, or duplicate a running job'));
+    assert.ok(p.includes('narrow with a path'));
+    assert.ok(p.includes('Check the exit-code marker'));
   });
 });
 
@@ -275,24 +286,55 @@ describe('压缩摘要', () => {
 });
 
 describe('子代理提示词', () => {
-  const prompts = { explore: explorePrompt(), general: generalPrompt() };
+  const prompts = {
+    explore: explorePrompt(),
+    research: researchPrompt(),
+    writer: writerPrompt(),
+    general: generalPrompt(),
+  };
+
+  it('根会话要求把开放式请求做到完整，子会话改为按任务范围停', () => {
+    // 子代理若继承「探索到真正完整」，开放式切片会把 32 步用完也不交卷。
+    assert.ok(base().includes('genuinely complete'));
+    assert.ok(base().includes('build and test setup'));
+    assert.ok(base().includes('the sources you actually used'));
+    assert.ok(base().includes('Then stop and deliver it'));
+    const child = base({ child: true });
+    assert.equal(child.includes('genuinely complete'), false);
+    assert.ok(child.includes('Do not widen it into a full tour of the project'));
+  });
+
+  it('explore 按任务指定的彻底程度停，而不是把仓库逛完', () => {
+    const p = prompts.explore;
+    assert.ok(p.includes('Match the thoroughness the task names'));
+    assert.ok(p.includes('Name the gaps'));
+  });
 
   it('explore 带只读横幅并点名没有编辑工具', () => {
     const p = prompts.explore;
     assert.ok(p.includes('=== READ-ONLY MODE ==='));
     assert.ok(p.includes('You have NO file editing tools'));
+    assert.ok(p.includes('no shell'));
+    assert.ok(!p.includes('Use shell only'));
   });
 
-  it('两个角色都声明扁平代理树：子代理不能再派生子代理', () => {
+  it('research 只交报告，writer 只改被点名的文档', () => {
+    assert.ok(prompts.research.includes('not a code change and not a new file'));
+    assert.ok(prompts.research.includes('no shell'));
+    assert.ok(prompts.writer.includes('Do not change source code'));
+    assert.ok(prompts.writer.includes('Anything else belongs in the report'));
+  });
+
+  it('四个角色都声明扁平代理树：子代理不能再派生子代理', () => {
     // sph 默认 maxSubagentDepth=1；不写这条，子代理会白试一轮然后被运行时拒绝。
-    for (const role of ['explore', 'general'] as const) {
+    for (const role of ['explore', 'research', 'writer', 'general'] as const) {
       assert.ok(prompts[role].includes('cannot spawn subagents'), `${role} 缺少扁平代理树声明`);
     }
   });
 
-  it('两个角色都要求「报告结论而非叙述过程」', () => {
+  it('四个角色都要求「报告结论而非叙述过程」', () => {
     // runChild 取的是最后一条 assistant 文本，父代理看不到子代理的工具调用。
-    for (const role of ['explore', 'general'] as const) {
+    for (const role of ['explore', 'research', 'writer', 'general'] as const) {
       const p = prompts[role];
       assert.ok(p.includes('the ONLY thing the delegating agent receives'), `${role} 缺少接收者模型`);
       assert.ok(p.includes('not a narration of the steps'), `${role} 缺少产出格式约束`);
@@ -300,7 +342,7 @@ describe('子代理提示词', () => {
   });
 
   it('被拒时给出出路：写进报告让父代理处理，而不是重试', () => {
-    for (const role of ['explore', 'general'] as const) {
+    for (const role of ['explore', 'research', 'writer', 'general'] as const) {
       const p = prompts[role];
       assert.ok(p.includes('do not retry the denied operation'), `${role} 缺少被拒约束`);
       assert.ok(p.includes('so the delegating agent can handle it'), `${role} 缺少被拒出路`);
@@ -308,8 +350,9 @@ describe('子代理提示词', () => {
   });
 
   it('作用域边界：默认只在工作区内，越界是策略', () => {
-    for (const role of ['explore', 'general'] as const) {
+    for (const role of ['explore', 'research', 'writer', 'general'] as const) {
       assert.ok(prompts[role].includes('Workspace boundary'));
+      assert.ok(prompts[role].includes('latest context message'));
     }
   });
 });

@@ -47,6 +47,11 @@ export interface FoldedSessionState {
   lastRecap?: string;
   /** 计划模式是否激活（last-wins）。 */
   planMode: boolean;
+  /**
+   * 根会话当前的代理定义名（last-wins）。
+   * 空字符串表示已切回默认全工具。旧会话没有这条事件，折叠结果就是未选择。
+   */
+  agent?: string;
   /** 最近一次 turn 是否因崩溃/中断收尾（last-wins）。 */
   lastTurnInterrupted: boolean;
   /**
@@ -158,6 +163,10 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
         if (typeof data.active === 'boolean') state.planMode = data.active;
         break;
       }
+      case 'agent': {
+        if (typeof data.name === 'string') state.agent = data.name;
+        break;
+      }
       case 'usage': {
         // 自己的 LLM 调用（含 compact_model / review_model 这类辅助调用）都记在这。
         const prompt = asFiniteNumber(data.promptTokens) ?? 0;
@@ -209,6 +218,8 @@ export const sessionEventData = {
     shown: input.shown,
   }),
   planMode: (active: boolean): Record<string, unknown> => ({ active }),
+  /** name 为空表示切回默认全工具。 */
+  agent: (name: string): Record<string, unknown> => ({ name }),
   toolFailure: (tool: string, content: string): Record<string, unknown> => ({
     tool,
     ok: false,

@@ -263,6 +263,25 @@ describe('max_session_tokens', () => {
   });
 });
 
+describe('max_turns', () => {
+  it('未配置时不限制', () => {
+    const { registryPath, configPath } = setup();
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxTurns, undefined);
+  });
+
+  it('接受正整数', () => {
+    const { registryPath, configPath } = setup({}, 'max_turns = 32');
+    assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxTurns, 32);
+  });
+
+  it('0 与负数拒绝启动', () => {
+    for (const line of ['max_turns = 0', 'max_turns = -1']) {
+      const { registryPath, configPath } = setup({}, line);
+      assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
+    }
+  });
+});
+
 describe('max_retries', () => {
   it('未配置时默认 10', () => {
     const { registryPath, configPath } = setup();

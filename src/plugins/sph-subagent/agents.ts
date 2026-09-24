@@ -5,21 +5,23 @@
  * name、description、tools、writes。advertise / model / chain / workflow 不在这里——
  * sph 没有那一套运行时，加字段只会让定义看起来能做它做不到的事。
  *
- * 查找顺序：内置（explore、general）→ `~/.sph/agents/*.md` → `<workspace>/.sph/agents/*.md`。
+ * 查找顺序：内置（explore、research、writer、general）→ `~/.sph/agents/*.md` → `<workspace>/.sph/agents/*.md`。
  * 同名时近者胜，项目级整份换掉用户级。工作区未受信任时不读项目级：
  * 那是别人仓库里的提示词，和项目级插件同一道门。
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sphHome } from '../../home.js';
-import { explorePrompt, generalPrompt } from './prompt.js';
+import type { ToolRegistry } from '../../tools/registry.js';
+import { explorePrompt, generalPrompt, researchPrompt, writerPrompt } from './prompt.js';
 
 export interface AgentDefinition {
   name: string;
   description: string;
   /**
-   * 子会话可用的工具名。`*` 表示宿主按当前工具表展开（仍去掉委托工具）。
+   * 这个代理可用的工具名。`*` 表示宿主按当前工具表展开。
    * 点名的名字原样交给宿主，宿主丢掉工具表里没有的。
+   * 子会话还会再去掉委托工具；根会话用 `/agent` 选中时按这份名单原样生效。
    */
   tools: string[];
   /**
@@ -27,11 +29,25 @@ export interface AgentDefinition {
    * 省略按会写处理：一份没说清楚的定义不能在只读阶段被放行。
    */
   writes: boolean;
-  /** 追加在子会话系统提示词之后的角色约束。 */
+  /** 追加在主系统提示词之后的角色约束。 */
   systemPrompt: string;
 }
 
-/** 内置两份。自定义文件用同名覆盖它们。 */
+/** 根会话没选代理时的名字。全工具，不追加角色段。 */
+export const DEFAULT_AGENT = '';
+
+/**
+ * 把一份定义收成这次会话真正可用的工具名。
+ *
+ * `*` 展开成工具表里全部非 rootOnly 的名字。点名的名字丢掉工具表里没有的。
+ * 根会话与子会话共用这一步：定义写了什么，schema 和提示词里就只剩什么。
+ */
+export function resolveAgentTools(agent: AgentDefinition, registry: ToolRegistry): Set<string> {
+  if (agent.tools.includes('*')) return registry.generalNames();
+  return new Set(agent.tools.filter((name) => registry.find(name)));
+}
+
+/** 内置四份。自定义文件用同名覆盖它们。 */
 export function builtinAgents(): AgentDefinition[] {
   return [
     {
@@ -40,6 +56,20 @@ export function builtinAgents(): AgentDefinition[] {
       tools: ['read', 'grep', 'glob', 'ls', 'skill', 'ask_user', 'web_search', 'web_fetch'],
       writes: false,
       systemPrompt: explorePrompt(),
+    },
+    {
+      name: 'research',
+      description: 'Read-only research. Use it for a question, comparison, or summary that needs sources and does not change files.',
+      tools: ['read', 'grep', 'glob', 'ls', 'skill', 'ask_user', 'web_search', 'web_fetch'],
+      writes: false,
+      systemPrompt: researchPrompt(),
+    },
+    {
+      name: 'writer',
+      description: 'Draft or revise a document. It can edit that document and does not change code, configuration, or tests.',
+      tools: ['read', 'write', 'edit', 'grep', 'glob', 'ls', 'skill', 'ask_user', 'web_search', 'web_fetch'],
+      writes: true,
+      systemPrompt: writerPrompt(),
     },
     {
       name: 'general',

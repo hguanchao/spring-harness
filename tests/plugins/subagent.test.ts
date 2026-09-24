@@ -3,9 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { discoverAgents, parseAgentFile } from '../../src/plugins/sph-subagent/agents.js';
+import { discoverAgents, parseAgentFile, resolveAgentTools } from '../../src/plugins/sph-subagent/agents.js';
+import { defaultTools } from '../../src/plugins/sph-tools/index.js';
 import setup from '../../src/plugins/sph-subagent/index.js';
-import { createSubagentTool } from '../../src/plugins/sph-subagent/tool.js';
+import { createTaskTool } from '../../src/plugins/sph-subagent/tool.js';
 import { SUBAGENT_SERVICE, type SubagentCatalog } from '../../src/plugins/services.js';
 import { EMPTY_PLUGIN_SERVICES, type PluginApi, type PluginHostFacts } from '../../src/plugins/types.js';
 import type { ToolContext, ToolSpec } from '../../src/tools/types.js';
@@ -37,7 +38,18 @@ describe('agent 文件', () => {
       const none = join(root, 'no-user-agents');
       const trusted = discoverAgents(root, true, none);
       assert.equal(trusted.find((agent) => agent.name === 'explore')?.writes, false);
+      assert.equal(trusted.find((agent) => agent.name === 'research')?.writes, false);
+      assert.equal(trusted.find((agent) => agent.name === 'research')?.tools.includes('bash'), false);
+      assert.equal(trusted.find((agent) => agent.name === 'writer')?.writes, true);
+      assert.equal(trusted.find((agent) => agent.name === 'writer')?.tools.includes('bash'), false);
+      assert.equal(trusted.find((agent) => agent.name === 'writer')?.tools.includes('edit'), true);
       assert.equal(trusted.find((agent) => agent.name === 'general')?.writes, true);
+      const research = trusted.find((agent) => agent.name === 'research');
+      assert.ok(research);
+      const researchTools = resolveAgentTools(research, defaultTools);
+      assert.equal(researchTools.has('read'), true);
+      assert.equal(researchTools.has('bash'), false);
+      assert.equal(researchTools.has('write'), false);
 
       const dir = join(root, '.sph', 'agents');
       mkdirSync(dir, { recursive: true });
@@ -52,7 +64,7 @@ describe('agent 文件', () => {
   });
 });
 
-describe('subagent 工具', () => {
+describe('task 工具', () => {
   function ctx(spawned: Array<{ agent: string; isolation?: string }>): ToolContext {
     return {
       workspaceRoot: process.cwd(),
@@ -73,7 +85,7 @@ describe('subagent 工具', () => {
     };
   }
 
-  const tool = createSubagentTool(() => discoverAgents(process.cwd(), false));
+  const tool = createTaskTool(() => discoverAgents(process.cwd(), false));
 
   it('未知 agent 拒绝，不派生', async () => {
     const spawned: Array<{ agent: string }> = [];
@@ -97,6 +109,25 @@ describe('subagent 工具', () => {
       { agent: 'explore', isolation: 'none' },
       { agent: 'general', isolation: 'worktree' },
     ]);
+  });
+
+  it('list 与 get 只读后台记录，不派生', async () => {
+    const spawned: Array<{ agent: string }> = [];
+    const record = { id: 'abcd1234', kind: 'subagent' as const, command: 'map', status: 'running' as const, stdout: '', stderr: '', exitCode: null };
+    const c = ctx(spawned);
+    c.jobs = {
+      list: () => [record],
+      get: (id) => (id === record.id ? record : undefined),
+    } as ToolContext['jobs'];
+    const listed = await tool.execute({ action: 'list', description: 'unused' }, c);
+    assert.equal(listed.ok, true);
+    assert.match(listed.content, /abcd1234/);
+    const got = await tool.execute({ action: 'get', id: 'abcd1234', description: 'unused' }, c);
+    assert.equal(got.ok, true);
+    assert.match(got.content, /abcd1234/);
+    const missing = await tool.execute({ action: 'get', id: 'nope', description: 'unused' }, c);
+    assert.equal(missing.ok, false);
+    assert.equal(spawned.length, 0);
   });
 
   it('isolation 拼错时拒绝', async () => {
@@ -127,15 +158,19 @@ describe('sph-subagent 装载', () => {
       consume: () => undefined,
       warn: () => {},
       clip: (text) => text,
-      registerCommand: () => {},
+      registerCommand: (command) => tools.push({ name: `/${command.name}` } as ToolSpec),
       subscribe: () => {},
       onDispose: () => {},
+      registerHook: () => {},
     };
     setup(api);
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), ['send_subagent_message', 'subagent']);
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), ['/agent', 'send_subagent_message', 'task']);
     assert.equal(tools.find((tool) => tool.name === 'send_subagent_message')?.rootOnly, true);
     const catalog = services.get(SUBAGENT_SERVICE) as SubagentCatalog;
+    assert.equal(typeof catalog.seat, 'function');
     assert.equal(catalog.find('explore')?.writes, false);
+    assert.equal(catalog.find('research')?.writes, false);
+    assert.equal(catalog.find('writer')?.writes, true);
     assert.equal(catalog.find('general')?.writes, true);
     assert.equal(catalog.find('missing'), undefined);
   });

@@ -437,11 +437,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	override requestRender(force = false): void {
-		this.contentGeneration += 1;
+		// 内容世代只在结构变化时递增。鼠标、选区、滚动走 requestViewportRender，
+		// 否则 ScrollView 会把整份转录当成新内容重排。
+		if (force) this.contentGeneration += 1;
 		super.requestRender(force);
 	}
 
-	requestViewportRender(): void {
+	override requestViewportRender(): void {
 		this.requestImmediateRender();
 	}
 
@@ -504,7 +506,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.lastComponentClick = undefined;
 			if (hadActiveSelection) {
 				this.clearSelectionState();
-				if (hadNonEmptyActiveSelection) this.requestRender();
+				if (hadNonEmptyActiveSelection) this.requestViewportRender();
 			}
 			this.lastClick = undefined;
 			return { consume: true };
@@ -519,7 +521,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const overlay = this.dispatchMouseToOverlay(event);
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
 			if (result) {
-				if (this.applyMouseDispatchResult(event, result)) this.requestRender();
+				if (this.applyMouseDispatchResult(event, result)) this.requestViewportRender();
 				return { consume: true };
 			}
 			if (this.shouldDeferViewportInputToOverlay()) return undefined;
@@ -729,7 +731,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				}
 				this.clearComponentMouseGesture();
 			}
-			if (render) this.requestRender();
+			if (render) this.requestViewportRender();
 			return;
 		}
 
@@ -756,7 +758,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				this.mousePressPoint = { x: raw.x, y: raw.y };
 				this.mousePressMoved = false;
 			}
-			if (render) this.requestRender();
+			if (render) this.requestViewportRender();
 			return;
 		}
 
@@ -767,7 +769,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// 会把刚钉上的选中条 ❙ 误清掉；真点在空白处时 selectable 为 undefined，
 			// selectRow(undefined) 维持「点空白取消选中」的原语义。
 			const boxes = this.currentLayout ? getLayoutBoxesAt(this.currentLayout, raw.x, raw.y) : [];
-			if (this.chrome?.pressEmpty(boxes.map((box) => box.component))) this.requestRender();
+			if (this.chrome?.pressEmpty(boxes.map((box) => box.component))) this.requestViewportRender();
 		}
 		this.handleSelectionMouseEvent(raw);
 	}
@@ -787,7 +789,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!this.getFocusedComponent()) return;
 		if (this.isPointOnFocusedComponent(x, y)) return;
 		this.setFocus(null);
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	private parseWheelEvent(data: string): WheelEvent | undefined {
@@ -1180,7 +1182,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				} catch {
 					// URL activation is best-effort.
 				}
-				this.requestRender();
+				this.requestViewportRender();
 				return;
 			}
 			if (isClick) {
@@ -1192,11 +1194,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				if (result) {
 					const render = this.applyMouseDispatchResult(clickEvent, result);
 					this.clearTextSelection();
-					if (render) this.requestRender();
+					if (render) this.requestViewportRender();
 					return;
 				}
 			}
-			this.requestRender();
+			this.requestViewportRender();
 			return;
 		}
 		if ((event.button & 32) !== 0) {
@@ -1216,7 +1218,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.pressedUrl = undefined;
 			this.updateSelectionFocus(point);
 			this.updateSelectionAutoScroll(event);
-			this.requestRender();
+			this.requestViewportRender();
 			return;
 		}
 		this.stopSelectionAutoScroll();
@@ -1243,7 +1245,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
 					Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
 				);
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	private getSelectionBounds(): { start: SelectionPoint; end: SelectionPoint } | undefined {

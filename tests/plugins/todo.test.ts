@@ -28,6 +28,7 @@ function harness(): { api: PluginApi; tools: ToolSpec[]; services: Map<string, u
     registerCommand: () => {},
     subscribe: () => {},
     onDispose: () => {},
+    registerHook: () => {},
   };
   return { api, tools, services };
 }
