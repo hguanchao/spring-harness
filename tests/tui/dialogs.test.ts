@@ -60,27 +60,27 @@ describe('对话框宽度上限', () => {
 	it('选择框传上限', () => {
 		const { tui, overlays } = fakeTui(147, 40);
 		void showSelectDialog(tui, { title: 't', items: [{ value: 'a', label: 'a' }] });
-		assert.equal(overlays[0]?.maxWidth, 88);
-		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 88);
+		assert.equal(overlays[0]?.maxWidth, 84);
+		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 84);
 	});
 
 	it('输入框传上限', () => {
 		const { tui, overlays } = fakeTui(147, 40);
 		void showInputDialog(tui, { title: 't' });
-		assert.equal(overlays[0]?.maxWidth, 76);
-		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 76);
+		assert.equal(overlays[0]?.maxWidth, 84);
+		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 84);
 	});
 
 	it('消息框传上限', () => {
 		const { tui, overlays } = fakeTui(147, 40);
 		void showMessageDialog(tui, { title: 't', text: 'body' });
-		assert.equal(overlays[0]?.maxWidth, 96);
-		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 96);
+		assert.equal(overlays[0]?.maxWidth, 84);
+		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 84);
 	});
 
 	it('调用方显式给宽度时仍然受上限约束', () => {
 		const { tui, overlays } = fakeTui(147, 40);
 		void showMessageDialog(tui, { title: 't', text: 'body', width: '100%' });
-		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 96);
+		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 84);
 	});
 });
