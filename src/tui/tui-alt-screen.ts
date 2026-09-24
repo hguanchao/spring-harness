@@ -33,7 +33,9 @@ import {
 } from "./tui.js";
 import {
 	clipLineToWidth,
-	contentVisibleWidth,
+	bubbleTextColumns,
+	selectionLineEnd,
+	snapBubbleSelection,
 	extractAnsiCode,
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
@@ -992,19 +994,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		});
 	}
 
-	/** 落在行尾空白上的指针收束到最后一个可见字符之后，空白本身不可选。 */
+	/**
+	 * 行尾空白不可选。气泡灰底同样不可选：垫行只有左边框，拖在灰底上要落到正文那一行。
+	 */
 	private clampSelectionPoint(point: SelectionPoint): SelectionPoint {
-		const maxCol = contentVisibleWidth(this.getSelectionSourceLine(point));
-		if (point.col <= maxCol) return point;
+		const lines = this.selectionSourceLines(point);
+		const snapped = snapBubbleSelection(lines, point.row, point.col);
+		if (snapped) return { ...point, row: snapped.row, col: snapped.col };
+		// maxCol 是最后一个字的右缘。指针落到填充空格上时收到这条边上，不要停在空格格子里。
+		const maxCol = selectionLineEnd(lines[point.row] ?? "");
+		if (point.col < maxCol) return point;
 		return { ...point, col: maxCol };
 	}
 
-	private getSelectionSourceLine(point: SelectionPoint): string {
+	private selectionSourceLines(point: SelectionPoint): readonly string[] {
 		if (point.scrollView && this.currentLayout) {
 			const lines = getScrollViewBox(this.currentLayout, point.scrollView)?.scrollContentLines;
-			if (lines) return lines[point.row] ?? "";
+			if (lines) return lines;
 		}
-		return this.previousScreen[point.row] ?? "";
+		return this.previousScreen;
+	}
+
+	private getSelectionSourceLine(point: SelectionPoint): string {
+		return this.selectionSourceLines(point)[point.row] ?? "";
 	}
 
 	private getWordSelection(point: SelectionPoint): SelectionRange | undefined {
@@ -1045,9 +1057,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private getLineSelection(point: SelectionPoint): SelectionRange {
+		const line = this.getSelectionSourceLine(point);
+		const bubble = bubbleTextColumns(line);
+		const end = selectionLineEnd(line);
+		if (bubble && bubble.end > bubble.start) {
+			return {
+				start: { ...point, col: bubble.start },
+				end: { ...point, col: end, boundary: true },
+			};
+		}
 		return {
 			start: { ...point, col: 0 },
-			end: { ...point, col: contentVisibleWidth(this.getSelectionSourceLine(point)), boundary: true },
+			end: { ...point, col: end, boundary: true },
 		};
 	}
 
@@ -1270,22 +1291,31 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		row: number,
 		selection: { start: SelectionPoint; end: SelectionPoint },
 		minColumn = 0,
-		maxColumn = contentVisibleWidth(line),
+		maxColumn = selectionLineEnd(line),
 	): { start: number; end: number } {
-		const contentEnd = contentVisibleWidth(line);
-		const lineWidth = visibleWidth(line);
+		const bubble = bubbleTextColumns(line);
+		// 右缘停在最后一个字。中间行也用这条，避免多行选区把换行前的填充空格划进去。
+		const contentEnd = selectionLineEnd(line);
+		const contentStart = bubble ? bubble.start : 0;
 		const cap = Math.min(maxColumn, contentEnd);
-		let start = Math.max(0, minColumn);
-		let end = Math.min(lineWidth, cap);
+		let start = Math.max(contentStart, minColumn);
+		let end = cap;
 		if (row === selection.start.row) {
-			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, contentEnd);
+			const at = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, contentEnd);
+			start = Math.max(contentStart, minColumn, at);
 		}
 		if (row === selection.end.row) {
-			end = selection.end.boundary
-				? Math.min(selection.end.col, contentEnd)
-				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, contentEnd));
+			if (selection.end.boundary) {
+				end = Math.min(selection.end.col, contentEnd);
+			} else {
+				const range = getGraphemeCellRange(line, selection.end.col);
+				// 指针在填充空格上时，这个空格的右缘不能把填充算进选区。
+				end = !range || range.start >= contentEnd ? contentEnd : Math.min(range.end, contentEnd);
+			}
 		}
-		return { start: Math.max(minColumn, start), end: Math.min(cap, end) };
+		end = Math.min(cap, end);
+		if (end < start) end = start;
+		return { start, end };
 	}
 
 	private getActiveSelectionText(): string | undefined {

@@ -146,7 +146,7 @@ export class SteerBar {
    * 挂起条：运行中输入队列的可视化。纯鼠标操作，无键盘快捷键（避免与 TUI 按键冲突）。
    *
    * 首行上方留一行间距（与状态行脱开）；一格缩进与状态行左缘（leftPad=1）对齐。前缀是
-   * 投递顺序序号（`1.` `2.`…，重排后按新位置重新编号）。鼠标悬停的行：整行铺极浅底
+   * 中性灰 `#` 加投递顺序序号（`#1.` `#2.`…，重排后按新位置重新编号）。鼠标悬停的行：整行铺极浅底
    * （steerHoverBg），右侧亮出动作按钮 `[↑] [↓] [Send now] [edit] [cancel]`（右对齐
    * 紧贴无缝、右缘与状态行耗时/token 同列，宽不够整颗放弃，行不可移动时 ↑/↓ 不渲染，
    * 按钮自身悬停变色）。
@@ -167,7 +167,7 @@ export class SteerBar {
       return { row: hover!, action: button.action, x0, x1: x0 + button.label.length };
     });
     const lines = items.map((text, index) => {
-      const num = theme.fg('primary', `${index + 1}.`);
+      const num = theme.fg('muted', '#') + theme.fg('primary', `${index + 1}.`);
       // 带按钮的行：行文按按钮起点截断让位（至少留 1 列间隙）。
       const avail = index === hover ? Math.max(0, btnStart - 4 - 1) : 96;
       const clipped = flattenWhitespace(text).slice(0, avail);

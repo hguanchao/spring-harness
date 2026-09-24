@@ -122,6 +122,24 @@ export function isEmptyReply(reply: StreamDelta): boolean {
   return !reply.text && !reply.thinking && !reply.toolCalls?.length && !reply.reasoning?.length;
 }
 
+/**
+ * 工具参数是半截 JSON。断流时如果把它当成一次调用交回去，循环会解析失败，
+ * 记成一次工具错误，模型再换一条命令重试——参数其实只是没传完。
+ * 空字符串不算半截：有的调用本来就没有参数。
+ */
+export function toolArgumentsIncomplete(reply: StreamDelta): boolean {
+  return (reply.toolCalls ?? []).some((call) => {
+    const raw = call.arguments.trim();
+    if (!raw) return false;
+    try {
+      JSON.parse(raw);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+}
+
 /** 把一段正文/思考增量写入累积器，并原样作为 delta 返回。 */
 export function appendStreamDelta(
   acc: SseAcc,

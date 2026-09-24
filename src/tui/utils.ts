@@ -323,6 +323,86 @@ export function contentVisibleWidth(line: string): number {
 	return visibleWidth(stripTerminalSequences(line).trimEnd());
 }
 
+/**
+ * 这一行选区的右缘（不含行尾填充空格）。
+ * 气泡行再去掉左边框；普通行只砍末尾空白，行首缩进仍算正文。
+ */
+export function selectionLineEnd(line: string): number {
+	const bubble = bubbleTextColumns(line);
+	return bubble ? bubble.end : contentVisibleWidth(line);
+}
+
+/**
+ * 用户气泡左边框 `┃` 后面的正文列区间。
+ *
+ * 气泡把灰底铺满整行，上下垫行里唯一的可见符号就是这道边。
+ * 把它算进内容宽度时，拖在灰底上只会高亮并复制这个符号。
+ * 不是气泡行时返回 undefined，选区仍走 contentVisibleWidth。
+ */
+export function bubbleTextColumns(line: string): { start: number; end: number } | undefined {
+	const plain = stripTerminalSequences(line);
+	let column = 0;
+	let sawRule = false;
+	let start: number | undefined;
+	let end = 0;
+	for (const { segment } of graphemeSegmenter.segment(plain)) {
+		const width = graphemeWidth(segment);
+		if (!sawRule) {
+			if (segment !== "┃") return undefined;
+			sawRule = true;
+			column += width;
+			continue;
+		}
+		if (start === undefined) {
+			if (segment === " " || segment === "\t") {
+				column += width;
+				continue;
+			}
+			start = column;
+		}
+		if (segment !== " " && segment !== "\t") end = column + width;
+		column += width;
+	}
+	if (!sawRule) return undefined;
+	if (start === undefined) return { start: 0, end: 0 };
+	return { start, end };
+}
+
+/**
+ * 指针落在气泡灰底上时，收到同一气泡里真正有字的那一行。
+ * 不是气泡行时返回 undefined。
+ */
+export function snapBubbleSelection(
+	lines: readonly string[],
+	row: number,
+	col: number,
+): { row: number; col: number } | undefined {
+	const own = bubbleTextColumns(lines[row] ?? "");
+	if (!own) return undefined;
+	if (own.end > own.start) return { row, col: Math.min(own.end, Math.max(own.start, col)) };
+	const target = nearestBubbleTextRow(lines, row);
+	if (target === undefined) return { row, col: 0 };
+	const range = bubbleTextColumns(lines[target] ?? "");
+	if (!range || range.end <= range.start) return { row, col: 0 };
+	return { row: target, col: Math.min(range.end, Math.max(range.start, col)) };
+}
+
+function nearestBubbleTextRow(lines: readonly string[], row: number): number | undefined {
+	const scan = (step: -1 | 1): number | undefined => {
+		for (let next = row + step; next >= 0 && next < lines.length; next += step) {
+			const range = bubbleTextColumns(lines[next] ?? "");
+			if (!range) return undefined;
+			if (range.end > range.start) return next;
+		}
+		return undefined;
+	};
+	const above = scan(-1);
+	const below = scan(1);
+	if (above === undefined) return below;
+	if (below === undefined) return above;
+	return row - above <= below - row ? above : below;
+}
+
 interface GraphemeCellRange {
 	start: number;
 	end: number;

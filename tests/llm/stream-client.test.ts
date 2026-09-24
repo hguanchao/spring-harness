@@ -329,6 +329,68 @@ describe('空流与截断', () => {
     assert.equal(calls, 1);
   });
 
+  it('工具参数没写完就断流：整段重试，不把半截 JSON 当成一次 Bash 调用', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) {
+        let pulled = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (pulled++ === 0) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `data: ${JSON.stringify({
+                      choices: [{
+                        delta: {
+                          tool_calls: [{
+                            index: 0,
+                            id: 'call_1',
+                            function: { name: 'bash', arguments: '{"command":"wc -m 1.txt' },
+                          }],
+                        },
+                      }],
+                    })}\n\n`,
+                  ),
+                );
+                return;
+              }
+              controller.error(new RetryableError('socket died'));
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      return sseResponse([
+        `data: ${JSON.stringify({
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call_1',
+                function: { name: 'bash', arguments: '{"command":"wc -m 1.txt"}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        })}\n\n`,
+        'data: [DONE]\n\n',
+      ]);
+    }) as typeof fetch;
+
+    const c = createSseClient(openaiAdapter, {
+      baseUrl: 'http://example.invalid/v1',
+      apiKey: 'k',
+      model: 'gpt-4o',
+      maxRetries: 2,
+      promptCache: false,
+    });
+    const reply = await c.complete(messages, []);
+    assert.equal(calls, 2);
+    assert.equal(reply.toolCalls?.[0]?.arguments, '{"command":"wc -m 1.txt"}');
+  });
+
   it('流内 error 帧报网关断流：已有正文就交回，不重打', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {

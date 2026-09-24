@@ -1189,12 +1189,25 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       workspaceRoot: this.deps.workspaceRoot,
       gitBranch: this.gitBranch,
       sessionId: this.session.id,
+      provider: this.provider,
       model: this.model,
       effort: this.effort,
       approvalMode: this.approval,
       sandboxMode: this.deps.sandbox.status.mode,
       mcpServerCount: this.deps.mcp()?.listServers().length ?? 0,
+      skillCount: this.cachedSkillCount(),
     };
+  }
+
+  /** 顶部每帧都会取数。技能目录扫盘，隔几秒再扫一次，避免流式刷新时反复读 SKILL.md。 */
+  private skillCountAt = 0;
+  private skillCountValue = 0;
+  private cachedSkillCount(): number {
+    const now = Date.now();
+    if (now - this.skillCountAt < 5_000) return this.skillCountValue;
+    this.skillCountAt = now;
+    this.skillCountValue = scanSkills(this.deps.workspaceRoot).catalog.length;
+    return this.skillCountValue;
   }
 
   private footerData(): FooterData {

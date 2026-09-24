@@ -7,7 +7,7 @@ import {
 } from './compat.js';
 import { ContextOverflowError } from './errors.js';
 import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
-import { finishStream, isEmptyReply, newSseAcc, type SseAcc } from './openai.js';
+import { finishStream, isEmptyReply, newSseAcc, toolArgumentsIncomplete, type SseAcc } from './openai.js';
 import { FatalStreamError, postSseStream } from './sse.js';
 import { backoffMs, DEFAULT_MAX_RETRIES, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../../util.js';
@@ -64,12 +64,18 @@ export interface SseClientOptions {
  */
 const MAX_DEGRADATIONS = 8;
 
+/** 半截里如果夹着没闭合的工具参数，不能交给循环去执行。 */
+function usablePartial(partial: StreamDelta): boolean {
+  return !isEmptyReply(partial) && !toolArgumentsIncomplete(partial);
+}
+
 /**
  * 三种协议共用的流式客户端。
  *
  * 两条不变量在这里：
- * 1. 还没流出任何内容时，传输失败整段重试。已经有正文、思考、工具参数或推理项时，
+ * 1. 还没流出任何内容时，传输失败整段重试。已经有正文、思考或完整工具参数时，
  *    把半截交回循环：结束原因缺省标成 unknown，循环会续写，而不是把同一段再流一遍。
+ *    工具参数若是没闭合的 JSON，不当成一次调用：重试整段请求。
  *    参数降级只在尚未向用户输出任何内容时发生。
  * 2. 参数降级的结果记在**闭包**里（一个 client ≈ 一个进程/会话），同一会话内换完就不再踩，
  *    不必每步重交一次学费。
@@ -136,7 +142,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           // 瞬时断流且累积器里已经有内容：交回半截。结束原因还空着就标 unknown，
           // 循环据此续写，而不是把已经上屏的字再流一遍。
           const partial = finishStream(acc);
-          if (error instanceof RetryableError && !isEmptyReply(partial)) {
+          if (error instanceof RetryableError && usablePartial(partial)) {
             return { ...partial, finishReason: partial.finishReason ?? 'unknown' };
           }
           throw error;
@@ -144,8 +150,9 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
         const result = finishStream(acc);
         // 正常结束但零内容按空回复处理，重试同一请求，
         // 不要当成成功空回复让 loop 收工（截图里工具跑完下一跳空体就是这条路径）。
-        if (isEmptyReply(result)) {
-          throw new RetryableError('LLM returned a completed response with no content');
+        // 工具参数没写完同样重试：交回去只会变成 invalid tool arguments。
+        if (isEmptyReply(result) || toolArgumentsIncomplete(result)) {
+          throw new RetryableError('LLM returned a completed response with no usable content');
         }
         return result;
       };

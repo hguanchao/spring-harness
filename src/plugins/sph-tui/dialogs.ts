@@ -42,18 +42,6 @@ function rowBudget(tui: TUI, maxHeight: SizeValue): number {
 }
 
 /**
- * 正文区（总高已扣掉上下边框）的纵向分配。
- *
- * 优先级：内容 > 页脚 > 留白。矮终端下先牺牲留白、再牺牲页脚——边框被裁掉时弹窗看起来
- * 是坏的，而少一行留白只是变紧凑；留白只在正文还能占到 4 行时才保留。
- */
-function chromeRows(bodyHeight: number, minContentRows: number): { content: number; footer: number; spacers: number } {
-	const footer = bodyHeight >= minContentRows + 1 ? 1 : 0;
-	const spacers = bodyHeight - footer - 2 >= Math.max(4, minContentRows) ? 2 : 0;
-	return { content: Math.max(0, bodyHeight - footer - spacers), footer, spacers };
-}
-
-/**
  * 弹窗的圆角边框盒:顶部边框嵌标题,内部竖排子组件,每行包上侧边框。
  * 边框仍是 borderMuted 灰；标题单独用主色加粗，避免标题和装饰混成一块灰。
  */
@@ -108,18 +96,12 @@ abstract class DialogBody implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const bodyHeight = Math.max(0, this.budget() - 2);
-		if (bodyHeight === 0) return [];
-		const minRows = Math.min(Math.max(1, this.minContentRows(width)), bodyHeight);
-		const { content, footer, spacers } = chromeRows(bodyHeight, minRows);
-		const lines = this.renderContent(width, Math.max(1, content), spacers > 0 ? 1 : 0);
-		const result: string[] = [];
-		if (spacers > 0) result.push('');
-		result.push(...lines);
-		if (spacers > 0) result.push('');
-		if (footer > 0) result.push(truncateToWidth(theme.fg('dim', ` ${this.footerText()}`), width, ''));
-		// 硬上限：任何情况下都不许顶穿边框。
-		return result.length > bodyHeight ? result.slice(0, bodyHeight) : result;
+		// 预算是上限不是目标高度。短内容按行数收，避免 /help 这类弹窗被撑成一块固定窗口。
+		const maxBody = Math.max(1, this.budget() - 2);
+		const lines = this.renderContent(width, Math.max(1, maxBody - 1), 0);
+		const footer = this.footerText();
+		if (footer !== '') lines.push(truncateToWidth(theme.fg('dim', ` ${footer}`), width, ''));
+		return lines.length > maxBody ? lines.slice(0, maxBody) : lines;
 	}
 }
 
@@ -470,16 +452,25 @@ function settleOnce<T>(handle: OverlayHandle, resolve: (value: T) => void): (val
  * 标题与选项左右拉散，排版反而难看。上限按内容类型给——窄终端上百分比仍然胜出，
  * 只有宽终端才会被夹住（终端 147 列时，选择框从 117 列收到 88 列）。
  */
-const SELECT_MAX_WIDTH = 88;
-const INPUT_MAX_WIDTH = 76;
-const MESSAGE_MAX_WIDTH = 96;
+/** 所有模态共用这一档尺寸。百分比只是上限，正文短就收矮，不再各弹窗各占一屏。 */
+const DIALOG_WIDTH = '72%';
+const DIALOG_MAX_HEIGHT = '60%';
+const DIALOG_MAX_WIDTH = 84;
 
-function overlayOptions(
-	width: SizeValue,
-	maxHeight: SizeValue,
-	maxWidth: number,
-): { width: SizeValue; maxHeight: SizeValue; maxWidth: number; anchor: 'center'; margin: number } {
-	return { width, maxHeight, maxWidth, anchor: 'center', margin: 1 };
+function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT): {
+	width: SizeValue;
+	maxHeight: SizeValue;
+	maxWidth: number;
+	anchor: 'center';
+	margin: number;
+} {
+	return {
+		width: DIALOG_WIDTH,
+		maxHeight,
+		maxWidth: DIALOG_MAX_WIDTH,
+		anchor: 'center',
+		margin: 1,
+	};
 }
 
 /** 选择列表对话框；返回选中项的 value，取消返回 undefined。 */
@@ -496,7 +487,7 @@ export function showSelectDialog(
 	},
 ): Promise<string | undefined> {
 	return new Promise((resolve) => {
-		const maxHeight = options.maxHeight ?? '70%';
+		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
 		const dialog = new SelectDialog(
 			options.title,
 			options.items,
@@ -505,7 +496,7 @@ export function showSelectDialog(
 			options.bodyText,
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '80%', maxHeight, SELECT_MAX_WIDTH));
+		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSelect((item) => finish(item.value));
 		dialog.onCancel(() => finish(undefined));
@@ -518,14 +509,14 @@ export function showInputDialog(
 	options: { title: string; initialValue?: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue },
 ): Promise<string | undefined> {
 	return new Promise((resolve) => {
-		const maxHeight = options.maxHeight ?? '40%';
+		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
 		const dialog = new InputDialog(
 			options.title,
 			options.initialValue ?? '',
 			options.hint ?? 'Enter confirm · Esc cancel',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '70%', maxHeight, INPUT_MAX_WIDTH));
+		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSubmit((value) => finish(value));
 		dialog.setCloseHandler(() => finish(undefined));
@@ -560,8 +551,8 @@ export function showLoadingDialog(
 	tui: TUI,
 	options: { title: string; text: string; width?: SizeValue },
 ): OverlayHandle {
-	const dialog = new MessageDialog(options.title, options.text, '', () => rowBudget(tui, '30%'));
-	return tui.showOverlay(dialog, overlayOptions(options.width ?? '50%', '30%', MESSAGE_MAX_WIDTH));
+	const dialog = new MessageDialog(options.title, options.text, '', () => rowBudget(tui, DIALOG_MAX_HEIGHT));
+	return tui.showOverlay(dialog, overlayOptions());
 }
 
 /** 只读长文本对话框（帮助、状态、待办、任务等）。 */
@@ -570,14 +561,14 @@ export function showMessageDialog(
 	options: { title: string; text: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue },
 ): Promise<void> {
 	return new Promise((resolve) => {
-		const maxHeight = options.maxHeight ?? '75%';
+		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
 		const dialog = new MessageDialog(
 			options.title,
 			options.text,
 			options.hint ?? 'Esc close',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(options.width ?? '86%', maxHeight, MESSAGE_MAX_WIDTH));
+		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
 		const finish = settleOnce<void>(handle, resolve);
 		dialog.setCloseHandler(() => finish());
 	});

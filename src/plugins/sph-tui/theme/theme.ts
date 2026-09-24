@@ -366,5 +366,7 @@ export function getEditorTheme(): EditorTheme {
     selectList: getSelectListTheme(),
     // 菜单标题与浮层对话框同一套：主色加粗。颜色留在主题里，编辑器只接收画笔。
     menuTitle: (text: string) => theme.bold(theme.fg('primary', text)),
+    // 输入框里的 /command 与菜单标题同一主色，参数仍是正文色。
+    slashCommand: (text: string) => theme.fg('primary', text),
   };
 }

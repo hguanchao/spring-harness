@@ -1254,8 +1254,8 @@ export abstract class TuiBase extends Container implements TUI {
 					// Defensive: truncate overlay line to declared width before compositing
 					// (components should already respect width, but this ensures it)
 					const truncatedOverlayLine = clipLineToWidth(overlayLines[i], w);
-					// 浮层行整行不透底：底下全宽换行的 pending/转录会从对话框左右漏出来。
-					result[idx] = this.compositeLineAt("", truncatedOverlayLine, col, w, termWidth);
+					// 只盖住对话框自己的列。整行换成空白会把左右的转录擦掉，弹窗看起来像把屏幕换掉。
+					result[idx] = this.compositeLineAt(result[idx] ?? "", truncatedOverlayLine, col, w, termWidth);
 				}
 			}
 		}

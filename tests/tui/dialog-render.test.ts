@@ -116,6 +116,34 @@ describe('上报弹窗的真实渲染', () => {
     assert.match(screen, /not connected/);
   });
 
+  it('帮助弹窗盖在原有行上，左右的转录还在', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.addChild({
+      invalidate() {},
+      render: (width: number) => {
+        const line = `Q${' '.repeat(Math.max(0, width - 2))}Q`;
+        return Array.from({ length: 40 }, () => line);
+      },
+    });
+    ui.start();
+    try {
+      const closed = showMessageDialog(ui, { title: 'Help', text: 'commands' });
+      ui.renderNow(true);
+      const screen = terminal.screen();
+      assert.match(screen, /Help/);
+      const rows = screen.split(/\x1b\[\d+;1H/);
+      assert.ok(
+        rows.some((row) => row.includes('Q') && row.includes('│')),
+        '对话框所在行的左右两侧应仍是原来的转录',
+      );
+      terminal.send('\x1b');
+      await closed;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  });
+
   it('帮助正文走主题白 #c6c6c6，不落到终端默认 #cccccc', async () => {
     const screen = await renderInDialog('Help', '- `/help` — List commands and key bindings');
     assert.equal(PALETTE.mdText, '#c6c6c6');

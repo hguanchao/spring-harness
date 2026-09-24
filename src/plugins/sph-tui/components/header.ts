@@ -11,11 +11,14 @@ export interface HeaderData {
   workspaceRoot: string;
   gitBranch?: string;
   sessionId: string;
+  /** 供应商名。和模型、effort 拼在同一行。 */
+  provider: string;
   model: string;
   effort?: string;
   approvalMode: string;
   sandboxMode: string;
   mcpServerCount: number;
+  skillCount: number;
 }
 
 export interface ReadonlyHeaderDataProvider {
@@ -57,9 +60,10 @@ export class HeaderComponent implements Component {
     lines.push('');
 
     const workspace = data.gitBranch ? `${data.workspaceRoot} (${data.gitBranch})` : data.workspaceRoot;
-    const model = data.effort ? `${data.model} · effort ${data.effort}` : data.model;
+    const model = [data.provider, data.model, data.effort].filter((part) => part !== undefined && part !== '').join(' · ');
     const environment = [`approval ${data.approvalMode}`, `sandbox ${data.sandboxMode}`];
     if (data.mcpServerCount > 0) environment.push(`mcp ${data.mcpServerCount}`);
+    environment.push(`skill ${data.skillCount}`);
 
     const rows: Array<[string, string]> = [
       ['workspace', workspace],
@@ -78,7 +82,7 @@ export class HeaderComponent implements Component {
     const hints = [
       theme.fg('dim', '/') + theme.fg('muted', ' commands'),
       `${keyText('app.interrupt')}${theme.fg('muted', ' interrupt')}`,
-      `${keyText('app.clear')}${theme.fg('muted', ' x2 quit')}`,
+      `${keyText('app.approval.cycle')}${theme.fg('muted', ' approval')}`,
       `${keyText('app.exit')}${theme.fg('muted', ' exit')}`,
       `${keyText('app.tools.expand')}${theme.fg('muted', ' tools')}`,
     ];

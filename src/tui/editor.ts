@@ -229,6 +229,9 @@ interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	/** 视觉行在逻辑行里的起始下标，斜杠命令着色按它对齐。 */
+	origin: number;
+	logical: number;
 }
 
 export interface EditorTheme {
@@ -239,11 +242,28 @@ export interface EditorTheme {
 	selectList: SelectListTheme;
 	/** 自动完成菜单标题。省略则沿用 borderColor，控件层不自带强调色。 */
 	menuTitle?: (str: string) => string;
+	/** 输入框里的 `/command`。省略则不着色，参数保持正文色。 */
+	slashCommand?: (str: string) => string;
 }
 
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+}
+
+/** 行首（可有空白）的 `/command`，不含后面的参数。 */
+function slashTokenSpan(line: string): { start: number; end: number } | undefined {
+	const match = /^(\s*)(\/\S*)/.exec(line);
+	if (!match?.[2]) return undefined;
+	const start = match[1]!.length;
+	return { start, end: start + match[2].length };
+}
+
+function colorSlice(text: string, start: number, end: number, paint: (value: string) => string): string {
+	const from = Math.max(0, start);
+	const to = Math.min(text.length, end);
+	if (to <= from) return text;
+	return text.slice(0, from) + paint(text.slice(from, to)) + text.slice(to);
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -572,13 +592,12 @@ export class Editor implements Component, Focusable {
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
-		// 菜单画在输入框上方：圆角边、标题、列表、底边滚动计数。占这个组件输出的前几行。
+		// 斜杠菜单是输入框自己的一套：画在输入区上方，不走 /help 那种居中大弹窗。
 		this.renderedAutocompleteHeight = 0;
 		let menuRows = 0;
 		const menu = this.activeMenu();
 		if (menu) {
 			const innerWidth = Math.max(1, contentWidth - 2);
-			// 菜单盒自身上下边框 + 输入框上下边框 + 至少 1 行输入区，余量不够就先缩菜单。
 			const listRows = Math.min(this.autocompleteMaxVisible, Math.max(0, maxEditorRows - 5));
 			if (listRows > 0) {
 				menu.list.setMaxVisible(listRows);
@@ -601,7 +620,6 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
-		// 输入区行数：菜单盒先占位，剩下的给输入框（上下边框固定占 2 行）。
 		const maxVisibleLines = Math.max(1, Math.min(maxInputRows, maxEditorRows - menuRows - 2));
 
 		// Find the cursor line index in layoutLines
@@ -632,37 +650,41 @@ export class Editor implements Component, Focusable {
 		// autocomplete (e.g. slash-command menu) is visible.
 		const emitCursorMarker = this.focused;
 
+		const slash = slashTokenSpan(this.state.lines[0] ?? "");
+		const slashPaint = this.theme.slashCommand;
 		for (const layoutLine of visibleLines) {
-			let displayText = layoutLine.text;
-			let lineVisibleWidth = visibleWidth(layoutLine.text);
+			const raw = layoutLine.text;
+			const local = layoutLine.logical === 0 && slash
+				? { start: slash.start - layoutLine.origin, end: slash.end - layoutLine.origin }
+				: undefined;
+			const paintPart = (text: string, start: number, end: number): string =>
+				local && slashPaint ? colorSlice(text, start, end, slashPaint) : text;
+			let displayText = paintPart(raw, local?.start ?? 0, local?.end ?? 0);
+			let lineVisibleWidth = visibleWidth(raw);
 			let cursorInPadding = false;
 
 			// 假光标只在聚焦时画：失焦还反色会看起来像仍在输入。
+			// 反色用全重置收尾，命令色要在光标前后各涂一次，否则光标后面的命令词会掉回正文色。
 			if (this._focused && layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
-				const before = displayText.slice(0, layoutLine.cursorPos);
-				const after = displayText.slice(layoutLine.cursorPos);
-
-				// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
+				const cursorPos = layoutLine.cursorPos;
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
-
-				if (after.length > 0) {
-					// Cursor is on a character (grapheme) - replace it with highlighted version
-					// Get the first grapheme from 'after'
-					const afterGraphemes = [...this.segment(after, "grapheme")];
-					const firstGrapheme = afterGraphemes[0]?.segment || "";
-					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
-					displayText = before + marker + cursor + restAfter;
-					// lineVisibleWidth stays the same - we're replacing, not adding
-				} else {
-					// Cursor is at the end - add highlighted space
-					const cursor = "\x1b[7m \x1b[0m";
-					displayText = before + marker + cursor;
+				if (cursorPos >= raw.length) {
+					displayText = paintPart(raw, local?.start ?? 0, local?.end ?? 0) + marker + "\x1b[7m \x1b[0m";
 					lineVisibleWidth = lineVisibleWidth + 1;
-					// If cursor overflows content width into the padding, flag it
-					if (lineVisibleWidth > contentWidth && paddingX > 0) {
-						cursorInPadding = true;
-					}
+					if (lineVisibleWidth > contentWidth && paddingX > 0) cursorInPadding = true;
+				} else {
+					const before = raw.slice(0, cursorPos);
+					const after = raw.slice(cursorPos);
+					const firstGrapheme = [...this.segment(after, "grapheme")][0]?.segment || "";
+					const restAfter = after.slice(firstGrapheme.length);
+					const restAt = cursorPos + firstGrapheme.length;
+					const inToken = local !== undefined && cursorPos >= local.start && cursorPos < local.end;
+					const cursorBody = inToken && slashPaint ? slashPaint(firstGrapheme) : firstGrapheme;
+					displayText =
+						paintPart(before, local?.start ?? 0, local?.end ?? 0) +
+						marker +
+						`\x1b[7m${cursorBody}\x1b[0m` +
+						paintPart(restAfter, (local?.start ?? 0) - restAt, (local?.end ?? 0) - restAt);
 				}
 			}
 
@@ -682,7 +704,6 @@ export class Editor implements Component, Focusable {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		// 菜单盒渲染在输入框上方:第 0 行是盒顶边框,最后是盒底边框,中间是列表行。
 		const menu = this.activeMenu();
 		if (menu && this.renderedAutocompleteHeight >= 2) {
 			const listHeight = this.renderedAutocompleteHeight - 2;
@@ -699,7 +720,6 @@ export class Editor implements Component, Focusable {
 				});
 				return result ? { ...result, focus: true } : undefined;
 			}
-			// 盒边框行:吞掉点击只聚焦。
 			if (event.y < this.renderedAutocompleteHeight) return { handled: true, focus: true };
 		}
 
@@ -991,6 +1011,8 @@ export class Editor implements Component, Focusable {
 				text: "",
 				hasCursor: true,
 				cursorPos: 0,
+				origin: 0,
+				logical: 0,
 			});
 			return layoutLines;
 		}
@@ -1008,11 +1030,15 @@ export class Editor implements Component, Focusable {
 						text: line,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
+						origin: 0,
+						logical: i,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
 						hasCursor: false,
+						origin: 0,
+						logical: i,
 					});
 				}
 			} else {
@@ -1056,11 +1082,15 @@ export class Editor implements Component, Focusable {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
+							origin: chunk.startIndex,
+							logical: i,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
 							hasCursor: false,
+							origin: chunk.startIndex,
+							logical: i,
 						});
 					}
 				}
