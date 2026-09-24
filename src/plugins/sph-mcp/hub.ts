@@ -68,6 +68,11 @@ export interface McpServerConfig {
   transport?: string;
   /** 远程请求头。stdio 不用。 */
   headers?: Record<string, string>;
+  /**
+   * `tools/call` 的超时上限（毫秒）。缺省用 {@link DEFAULT_MCP_CALL_TIMEOUT_MS}。
+   * 热重载即生效：超时是请求状态不是进程状态，改配置不要求重启连接。
+   */
+  callTimeoutMs?: number;
 }
 
 /** 一个定义的出处：展示标签 + 可否就地改写。 */
@@ -183,6 +188,22 @@ interface Entry {
 }
 
 const NEUTRAL_ORIGIN: McpOrigin = { label: 'inline', path: '', editable: false };
+
+/** initialize / tools/list 这类控制请求的上限。server 挂死时调用方不必等 TCP 超时。 */
+export const DEFAULT_MCP_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * `tools/call` 的默认上限。控制请求 15s 的量级装不下构建、浏览器自动化、爬取类工具——
+ * 那些的正常耗时就是分钟级。仍要有个上限：无超时的 call 会把一轮 turn 挂死在等待上。
+ */
+export const DEFAULT_MCP_CALL_TIMEOUT_MS = 60_000;
+
+/** call_timeout_ms 的容忍边界：非法值回退默认，而不是把整条配置拒之门外。 */
+function callTimeoutOf(spec: McpServerConfig): number {
+  const value = spec.callTimeoutMs;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_MCP_CALL_TIMEOUT_MS;
+}
 
 /**
  * MCP 客户端（stdio / HTTP / SSE）。连接具备懒重连与工具列表变更同步。
@@ -371,7 +392,8 @@ export class McpHub {
     if (entry === undefined) throw new Error(`MCP server not connected: ${server}`);
     if (!entry.spawnable) throw new Error(`MCP server unavailable (${entry.blocked}): ${server}`);
     const conn = await this.ensureReady(server, entry);
-    const result = await this.request(conn, 'tools/call', { name, arguments: args });
+    // 超时从 entry.spec 现读：热重载改了 call_timeout_ms，下一次调用即生效，不必重连。
+    const result = await this.request(conn, 'tools/call', { name, arguments: args }, callTimeoutOf(entry.spec));
     return JSON.stringify(result ?? {});
   }
 
@@ -456,6 +478,9 @@ export class McpHub {
     const options = {
       url: spec.url ?? '',
       headers: spec.headers,
+      // 远程传输里每条 POST 自带 AbortSignal 超时，tools/call 必须与 hub 侧同限——
+      // 否则 hub 等到 60s，HTTP 层 15s 就把请求掐了，配置形同虚设。
+      callTimeoutMs: callTimeoutOf(spec),
       onMessage: (message: JsonRpcMessage) => this.onRpc(conn, spec.name, message as JsonRpc),
       onRequestError: (id: number | undefined, error: Error) => this.rejectId(conn, id, error),
       onClose: (reason: string) => {
@@ -633,13 +658,18 @@ export class McpHub {
     entry.reject(error);
   }
 
-  private request(conn: Connection, method: string, params: unknown): Promise<unknown> {
+  private request(
+    conn: Connection,
+    method: string,
+    params: unknown,
+    timeoutMs = DEFAULT_MCP_REQUEST_TIMEOUT_MS,
+  ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         conn.pending.delete(id);
-        reject(new Error(`MCP timeout: ${method}`));
-      }, 15_000);
+        reject(new Error(`MCP timeout: ${method} (${Math.round(timeoutMs / 1000)}s)`));
+      }, timeoutMs);
       conn.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timer);

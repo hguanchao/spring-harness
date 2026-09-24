@@ -162,6 +162,16 @@ enabled_servers  = ["one-that-ships-off"]  # turn on what a source disables
 
 `/mcps` can add and remove entries, but only in sph's own config. Only **stdio** servers run; HTTP entries are still discovered and listed as unsupported rather than dropped, so "I configured it but nothing happened" always has a visible answer.
 
+Request timeouts: control requests (`initialize`, `tools/list`) cap at 15s; `tools/call` caps at 60s by default because build, browser, and crawl servers routinely run longer. Per-server override — accepted in sph's own `[mcp_servers.<name>]` (and tolerated as an sph extension in external configs):
+
+```toml
+[mcp_servers.browser]
+command = "npx"
+call_timeout_ms = 120_000   # tools/call only; control requests keep the 15s cap
+```
+
+The value takes effect on the next call — hot reload does not restart the connection for it.
+
 If MCP is not wanted at all, disable the plugin rather than the servers — `/mcps` then says so instead of showing an empty list:
 
 ```toml

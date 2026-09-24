@@ -153,6 +153,43 @@ describe('McpHub 热重载', () => {
   });
 });
 
+describe('tools/call 超时可配', () => {
+  it('call_timeout_ms 生效：慢工具在配置的上限处超时', async () => {
+    const hub = new McpHub(testHostFacts());
+    try {
+      await hub.reload([spec('slow', { callTimeoutMs: 200 })]);
+      // fixture 的 slow 工具拖 500ms：超过配置的 200ms，必须超时而不是等到回包。
+      await assert.rejects(() => hub.call('slow', 'slow', { ms: 500 }), /MCP timeout: tools\/call \(0s\)/);
+    } finally {
+      hub.dispose();
+    }
+  });
+
+  it('不配置时长时默认上限装得下半秒的工具；ping 等控制请求不受影响', async () => {
+    const hub = new McpHub(testHostFacts());
+    try {
+      await hub.reload([spec('slow')]);
+      const raw = await hub.call('slow', 'slow', { ms: 500 });
+      assert.match(raw, /waited=500/, '默认上限内正常回包');
+      const ping = await hub.call('slow', 'ping', {});
+      assert.match(ping, /pid=/);
+    } finally {
+      hub.dispose();
+    }
+  });
+
+  it('非法 call_timeout_ms 回退默认：慢工具照样等到回包', async () => {
+    const hub = new McpHub(testHostFacts());
+    try {
+      await hub.reload([spec('slow', { callTimeoutMs: -5 })]);
+      const raw = await hub.call('slow', 'slow', { ms: 100 });
+      assert.match(raw, /waited=100/);
+    } finally {
+      hub.dispose();
+    }
+  });
+});
+
 describe('McpHub 展示用的 target 打码', () => {
   /** `/mcps` 会把 target 打到屏幕上，而屏幕内容经常被截图或贴进 issue。 */
   async function target(specs: McpServerSpec[]): Promise<string> {
@@ -261,9 +298,11 @@ describe('listTools 排序', () => {
       await hub.reload([spec('zeta'), spec('alpha')]);
       await hub.whenReady();
       const tools = hub.listTools();
-      assert.equal(tools.length, 2);
-      assert.equal(tools[0]?.server, 'alpha');
-      assert.equal(tools[1]?.server, 'zeta');
+      // fixture 每台报 ping / slow 两个工具：2 台 × 2 = 4。
+      assert.deepEqual(
+        tools.map((tool) => `${tool.server}:${tool.name}`),
+        ['alpha:ping', 'alpha:slow', 'zeta:ping', 'zeta:slow'],
+      );
     } finally {
       hub.dispose();
     }

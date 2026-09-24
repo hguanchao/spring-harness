@@ -121,6 +121,21 @@ describe('启动校验', () => {
     assert.equal(server?.title, 'Tavily');
   });
 
+  it('call_timeout_ms 收进 server 配置；非法值拒绝启动', () => {
+    const { registryPath, configPath } = setup(
+      {},
+      '[mcp_servers.browser]\ntype = "stdio"\ncommand = "npx"\ncall_timeout_ms = 120_000',
+    );
+    const server = loadConfig({ configPath, registryPath, env: {} }).mcpServers[0];
+    assert.equal(server?.callTimeoutMs, 120_000);
+
+    const bad = setup({}, '[mcp_servers.browser]\ntype = "stdio"\ncommand = "npx"\ncall_timeout_ms = -1');
+    assert.throws(
+      () => loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} }),
+      /call_timeout_ms must be a positive number/,
+    );
+  });
+
   it('数组形态的 mcp_servers 拒绝启动', () => {
     const { registryPath, configPath } = setup({}, '[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"');
     assert.throws(

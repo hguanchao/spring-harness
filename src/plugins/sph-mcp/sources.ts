@@ -63,6 +63,11 @@ export interface DiscoveredMcpServer {
   /** 来源里的 `transport` 或 `type`，已经归一成 stdio / http / sse。 */
   transport?: 'stdio' | 'http' | 'sse';
   headers?: Record<string, string>;
+  /**
+   * sph 扩展字段：`tools/call` 的超时上限（毫秒）。外部配置没有这个字段，写在这里
+   * 的值只有 sph 认；非法值降级为警告并忽略，不让一个坏字段丢掉整条 server。
+   */
+  callTimeoutMs?: number;
   /** 表内 `name`。与表头 ID 相同时不记。 */
   title?: string;
   /** **来源声明**的启用态（叠加本地偏好之前）。 */
@@ -445,6 +450,7 @@ function tomlMcpTable(
       env: Object.keys(merged).length === 0 ? undefined : merged,
       url,
       ...remoteFields(value, `${path}: mcp_servers.${name}`, warnings),
+      ...callTimeoutField(value.call_timeout_ms, `${path}: mcp_servers.${name}`, warnings),
       ...displayTitle(value.name, name),
       enabled: value.enabled === undefined ? true : value.enabled === true,
     });
@@ -511,6 +517,7 @@ function normalizeJsonServers(value: unknown, where: string, warnings: string[])
       env,
       url,
       ...remoteFields(raw, `${where}: mcpServers.${name}`, warnings),
+      ...callTimeoutField(raw.call_timeout_ms, `${where}: mcpServers.${name}`, warnings),
       ...displayTitle(raw.name, name),
       // 两种外部字段都认：`disabled: true` 与 `enabled: false`。
       enabled: raw.disabled === true ? false : raw.enabled === undefined ? true : raw.enabled === true,
@@ -551,6 +558,20 @@ function displayTitle(value: unknown, id: string): { title: string } | undefined
   const title = nonEmptyString(value);
   if (title === undefined || title === id) return undefined;
   return { title };
+}
+
+/** sph 扩展：`tools/call` 超时（毫秒）。非法值降级为警告并忽略——坏字段不丢整条 server。 */
+function callTimeoutField(
+  value: unknown,
+  where: string,
+  warnings: string[],
+): { callTimeoutMs: number } | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    warnings.push(`${where}: call_timeout_ms must be a positive number`);
+    return undefined;
+  }
+  return { callTimeoutMs: value };
 }
 
 function nonEmptyString(value: unknown): string | undefined {

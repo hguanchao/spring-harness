@@ -478,6 +478,13 @@ function parseMcpServers(value: unknown): McpServerConfigFile[] {
     const transport = parseMcpTransport(rec.type ?? rec.transport, `mcp_servers.${name}.type`);
     const headers = parseStringMap(rec.headers, `mcp_servers.${name}.headers`);
     const title = asString(rec.name, `mcp_servers.${name}.name`);
+    let callTimeoutMs: number | undefined;
+    if (rec.call_timeout_ms !== undefined) {
+      if (typeof rec.call_timeout_ms !== 'number' || !Number.isFinite(rec.call_timeout_ms) || rec.call_timeout_ms <= 0) {
+        throw new ConfigError(`mcp_servers.${name}.call_timeout_ms must be a positive number`);
+      }
+      callTimeoutMs = rec.call_timeout_ms;
+    }
     return {
       name,
       ...(title !== undefined && title !== name ? { title } : {}),
@@ -486,6 +493,7 @@ function parseMcpServers(value: unknown): McpServerConfigFile[] {
       url,
       transport,
       headers,
+      ...(callTimeoutMs === undefined ? {} : { callTimeoutMs }),
     };
   });
 }

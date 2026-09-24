@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { describe, it } from 'node:test';
 import { McpHub } from '../../src/plugins/sph-mcp/hub.js';
-import { consumeSse } from '../../src/plugins/sph-mcp/remote.js';
+import { consumeSse, postTimeoutMs } from '../../src/plugins/sph-mcp/remote.js';
 import { testHostFacts } from '../plugins/host-fixture.js';
 
 function listen(server: Server): Promise<number> {
@@ -16,6 +16,13 @@ function listen(server: Server): Promise<number> {
 }
 
 describe('SSE 帧', () => {
+  it('postTimeoutMs 只对 tools/call 放宽', () => {
+    assert.equal(postTimeoutMs('tools/call', 15_000, 120_000), 120_000);
+    assert.equal(postTimeoutMs('tools/list', 15_000, 120_000), 15_000, '控制请求不吃 call 超时');
+    assert.equal(postTimeoutMs('tools/call', 15_000, undefined), 15_000, '未配置回退默认');
+    assert.equal(postTimeoutMs('tools/call', 15_000, 0), 15_000, '非法值回退默认');
+  });
+
   it('空行结束一帧，半帧留在缓冲里', () => {
     const first = consumeSse('event: endpoint\ndata: /message\n\nevent: message\ndata: {"id":1');
     assert.deepEqual(first.frames, [{ event: 'endpoint', data: '/message' }]);
@@ -75,6 +82,58 @@ describe('远程 MCP', () => {
       assert.equal(await hub.call('remote', 'ping', {}), JSON.stringify({ content: [{ type: 'text', text: 'pong' }] }));
       assert.equal(sawSession, true);
       assert.equal(sawAgent, true);
+    } finally {
+      hub.dispose();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('远程 tools/call 受 callTimeoutMs 约束：HTTP 层不会先掐死放宽后的上限', async () => {
+    // 回归点：远程每条 POST 自带 AbortSignal 超时。hub 放宽到 60s 而这里仍是 15s 的话，
+    // call_timeout_ms 对 http/sse 传输形同虚设。
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const message = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: number; method?: string };
+        if (message.method === 'notifications/initialized') {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+        if (message.method === 'initialize') {
+          res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'sess-1' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0', id: message.id,
+            result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 't', version: '1' } },
+          }));
+          return;
+        }
+        const respond = (): void => {
+          const result = message.method === 'tools/list'
+            ? { tools: [{ name: 'slow', description: 'p', inputSchema: { type: 'object' } }] }
+            : { content: [{ type: 'text', text: 'late' }] };
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+        };
+        if (message.method === 'tools/call') {
+          setTimeout(respond, 500);
+          return;
+        }
+        respond();
+      });
+    });
+    const port = await listen(server);
+    const hub = new McpHub(testHostFacts());
+    try {
+      await hub.reload([{
+        name: 'remote',
+        url: `http://127.0.0.1:${port}/mcp`,
+        transport: 'http',
+        callTimeoutMs: 200,
+      }]);
+      await hub.whenReady();
+      await assert.rejects(() => hub.call('remote', 'slow', {}), /MCP timeout: tools\/call/);
     } finally {
       hub.dispose();
       await new Promise((resolve) => server.close(resolve));

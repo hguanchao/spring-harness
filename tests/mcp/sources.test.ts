@@ -200,6 +200,30 @@ describe('discoverMcpServers 特殊字段', () => {
     }
   });
 
+  it('call_timeout_ms 被收下；非法值降级成警告，条目保留', () => {
+    const s = scaffold();
+    try {
+      writeFileSync(join(s.sphHome, 'config.toml'), [
+        '[mcp_servers.browser]',
+        'command = "npx"',
+        'call_timeout_ms = 120_000',
+        '',
+        '[mcp_servers.bad]',
+        'command = "npx"',
+        'call_timeout_ms = "soon"',
+        '',
+      ].join('\n'), 'utf8');
+      const discovery = discoverMcpServers(s.options());
+      const byId = byName(discovery);
+      assert.equal(byId.get('browser')?.callTimeoutMs, 120_000);
+      assert.equal(byId.get('bad')?.callTimeoutMs, undefined, '坏字段忽略，条目不丢');
+      assert.equal(byId.get('bad')?.command, 'npx');
+      assert.equal(discovery.warnings.some((w) => /call_timeout_ms must be a positive number/.test(w)), true);
+    } finally {
+      s.cleanup();
+    }
+  });
+
   it('JSON 里的 type 与 headers 被收下', () => {
     const s = scaffold();
     try {

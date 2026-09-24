@@ -47,11 +47,30 @@ rl.on('line', (line) => {
               description: 'returns the serving process pid',
               inputSchema: { type: 'object', properties: {} },
             },
+            {
+              name: 'slow',
+              description: 'responds after arguments.ms milliseconds',
+              inputSchema: { type: 'object', properties: { ms: { type: 'number' } } },
+            },
           ],
         },
       });
       return;
     case 'tools/call':
+      // slow 工具按参数延迟应答：tools/call 超时只有对着真会拖的子进程才测得准。
+      if (message.params?.name === 'slow') {
+        const ms = Number(message.params?.arguments?.ms ?? 0);
+        setTimeout(() => {
+          send({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              content: [{ type: 'text', text: `waited=${ms}` }],
+            },
+          });
+        }, ms);
+        return;
+      }
       send({
         jsonrpc: '2.0',
         id: message.id,

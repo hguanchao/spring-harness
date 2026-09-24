@@ -32,9 +32,29 @@ export interface RemoteLinkOptions {
   headers?: Record<string, string>;
   /** 单次 POST / 等待 endpoint 的上限，与 hub 的请求超时对齐。 */
   timeoutMs?: number;
+  /**
+   * `tools/call` 这类长任务的 POST 上限。与 hub 的 call 超时同源：hub 侧放宽而
+   * HTTP 层不变的话，15s 的 AbortSignal 会先把请求掐死，配置形同虚设。
+   */
+  callTimeoutMs?: number;
   onMessage: (message: JsonRpcMessage) => void;
   onRequestError: (id: number | undefined, error: Error) => void;
   onClose: (reason: string) => void;
+}
+
+/**
+ * 每条 POST 的超时：`tools/call` 用 callTimeoutMs（长任务量级），其余用 timeoutMs。
+ * 抽成纯函数是为了直接单测选择逻辑，不必为它起网络。
+ */
+export function postTimeoutMs(
+  method: string | undefined,
+  timeoutMs: number,
+  callTimeoutMs: number | undefined,
+): number {
+  if (method === 'tools/call' && typeof callTimeoutMs === 'number' && Number.isFinite(callTimeoutMs) && callTimeoutMs > 0) {
+    return callTimeoutMs;
+  }
+  return timeoutMs;
 }
 
 const USER_AGENT = 'sph/0.1.0';
@@ -129,7 +149,10 @@ class HttpLink implements RemoteLink {
       method: 'POST',
       headers,
       body: JSON.stringify(message),
-      signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.timeoutMs)]),
+      signal: AbortSignal.any([
+        this.abort.signal,
+        AbortSignal.timeout(postTimeoutMs(message.method, this.timeoutMs, this.options.callTimeoutMs)),
+      ]),
     });
     const session = response.headers.get('mcp-session-id');
     if (session !== null && session !== '') this.sessionId = session;
@@ -240,7 +263,10 @@ class SseLink implements RemoteLink {
       method: 'POST',
       headers,
       body: JSON.stringify(message),
-      signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.timeoutMs)]),
+      signal: AbortSignal.any([
+        this.abort.signal,
+        AbortSignal.timeout(postTimeoutMs(message.method, this.timeoutMs, this.options.callTimeoutMs)),
+      ]),
     });
     if (response.status === 202 || response.status === 204 || response.ok) return;
     throw new Error(`HTTP ${response.status}: ${clip(await response.text())}`);

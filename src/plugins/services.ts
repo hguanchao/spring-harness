@@ -28,6 +28,12 @@ export interface McpServerConfig {
   transport?: 'stdio' | 'http' | 'sse';
   /** 远程请求头。stdio 不用。 */
   headers?: Record<string, string>;
+  /**
+   * `tools/call` 的超时上限（毫秒）。构建、浏览器自动化、爬取类 server 普遍超过
+   * 控制请求的量级，所以与其它方法分开配置；缺省用实现里的默认值（60s）。
+   * 其它方法（initialize / tools/list）不受它影响，始终用控制请求的 15s。
+   */
+  callTimeoutMs?: number;
 }
 
 /** 一个定义的出处：展示标签 + 可否就地改写。 */
