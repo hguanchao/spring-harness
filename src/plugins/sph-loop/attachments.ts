@@ -10,11 +10,14 @@
  * 交互语义，这里是「提交后」的落盘语义），两处不必共享一套分隔符。
  */
 
+import { basename } from 'node:path';
 import { statSync } from 'node:fs';
-import type { FileAttachment } from '../../session/types.js';
+import type { DocumentAttachment, FileAttachment } from '../../session/types.js';
 import {
   assertInsideWorkspace,
   casefoldPath,
+  DOCUMENT_BYTE_LIMIT,
+  documentMime,
   IMAGE_BYTE_LIMIT,
   imageMime,
   looksLikeText,
@@ -66,12 +69,14 @@ export interface CollectedMentions {
   attachments: FileAttachment[];
   /** 图片提及转成的 data URL，走既有 userImages 通道，不重复进 attachments。 */
   images: string[];
+  /** PDF 提及转成的文档附件，走 userDocuments 通道。 */
+  documents: DocumentAttachment[];
 }
 
 /**
  * 解析文本里的提及并读取文件。文本文件按 read_file 同一套上限截断（READ_BYTE_LIMIT，
- * UTF-8 边界安全）；图片转 data URL。提到目录、工作区外、二进制文件都生成带 error
- * 的占位条目——模型能据此向用户说明为什么内容没给到。
+ * UTF-8 边界安全）；图片转 data URL；PDF 转文档附件。提到目录、工作区外、二进制文件
+ * 都生成带 error 的占位条目——模型能据此向用户说明为什么内容没给到。
  *
  * 边界与 read/edit 相同，走 assertInsideWorkspace 的 realpath：工作区内指向区外的
  * 符号链接不能靠「字符串里没有 ..」混进去。
@@ -79,6 +84,7 @@ export interface CollectedMentions {
 export function collectFileMentions(text: string, workspaceRoot: string): CollectedMentions {
   const attachments: FileAttachment[] = [];
   const images: string[] = [];
+  const documents: DocumentAttachment[] = [];
   const seen = new Set<string>();
   for (const mention of parseFileMentions(text)) {
     // 补全写进来的路径统一是 / 分隔；assertInsideWorkspace 在两个平台都能吃。
@@ -123,6 +129,26 @@ export function collectFileMentions(text: string, workspaceRoot: string): Collec
       }
       continue;
     }
+    const docMime = documentMime(abs);
+    if (docMime !== undefined) {
+      if (stat.size > DOCUMENT_BYTE_LIMIT) {
+        attachments.push({
+          path: display,
+          error: `pdf exceeds ${DOCUMENT_BYTE_LIMIT} bytes — extract its text with a shell tool instead (e.g. pdftotext)`,
+        });
+        continue;
+      }
+      try {
+        const data = readHead(abs, stat.size);
+        documents.push({
+          filename: basename(display),
+          url: `data:${docMime};base64,${data.toString('base64')}`,
+        });
+      } catch {
+        attachments.push({ path: display, error: 'pdf is unreadable' });
+      }
+      continue;
+    }
     try {
       const head = readHead(abs, READ_BYTE_LIMIT);
       if (!looksLikeText(abs, head.subarray(0, Math.min(TEXT_SNIFF_BYTES, head.length)))) {
@@ -138,7 +164,7 @@ export function collectFileMentions(text: string, workspaceRoot: string): Collec
       attachments.push({ path: display, error: 'file is unreadable' });
     }
   }
-  return { attachments, images };
+  return { attachments, images, documents };
 }
 
 function escapeAttr(value: string): string {

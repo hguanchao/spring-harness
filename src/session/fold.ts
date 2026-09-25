@@ -64,6 +64,11 @@ export interface FoldedSessionState {
    * 放在折叠里而不是内存里，预算就自然活过 resume：重启后不会从零开始重新烧一遍。
    */
   tokensUsed: number;
+  /**
+   * 累计美元花费。只折算 usage 事件里带 costUsd 的调用——模型在 models.json 里
+   * 声明了 `cost` 单价才有这个字段；子代理的花费记在它自己的会话里，不并入父会话。
+   */
+  costUsed: number;
 }
 
 function emptySessionState(): FoldedSessionState {
@@ -75,6 +80,7 @@ function emptySessionState(): FoldedSessionState {
     planMode: false,
     lastTurnInterrupted: false,
     tokensUsed: 0,
+    costUsed: 0,
   };
 }
 
@@ -172,6 +178,7 @@ export function foldSessionState(records: readonly SessionRecord[]): FoldedSessi
         const prompt = asFiniteNumber(data.promptTokens) ?? 0;
         const completion = asFiniteNumber(data.completionTokens) ?? 0;
         state.tokensUsed += Math.max(0, prompt) + Math.max(0, completion);
+        state.costUsed += Math.max(0, asFiniteNumber(data.costUsd) ?? 0);
         break;
       }
       case 'subagent': {

@@ -11,6 +11,8 @@ export interface FooterUsage {
   promptTokens: number;
   completionTokens: number;
   cachedTokens: number;
+  /** 累计美元花费。模型在 models.json 声明了 `cost` 单价才会累计；缺席整段省略。 */
+  costUsd?: number;
 }
 
 export interface FooterData {
@@ -38,6 +40,12 @@ export function formatTokens(count: number): string {
   if (count < 1000000) return `${Math.round(count / 1000)}k`;
   if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
   return `${Math.round(count / 1000000)}M`;
+}
+
+/** 花费展示：小额多留两位有效数字，$1 起按常规两位小数。 */
+export function formatCost(usd: number): string {
+  if (usd < 1) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
 }
 
 export class FooterComponent implements Component {
@@ -80,6 +88,11 @@ export class FooterComponent implements Component {
     if (data.usage.cachedTokens > 0 && data.usage.promptTokens > 0) {
       const hitRate = Math.round((data.usage.cachedTokens / data.usage.promptTokens) * 100);
       push('⚡', `${hitRate}%`);
+    }
+
+    // 花费段：只在模型声明了单价（costUsd 被累计过）时出现，否则 $0.0000 只是噪音。
+    if (data.usage.costUsd !== undefined && data.usage.costUsd > 0) {
+      push('💰', formatCost(data.usage.costUsd));
     }
 
     // 超宽时从尾部丢段而不是字符级截断：状态栏按段阅读，截断会把 emoji 切成乱码。

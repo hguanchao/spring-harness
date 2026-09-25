@@ -38,6 +38,12 @@ export interface FileAttachment {
   error?: string;
 }
 
+/** data URL 形式的 PDF 文档附件（@提及 或 read_file 读到的）。filename 是展示名。 */
+export interface DocumentAttachment {
+  filename: string;
+  url: string;
+}
+
 export interface SessionMessage {
   type: 'message';
   ts: string;
@@ -48,6 +54,8 @@ export interface SessionMessage {
   toolCalls?: ToolCall[];
   /** data URL 形式的图片附件（用户输入的 @图片 或 read_file 读到的图片）。 */
   images?: string[];
+  /** data URL 形式的 PDF 文档附件（@提及 或 read_file 读到的）。 */
+  documents?: DocumentAttachment[];
   /** 文本形式的 @ 文件附件（FileAttachment）；只出现在 user 消息上。 */
   attachments?: FileAttachment[];
   /** Responses 推理项，下一轮原样回传；没有 encryptedContent 的项不要存。 */

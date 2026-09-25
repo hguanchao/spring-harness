@@ -1,8 +1,10 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
-import { isAbsolute, relative } from 'node:path';
+import { basename, isAbsolute, relative } from 'node:path';
 import {
   assertInsideWorkspace,
   canonicalize,
+  DOCUMENT_BYTE_LIMIT,
+  documentMime,
   IMAGE_BYTE_LIMIT,
   imageMime,
   isStrictChildRel,
@@ -101,7 +103,8 @@ export const readFileTool: ToolSpec = {
   name: 'read',
   description:
     'Use this — not shell cat, head, or tail — to inspect a file inside the workspace.'
-    + ' Images (png/jpg/jpeg/gif/webp) come back as attachments you can see.'
+    + ' Images (png/jpg/jpeg/gif/webp) and PDFs come back as attachments you can see.'
+    + ' For oversized PDFs or exact text extraction, shell out to pdftotext.'
     + ' Text is read in windows: use offset (1-based line) and limit to page through a large file'
     + ' rather than assuming the file ends where the window does.',
   schema: {
@@ -134,6 +137,25 @@ export const readFileTool: ToolSpec = {
         ok: true,
         content: `${toWorkspaceRelative(ctx.workspaceRoot, abs)} — image attached (${(size / 1024).toFixed(0)}KB)`,
         images: [dataUrl],
+      };
+    }
+    const docMime = documentMime(abs);
+    if (docMime) {
+      if (size > DOCUMENT_BYTE_LIMIT) {
+        return {
+          ok: false,
+          content: `pdf too large: ${rel} is ${(size / 1024 / 1024).toFixed(1)}MB (limit 10MB)`
+            + ' — extract its text with a shell tool instead (e.g. pdftotext "file.pdf" -)',
+        };
+      }
+      const dataUrl = `data:${docMime};base64,${readFileSync(abs).toString('base64')}`;
+      ctx.noteMemoryTouch(abs);
+      ctx.observation?.noteRead(abs);
+      return {
+        ok: true,
+        content: `${toWorkspaceRelative(ctx.workspaceRoot, abs)} — pdf attached (${(size / 1024).toFixed(0)}KB)`
+          + ' — pages are visible to you; for exact strings use pdftotext via shell',
+        documents: [{ filename: basename(abs), url: dataUrl }],
       };
     }
     // 嗅探只取文件头 4KB；正文由 readLineWindow 按行窗口读取，

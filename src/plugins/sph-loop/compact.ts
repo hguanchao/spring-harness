@@ -1,5 +1,5 @@
 import { foldSessionState, sessionEventData } from '../../session/fold.js';
-import type { SessionFactory, SessionMessage, SessionPort } from '../../session/types.js';
+import type { DocumentAttachment, SessionFactory, SessionMessage, SessionPort } from '../../session/types.js';
 import { attachmentWireSuffix } from './attachments.js';
 import type { LlmClient, ChatMessage, TokenUsage } from '../../llm/client.js';
 
@@ -305,6 +305,7 @@ function latestCompaction(session: SessionPort): CompactionEvent | undefined {
 export interface WireState {
   messages: ChatMessage[];
   pendingImages: string[];
+  pendingDocuments: DocumentAttachment[];
 }
 
 /** 摘要作为新会话的第一条 user 消息。旧会话上的 compaction 事件仍走同一段文本，两边读到的字节一致。 */
@@ -407,22 +408,32 @@ export function emptyWire(compaction?: CompactionEvent): WireState {
       content: compactedContextText(compaction.summary),
     });
   }
-  return { messages, pendingImages: [] };
+  return { messages, pendingImages: [], pendingDocuments: [] };
 }
 
-export function flushWireImages(state: WireState): void {
-  if (state.pendingImages.length === 0) return;
-  state.messages.push({
-    role: 'user',
-    content: '[tool result image]',
-    parts: state.pendingImages.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
-  });
-  state.pendingImages = [];
+export function flushWireAttachments(state: WireState): void {
+  if (state.pendingImages.length > 0) {
+    state.messages.push({
+      role: 'user',
+      content: '[tool result image]',
+      parts: state.pendingImages.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+    });
+    state.pendingImages = [];
+  }
+  if (state.pendingDocuments.length > 0) {
+    state.messages.push({
+      role: 'user',
+      content: '[tool result document]',
+      parts: state.pendingDocuments.map((document) => ({ type: 'document' as const, document })),
+    });
+    state.pendingDocuments = [];
+  }
 }
 
 export function pushSessionMessage(state: WireState, row: SessionMessage): void {
   if (row.role === 'tool') {
     if (row.images) state.pendingImages.push(...row.images);
+    if (row.documents) state.pendingDocuments.push(...row.documents);
     state.messages.push({
       role: 'tool',
       content: row.content,
@@ -431,7 +442,7 @@ export function pushSessionMessage(state: WireState, row: SessionMessage): void 
     });
     return;
   }
-  flushWireImages(state);
+  flushWireAttachments(state);
   if (row.role === 'assistant' && row.toolCalls && row.toolCalls.length > 0) {
     state.messages.push({
       role: 'assistant',
@@ -455,8 +466,11 @@ export function pushSessionMessage(state: WireState, row: SessionMessage): void 
       ? row.content + attachmentWireSuffix(row.attachments)
       : row.content,
   };
-  if (row.images && row.images.length > 0 && row.role === 'user') {
-    message.parts = row.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }));
+  if (row.role === 'user' && (row.images?.length || row.documents?.length)) {
+    message.parts = [
+      ...(row.images ?? []).map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+      ...(row.documents ?? []).map((document) => ({ type: 'document' as const, document })),
+    ];
   }
   if (row.role === 'assistant' && row.reasoning?.length) message.reasoning = row.reasoning;
   if (row.thinking) message.thinking = row.thinking;
@@ -468,7 +482,7 @@ export function wireFromMessages(messages: readonly SessionMessage[], compaction
   const state = emptyWire(compaction);
   const from = compaction?.covered ?? 0;
   for (const row of messages.slice(from)) pushSessionMessage(state, row);
-  flushWireImages(state);
+  flushWireAttachments(state);
   return state;
 }
 

@@ -5,7 +5,9 @@ import type { ChatMessage, RequestBodyOptions } from './openai.js';
 import {
   activeReasoningEffort,
   appendStreamDelta,
+  documentDropNote,
   flattenToolSpec,
+  imageDropNote,
   llmErrorMessage,
   parseSseJson,
   writeUsage,
@@ -25,6 +27,7 @@ type InputItem = Record<string, unknown>;
 export function toResponsesInput(
   messages: ChatMessage[],
   caps: RequestCaps = DEFAULT_REQUEST_CAPS,
+  options: { supportsImages?: boolean } = {},
 ): InputItem[] {
   const items: InputItem[] = [];
   for (const message of messages) {
@@ -38,9 +41,24 @@ export function toResponsesInput(
     }
     if (message.role === 'user') {
       const content: Array<Record<string, unknown>> = [{ type: 'input_text', text: message.content }];
+      const droppedDocuments: string[] = [];
+      let droppedImages = 0;
       for (const part of message.parts ?? []) {
-        if (part.type === 'image_url') content.push({ type: 'input_image', image_url: part.image_url.url });
+        if (part.type === 'image_url') {
+          // 模型声明不接受图片时降级成说明（models.json `input`），与端点降级是两回事。
+          if (options.supportsImages !== false) content.push({ type: 'input_image', image_url: part.image_url.url });
+          else droppedImages += 1;
+        } else if (part.type === 'document') {
+          // 官方端点认 `input_file`（file_data 是 data URL）；兼容网关不认时由 degrade 摘掉。
+          if (caps.sendDocuments) {
+            content.push({ type: 'input_file', filename: part.document.filename, file_data: part.document.url });
+          } else {
+            droppedDocuments.push(part.document.filename);
+          }
+        }
       }
+      if (droppedImages > 0) content.push({ type: 'input_text', text: imageDropNote(droppedImages) });
+      if (droppedDocuments.length > 0) content.push({ type: 'input_text', text: documentDropNote(droppedDocuments) });
       items.push({ role: 'user', content });
       continue;
     }
@@ -103,7 +121,7 @@ export function buildResponsesRequest(
   return {
     model: options.model,
     stream: true,
-    input: toResponsesInput(options.messages, caps),
+    input: toResponsesInput(options.messages, caps, { supportsImages: options.supportsImages }),
     // Responses 的工具定义是扁平结构，而 ToolRegistry.schemas() 产出的是嵌套 function 形态，这里摊平。
     ...(options.tools.length > 0
       ? {

@@ -6,8 +6,8 @@ import {
   type SessionAffinityFormat,
 } from './compat.js';
 import { ContextOverflowError } from './errors.js';
-import type { ChatMessage, LlmClient, LlmRetryInfo, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
-import { finishStream, isEmptyReply, newSseAcc, toolArgumentsIncomplete, type SseAcc } from './openai.js';
+import type { ChatMessage, LlmClient, LlmRetryInfo, ModelCostRates, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
+import { costUsd, finishStream, isEmptyReply, newSseAcc, toolArgumentsIncomplete, type SseAcc } from './openai.js';
 import { FatalStreamError, postSseStream } from './sse.js';
 import { backoffMs, DEFAULT_MAX_RETRIES, RetryableError, sleepAbortable } from './retry.js';
 import { errorMessage } from '../../util.js';
@@ -52,6 +52,10 @@ export interface SseClientOptions {
   sessionId?: string;
   /** `[compat]` 声明，覆盖 URL 推断。 */
   compat?: CompatProfile;
+  /** 模型声明的单价；缺席则 usage 不折算 costUsd。 */
+  costRates?: ModelCostRates;
+  /** 模型是否接受图片输入。`false` 时图片部件在请求体里降级成说明文本。 */
+  supportsImages?: boolean;
 }
 
 /**
@@ -103,6 +107,11 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
     baseUrl: options.baseUrl,
     compat: options.compat,
   });
+  // 单价声明了才折算：usage 上没有 costUsd 就意味着「不知道价格」，与 $0 是两回事。
+  const price = (delta: StreamDelta): StreamDelta => {
+    if (!delta.usage || !options.costRates) return delta;
+    return { ...delta, usage: { ...delta.usage, costUsd: costUsd(delta.usage, options.costRates) } };
+  };
 
   return {
     async complete(
@@ -143,11 +152,11 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
           // 循环据此续写，而不是把已经上屏的字再流一遍。
           const partial = finishStream(acc);
           if (error instanceof RetryableError && usablePartial(partial)) {
-            return { ...partial, finishReason: partial.finishReason ?? 'unknown' };
+            return price({ ...partial, finishReason: partial.finishReason ?? 'unknown' });
           }
           throw error;
         }
-        const result = finishStream(acc);
+        const result = price(finishStream(acc));
         // 正常结束但零内容按空回复处理，重试同一请求，
         // 不要当成成功空回复让 loop 收工（截图里工具跑完下一跳空体就是这条路径）。
         // 工具参数没写完同样重试：交回去只会变成 invalid tool arguments。
@@ -168,6 +177,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             reasoningEffort: options.reasoningEffort,
             maxTokens: options.maxTokens,
             sessionId: options.sessionId,
+            supportsImages: options.supportsImages,
           },
           caps,
         );

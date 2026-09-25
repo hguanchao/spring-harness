@@ -79,3 +79,21 @@ describe('ls 截断提示', () => {
     }
   });
 });
+
+describe('read PDF 附件', () => {
+  it('PDF 返回文档附件而不是拒绝二进制', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-read-pdf-'));
+    try {
+      writeFileSync(join(root, 'spec.pdf'), '%PDF-1.4 fake body');
+      const result = await readFileTool.execute({ path: 'spec.pdf' }, ctx(root));
+      assert.equal(result.ok, true);
+      assert.match(result.content, /pdf attached/);
+      assert.equal(result.documents?.length, 1);
+      assert.equal(result.documents?.[0]?.filename, 'spec.pdf');
+      assert.match(result.documents?.[0]?.url ?? '', /^data:application\/pdf;base64,/);
+      assert.deepEqual(result.images, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

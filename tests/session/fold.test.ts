@@ -149,3 +149,16 @@ describe('foldSessionState tokensUsed', () => {
     assert.equal(foldSessionState([]).tokensUsed, 0);
   });
 });
+
+describe('foldSessionState costUsed', () => {
+  it('usage 事件带 costUsd 时折算进会话花费累计', () => {
+    const state = foldSessionState([
+      { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind: 'usage', data: { promptTokens: 100, completionTokens: 10, costUsd: 0.01 } },
+      { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind: 'usage', data: { promptTokens: 200, completionTokens: 20, costUsd: 0.02 } },
+      // 没声明单价的模型：usage 事件里没有 costUsd，只累计 token。
+      { type: 'event', ts: '2026-01-01T00:00:00.000Z', kind: 'usage', data: { promptTokens: 50, completionTokens: 5 } },
+    ]);
+    assert.equal(state.tokensUsed, 385);
+    assert.equal(state.costUsed, 0.03);
+  });
+});

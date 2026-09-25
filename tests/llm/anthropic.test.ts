@@ -333,3 +333,55 @@ describe('signature_delta 捕获', () => {
     }
   });
 });
+
+describe('toAnthropicRequest 文档块', () => {
+  const documentMessage: ChatMessage = {
+    role: 'user',
+    content: '总结这份 PDF',
+    parts: [{ type: 'document', document: { filename: 'spec.pdf', url: 'data:application/pdf;base64,JVBERi0=' } }],
+  };
+
+  it('document part 变成 base64 document source', () => {
+    const body = toAnthropicRequest({ model: 'claude-sonnet-4', messages: [documentMessage], tools: [] });
+    const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    // 单条消息时 cache 断点落在 document 块上（document 是可缓存块类型），一并断言。
+    assert.deepEqual(messages[0]?.content.find((block) => block.type === 'document'), {
+      type: 'document',
+      source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' },
+      cache_control: { type: 'ephemeral' },
+    });
+  });
+
+  it('sendDocuments 关闭时降级为带文件名的说明文本', () => {
+    const body = toAnthropicRequest(
+      { model: 'claude-sonnet-4', messages: [documentMessage], tools: [] },
+      { ...DEFAULT_REQUEST_CAPS, sendDocuments: false },
+    );
+    const blocks = (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content;
+    assert.equal(blocks.some((block) => block.type === 'document'), false);
+    assert.ok(
+      blocks.some((block) => block.type === 'text' && String(block.text).includes('spec.pdf')),
+      '降级说明必须带文件名，模型才知道哪个文件没附上',
+    );
+  });
+});
+
+describe('toAnthropicRequest 图片降级', () => {
+  it('supportsImages=false：image 块降级为说明文本', () => {
+    const body = toAnthropicRequest({
+      model: 'claude-sonnet-4-5',
+      messages: [{
+        role: 'user',
+        content: '看图',
+        parts: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,xx' } }],
+      }],
+      tools: [],
+      supportsImages: false,
+    });
+    const blocks = (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content;
+    assert.equal(blocks.some((block) => block.type === 'image'), false);
+    assert.ok(
+      blocks.some((block) => block.type === 'text' && String(block.text).includes('does not accept image input')),
+    );
+  });
+});

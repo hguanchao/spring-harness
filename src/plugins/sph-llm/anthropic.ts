@@ -2,7 +2,7 @@ import { firstString, TEXT_KEYS, THINKING_KEYS } from './aliases.js';
 import { DEFAULT_REQUEST_CAPS, degradeRequestCaps, type RequestCaps } from './compat.js';
 import { streamFrameError } from './errors.js';
 import type { ChatMessage, ContentPart, ReasoningEffort, RequestBodyOptions } from './openai.js';
-import { appendStreamDelta, flattenToolSpec, parseSseJson, writeUsage, type SseAcc } from './openai.js';
+import { appendStreamDelta, documentDropNote, flattenToolSpec, imageDropNote, parseSseJson, writeUsage, type SseAcc } from './openai.js';
 import type { ProtocolAdapter } from './stream-client.js';
 
 /**
@@ -46,24 +46,47 @@ function imageBlock(part: Extract<ContentPart, { type: 'image_url' }>): Anthropi
   return { type: 'image', source: { type: 'url', url } };
 }
 
+/** data URL 转 Anthropic document source；PDF 走 base64，http(s) URL 走 url source。 */
+function documentBlock(part: Extract<ContentPart, { type: 'document' }>): AnthropicBlock {
+  const match = /^data:([^;]+);base64,(.+)$/.exec(part.document.url);
+  if (match) {
+    return { type: 'document', source: { type: 'base64', media_type: match[1], data: match[2] } };
+  }
+  return { type: 'document', source: { type: 'url', url: part.document.url } };
+}
+
 /**
- * 正文文本 + 图片 part → Anthropic content blocks（tool / user 两条路径共用）。
+ * 正文文本 + 图片/文档 part → Anthropic content blocks（tool / user 两条路径共用）。
  *
  * 空正文不推 text 块：Anthropic 拒收空 text（"text content blocks must be non-empty"），
  * 而空结果在工具侧是真会出现的（例如 headless 下 ask_user 无输入通道）。
+ *
+ * 两类降级都会留一条说明文本，模型要能看见「内容存在但没附上」：
+ * - `supportsImages === false`：模型声明不接受图片输入（models.json `input`）；
+ * - `sendDocuments === false`：文档块被端点报文降级摘掉。
  */
-function textAndImageBlocks(message: ChatMessage): AnthropicBlock[] {
+function contentBlocks(message: ChatMessage, caps: RequestCaps, supportsImages: boolean): AnthropicBlock[] {
   const blocks: AnthropicBlock[] = [];
   if (message.content) blocks.push({ type: 'text', text: message.content });
+  const droppedDocuments: string[] = [];
+  let droppedImages = 0;
   for (const part of message.parts ?? []) {
-    if (part.type === 'image_url') blocks.push(imageBlock(part));
+    if (part.type === 'image_url') {
+      if (supportsImages) blocks.push(imageBlock(part));
+      else droppedImages += 1;
+    } else if (part.type === 'document') {
+      if (caps.sendDocuments) blocks.push(documentBlock(part));
+      else droppedDocuments.push(part.document.filename);
+    }
   }
+  if (droppedImages > 0) blocks.push({ type: 'text', text: imageDropNote(droppedImages) });
+  if (droppedDocuments.length > 0) blocks.push({ type: 'text', text: documentDropNote(droppedDocuments) });
   return blocks;
 }
 
 /** tool_result 的 content 不能为空数组，兜一个占位块，免得整段历史被判 400。 */
-function toolResultContent(message: ChatMessage): AnthropicBlock[] {
-  const blocks = textAndImageBlocks(message);
+function toolResultContent(message: ChatMessage, caps: RequestCaps, supportsImages: boolean): AnthropicBlock[] {
+  const blocks = contentBlocks(message, caps, supportsImages);
   return blocks.length > 0 ? blocks : [{ type: 'text', text: '(no output)' }];
 }
 
@@ -142,13 +165,13 @@ export function toAnthropicRequest(
       pendingToolResults.push({
         type: 'tool_result',
         tool_use_id: message.tool_call_id,
-        content: toolResultContent(message),
+        content: toolResultContent(message, caps, options.supportsImages !== false),
       });
       continue;
     }
     flushToolResults();
     if (message.role === 'user') {
-      const blocks = textAndImageBlocks(message);
+      const blocks = contentBlocks(message, caps, options.supportsImages !== false);
       messages.push({ role: 'user', content: blocks });
       continue;
     }

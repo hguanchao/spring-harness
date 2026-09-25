@@ -150,16 +150,20 @@ export function loadConfig(options?: {
 }): SphConfig {
   const env = options?.env ?? process.env;
   const path = options?.configPath ?? sphConfigPath();
-  let file: Record<string, unknown> = {};
-  if (existsSync(path)) {
-    const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new ConfigError(`invalid config file: ${path}`);
-    }
-    file = parsed as Record<string, unknown>;
-  }
-
+  // registry 先读：两份都缺时「models.json not found」是更根本的那条（正常流程下
+  // 首启脚手架会把两份都生成，走到这里说明生成失败或被人为删掉）。
   const registry = loadRegistry(options?.registryPath ?? sphModelsPath(), env);
+  let file: Record<string, unknown> = {};
+  if (!existsSync(path)) {
+    // 报错要把路径带出来，而不是只说「provider must be a non-empty string」。
+    throw new ConfigError(`config.toml not found: ${path}\nIt must set provider and model pointers into models.json (see: sph --help).`);
+  }
+  const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ConfigError(`invalid config file: ${path}`);
+  }
+  file = parsed as Record<string, unknown>;
+
   const providerName = requireNonEmptyString(file.provider, 'provider');
   const provider: ProviderDeclaration = findProvider(registry, providerName);
   const model = requireNonEmptyString(file.model, 'model');

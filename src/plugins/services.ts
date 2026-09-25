@@ -309,7 +309,7 @@ export const SUBAGENT_SERVICE = 'sph-subagent';
 // 宿主只按这些名字取服务。插件缺席时启动失败（写出缺的是哪一个），而不是静默换成另一份实现。
 // 工具没有单独的服务：sph-tools 用 registerTool 挂进工具表，宿主的核心表是空的。
 
-import type { LlmClient, ReasoningEffort } from '../llm/client.js';
+import type { LlmClient, ModelCostRates, ReasoningEffort } from '../llm/client.js';
 import type { ApiProtocol, CompatProfile } from '../config/primitives.js';
 import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../session/types.js';
 import type { sessionEventData } from '../session/fold.js';
@@ -327,6 +327,10 @@ export interface ModelClientOptions {
   sessionId?: string;
   compat?: CompatProfile;
   maxRetries?: number;
+  /** 模型声明的单价；缺席则 usage 不折算 costUsd。 */
+  costRates?: ModelCostRates;
+  /** 模型是否接受图片输入（models.json 模型级 `input` 声明）。缺省视为接受。 */
+  supportsImages?: boolean;
 }
 
 export interface ModelService {

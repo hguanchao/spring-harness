@@ -175,3 +175,26 @@ describe('缓存路由参数的降级', () => {
   });
 });
 
+
+describe('文档块的降级', () => {
+  const after = (text: string): RequestCaps | undefined => degradeRequestCaps(initialRequestCaps('gpt-4o', true), text);
+
+  it('input_file 不被认时降 sendDocuments', () => {
+    const next = after("Unknown parameter: 'input_file'.");
+    assert.equal(next?.sendDocuments, false);
+  });
+
+  it('file_data 被拒同样降级', () => {
+    const next = after('Invalid value: file_data must be a data URL.');
+    assert.equal(next?.sendDocuments, false);
+  });
+
+  it('带引号的 document 类型字面量被拒时降级', () => {
+    const next = after("messages.0.content.1.type: Input tag 'document' is unsupported.");
+    assert.equal(next?.sendDocuments, false);
+  });
+
+  it('无关报文里出现 document 一词不误伤', () => {
+    assert.equal(after('the document you sent is too large'), undefined);
+  });
+});

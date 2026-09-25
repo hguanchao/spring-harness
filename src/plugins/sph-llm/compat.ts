@@ -73,6 +73,14 @@ export interface RequestCaps {
    * 所以这是纯上行的收益；端点不认时报文会把它降下来。
    */
   promptCacheRetention: boolean;
+  /**
+   * 发送文档块（Responses 的 `input_file` / Anthropic 的 `document` source）。
+   *
+   * chat.completions 没有文档的线上形态，序列化层恒降级为说明文本，与这一位无关。
+   * 兼容网关遇到不认识的 content 类型直接 400，所以 Responses / Anthropic 先发、
+   * 被拒后由报文降级摘掉，摘掉后文档内容以说明文本形式留在消息里。
+   */
+  sendDocuments: boolean;
 }
 
 export {
@@ -92,6 +100,7 @@ export const DEFAULT_REQUEST_CAPS: RequestCaps = Object.freeze({
   promptCache: true,
   promptCacheKey: true,
   promptCacheRetention: true,
+  sendDocuments: true,
 });
 
 export interface InitialCapsOptions {
@@ -123,6 +132,7 @@ export function initialRequestCaps(
     promptCache,
     promptCacheKey: promptCache && (override?.promptCacheKey ?? true),
     promptCacheRetention: promptCache && (override?.promptCacheRetention ?? false),
+    sendDocuments: true,
   };
 }
 
@@ -218,6 +228,10 @@ export function degradeRequestCaps(caps: RequestCaps, errorText: string): Reques
   if (caps.sendReasoning && text.includes('not issued to this caller')) {
     return { ...caps, sendReasoning: false };
   }
+  // 文档字段名本身足够精确（`document` 一词太常见，另在门内只认带引号的类型字面量）。
+  if (caps.sendDocuments && (mentionsParam(text, 'input_file') || mentionsParam(text, 'file_data'))) {
+    return { ...caps, sendDocuments: false };
+  }
 
   if (!UNSUPPORTED_WORDS.some((word) => text.includes(word))) return undefined;
 
@@ -240,6 +254,11 @@ export function degradeRequestCaps(caps: RequestCaps, errorText: string): Reques
   }
   if (mentionsParam(text, 'prompt_cache_key') && caps.promptCacheKey) {
     return { ...caps, promptCacheKey: false };
+  }
+  // 文档块被端点拒收：摘掉后内容以说明文本形式留在消息里（模型可改走工具提取）。
+  // `document` 一词太常见，只认带引号的类型字面量，避免把无关报文误伤成降级。
+  if (caps.sendDocuments && /['"`]document['"`]/.test(text)) {
+    return { ...caps, sendDocuments: false };
   }
   return undefined;
 }

@@ -14,6 +14,7 @@ import { clampPromptCacheKey, openaiSessionHeaders, PROMPT_CACHE_RETENTION } fro
 import type { ProtocolAdapter } from './stream-client.js';
 import type {
   ChatMessage,
+  ContentPart,
   ReasoningEffort,
   ReasoningItem,
   StreamDelta,
@@ -25,12 +26,13 @@ export type {
   ContentPart,
   LlmClient,
   LlmRetryInfo,
+  ModelCostRates,
   ReasoningEffort,
   ReasoningItem,
   StreamDelta,
   TokenUsage,
 } from '../../llm/client.js';
-export { REASONING_EFFORTS } from '../../llm/client.js';
+export { costUsd, REASONING_EFFORTS } from '../../llm/client.js';
 
 /**
  * 各端点把「命中缓存的输入 token」放在不同字段：
@@ -317,11 +319,39 @@ export function finishStream(acc: SseAcc): StreamDelta {
   };
 }
 
-/** user 消息含图片 parts 时按多模态数组序列化，其余角色保持纯字符串。 */
-function serializeMessage(message: ChatMessage): Record<string, unknown> {
+/**
+ * 文档块被摘掉时给模型的说明。三个协议共用：
+ * chat.completions 没有文档的线上形态（恒降级），Responses / Anthropic 在
+ * `sendDocuments` 被报文降级后走同一段文本。让模型看见「文件存在但没附上」，
+ * 它才会改走工具提取，而不是以为自己在对着原文说话。
+ */
+export function documentDropNote(filenames: readonly string[]): string {
+  return `[document not attached: ${filenames.join(', ')}`
+    + ' — this endpoint cannot carry document input; extract or read the file with tools instead]';
+}
+
+/** 图片部件被摘掉时的说明（模型声明了 `input` 不含 image）。三协议共用。 */
+export function imageDropNote(count: number): string {
+  return `[${count} image(s) omitted: this model does not accept image input]`;
+}
+
+/** user 消息含图片/文档 parts 时按多模态数组序列化，其余角色保持纯字符串。 */
+function serializeMessage(message: ChatMessage, supportsImages: boolean): Record<string, unknown> {
   const base: Record<string, unknown> = { role: message.role, content: message.content };
   if (message.parts && message.parts.length > 0 && message.role === 'user') {
-    base.content = [{ type: 'text', text: message.content }, ...message.parts];
+    // chat.completions 没有文档块；图片部件在模型声明不接受图片时同样降级成说明文本。
+    const documents = message.parts.filter((part): part is Extract<ContentPart, { type: 'document' }> => part.type === 'document');
+    const images = supportsImages ? 0 : message.parts.filter((part) => part.type === 'image_url').length;
+    const wireParts = message.parts.filter((part) =>
+      part.type !== 'document' && (supportsImages || part.type !== 'image_url'));
+    const notes: string[] = [];
+    if (documents.length > 0) notes.push(documentDropNote(documents.map((part) => part.document.filename)));
+    if (images > 0) notes.push(imageDropNote(images));
+    const note = notes.length > 0 ? notes.join('\n') : undefined;
+    base.content = [
+      { type: 'text', text: note === undefined ? message.content : `${message.content}${message.content ? '\n' : ''}${note}` },
+      ...wireParts,
+    ];
   }
   if (message.tool_call_id !== undefined) base.tool_call_id = message.tool_call_id;
   if (message.name !== undefined) base.name = message.name;
@@ -343,6 +373,8 @@ export interface RequestBodyOptions {
   maxTokens?: number;
   /** 会话身份：作为 `prompt_cache_key`，让同一会话的请求落到同一台机器上。 */
   sessionId?: string;
+  /** 模型是否接受图片输入（models.json 模型级 `input` 声明）。缺省视为接受。 */
+  supportsImages?: boolean;
 }
 
 export interface FlatToolSpec {
@@ -371,7 +403,7 @@ export function buildRequestBody(
   const effort = activeReasoningEffort(options.reasoningEffort);
   return {
     model: options.model,
-    messages: options.messages.map(serializeMessage),
+    messages: options.messages.map((message) => serializeMessage(message, options.supportsImages !== false)),
     tools: options.tools.length > 0 ? options.tools : undefined,
     tool_choice: options.tools.length > 0 ? 'auto' : undefined,
     stream: true,

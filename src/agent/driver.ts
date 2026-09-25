@@ -10,7 +10,7 @@ import type { SpillStorePort, TodoService, WorktreePort } from '../plugins/servi
 import type { PluginHook, PluginServices } from '../plugins/types.js';
 import type { JobBoardPort, SubagentInbox } from '../runtime/scheduler.js';
 import type { SandboxHandle } from '../sandbox/types.js';
-import type { FileAttachment, SessionFactory, SessionFailure, SessionPort } from '../session/types.js';
+import type { DocumentAttachment, FileAttachment, SessionFactory, SessionFailure, SessionPort } from '../session/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
 
 /** 循环用来记下工具触碰过的路径，并在下一步取走要注入的指令。 */
@@ -50,6 +50,8 @@ export interface RunTurnOptions {
   allowedTools?: ReadonlySet<string>;
   /** 用户随本条 prompt 提交的图片（data URL）。 */
   userImages?: string[];
+  /** 用户随本条 prompt 提交的 PDF 文档（data URL）。 */
+  userDocuments?: DocumentAttachment[];
   /** 用户以 @路径 提及的文件附件。 */
   attachments?: FileAttachment[];
   memory?: MemoryPort;

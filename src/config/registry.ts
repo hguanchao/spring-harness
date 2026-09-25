@@ -5,9 +5,10 @@
  * 「这个端点长什么样」，而不是「sph 怎么工作」。分开之后 config.toml 只回答「用哪个
  * 端点」，端点自身的一切都在这里，一个端点写一次。
  *
- * 字段是 `providers` / `baseUrl` / `apiKey` / `models` / `contextWindow` / `maxTokens`。
- * 刻意不支持三样东西：`!command`（等于从配置文件执行任意 shell）、`cost`（没有成本统计）、
- * `oauth`（没有内置登录目录）。
+ * 字段是 `providers` / `baseUrl` / `apiKey` / `models` / `contextWindow` / `maxTokens`，
+ * 模型级还接受 `cost`（每百万 token 单价，声明了才折算花费）、`reasoning`、`input`
+ * （能力声明，见 ModelDeclaration）。刻意不支持两样东西：`!command`（等于从配置文件
+ * 执行任意 shell）、`oauth`（没有内置登录目录）。
  *
  * 解析一律 fail-closed：缺 provider、重复模型 id、字段类型错误都直接抛错。声明是手写
  * 文件，静默忽略一个拼错的字段，表现为「配置明明写了却不生效」，最难排查。
@@ -18,6 +19,7 @@ import { isRecord } from '../util.js';
 import { writeAtomically } from './save.js';
 import { parseApiProtocol, parseCompat, type ApiProtocol } from './primitives.js';
 import type { CompatProfile } from './primitives.js';
+import type { ModelCostRates } from '../llm/client.js';
 import { ConfigError } from './errors.js';
 
 /** 一个模型声明的容量与协议；`api` / `compat` 省略即继承 provider。 */
@@ -29,6 +31,22 @@ export interface ModelDeclaration {
   compat?: CompatProfile;
   contextWindow?: number;
   maxTokens?: number;
+  /**
+   * 每百万 token 的美元单价。声明了它，用量事件与会话统计才会折算出美元花费；
+   * 不声明就只有 token 数——「不知道价格」和「免费」是两回事，宁可缺省。
+   */
+  cost?: ModelCostRates;
+  /**
+   * 模型是否支持推理档位。`false` 是唯一有行为的取值：配置的 reasoning_effort
+   * 不再发送，省掉一次「发了 → 400 → 降级 → 重发」的往返。省略 = 不干预，
+   * 交给既有链路（显式 off / 端点报文降级）。
+   */
+  reasoning?: boolean;
+  /**
+   * 模型接受的输入模态。缺省视为全收；声明里没有 `image` 时，图片附件在发送前
+   * 降级成一条说明文本——模型知道「图存在但我看不到」，而不是对着 8MB base64 吃 400。
+   */
+  input?: readonly ('text' | 'image')[];
 }
 
 export interface ProviderDeclaration {
@@ -162,6 +180,9 @@ function parseModel(raw: unknown, where: string): ModelDeclaration {
   const compat = parseCompat(raw.compat, `${where}.compat`);
   const contextWindow = parsePositiveInt(raw.contextWindow, `${where}.contextWindow`);
   const maxTokens = parsePositiveInt(raw.maxTokens, `${where}.maxTokens`);
+  const cost = parseCost(raw.cost, `${where}.cost`);
+  const reasoning = raw.reasoning === undefined ? undefined : parseBoolean(raw.reasoning, `${where}.reasoning`);
+  const input = parseInputModalities(raw.input, `${where}.input`);
   return {
     id,
     ...(name === undefined ? {} : { name }),
@@ -169,7 +190,53 @@ function parseModel(raw: unknown, where: string): ModelDeclaration {
     ...(compat === undefined ? {} : { compat }),
     ...(contextWindow === undefined ? {} : { contextWindow }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(cost === undefined ? {} : { cost }),
+    ...(reasoning === undefined ? {} : { reasoning }),
+    ...(input === undefined ? {} : { input }),
   };
+}
+
+/**
+ * `cost`：四项单价必须成组声明。价格数据抄自 models.dev 或厂商定价页，四项都抄得到；
+ * 只填一半会让「缓存 token 按什么价」变成猜，猜错就是静默多算或少算钱。
+ */
+function parseCost(value: unknown, where: string): ModelCostRates | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new ConfigError(`${where} must be an object`);
+  const rates: ModelCostRates = {
+    input: requireRate(value.input, `${where}.input`),
+    output: requireRate(value.output, `${where}.output`),
+    cacheRead: requireRate(value.cacheRead, `${where}.cacheRead`),
+    cacheWrite: requireRate(value.cacheWrite, `${where}.cacheWrite`),
+  };
+  return rates;
+}
+
+function requireRate(value: unknown, where: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new ConfigError(`${where} must be a non-negative number (USD per million tokens)`);
+  }
+  return value;
+}
+
+function parseBoolean(value: unknown, where: string): boolean {
+  if (typeof value !== 'boolean') throw new ConfigError(`${where} must be a boolean`);
+  return value;
+}
+
+const INPUT_MODALITIES = ['text', 'image'] as const;
+
+function parseInputModalities(value: unknown, where: string): readonly ('text' | 'image')[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ConfigError(`${where} must be a non-empty array of "text" / "image"`);
+  }
+  for (const item of value) {
+    if (!(INPUT_MODALITIES as readonly string[]).includes(item)) {
+      throw new ConfigError(`${where} accepts only "text" / "image", got: ${JSON.stringify(item)}`);
+    }
+  }
+  return value as readonly ('text' | 'image')[];
 }
 
 function parseApi(value: unknown, where: string): ApiProtocol {
@@ -325,6 +392,9 @@ export interface ResolvedModel {
   compat?: CompatProfile;
   contextWindow?: number;
   maxTokens?: number;
+  cost?: ModelCostRates;
+  reasoning?: boolean;
+  input?: readonly ('text' | 'image')[];
 }
 
 /**
@@ -350,6 +420,9 @@ export function resolveModel(
     ...(compat === undefined ? {} : { compat }),
     ...(declared?.contextWindow === undefined ? {} : { contextWindow: declared.contextWindow }),
     ...(declared?.maxTokens === undefined ? {} : { maxTokens: declared.maxTokens }),
+    ...(declared?.cost === undefined ? {} : { cost: declared.cost }),
+    ...(declared?.reasoning === undefined ? {} : { reasoning: declared.reasoning }),
+    ...(declared?.input === undefined ? {} : { input: declared.input }),
   };
 }
 

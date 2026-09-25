@@ -218,7 +218,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   /** 状态栏上的代理名。空字符串是默认全工具，不显示。 */
   private agentName = '';
 
-  private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+  private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0 };
   private contextTokens?: number;
 
   /**
@@ -696,6 +696,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         onAuxUsage: (usage, purpose) => this.recordAuxUsage(usage, purpose),
         ...(mentions.attachments.length > 0 ? { attachments: mentions.attachments } : {}),
         ...(mentions.images.length > 0 ? { userImages: mentions.images } : {}),
+        ...(mentions.documents.length > 0 ? { userDocuments: mentions.documents } : {}),
         ...(this.deps.spillRoot === undefined ? {} : { spill: this.openSpill() }),
         ...(this.subagentApprover === undefined ? {} : { subagentApprover: this.subagentApprover }),
       });
@@ -1020,12 +1021,14 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const prompt = data.promptTokens;
     const completion = data.completionTokens;
     const cached = data.cachedTokens;
+    const cost = data.costUsd;
     if (typeof prompt === 'number') {
       this.usage.promptTokens += prompt;
       this.contextTokens = prompt;
     }
     if (typeof completion === 'number') this.usage.completionTokens += completion;
     if (typeof cached === 'number') this.usage.cachedTokens += cached;
+    if (typeof cost === 'number') this.usage.costUsd += cost;
     this.currentIndicator?.setTokens(this.contextTokens);
   }
 
@@ -1034,19 +1037,21 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   private refreshCounters(): void {
-    const totals = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+    const totals = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0 };
     let lastPrompt: number | undefined;
     for (const record of this.session.readAll()) {
       if (record.type !== 'event' || record.kind !== 'usage') continue;
       const prompt = record.data.promptTokens;
       const completion = record.data.completionTokens;
       const cached = record.data.cachedTokens;
+      const cost = record.data.costUsd;
       if (typeof prompt === 'number') {
         totals.promptTokens += prompt;
         lastPrompt = prompt;
       }
       if (typeof completion === 'number') totals.completionTokens += completion;
       if (typeof cached === 'number') totals.cachedTokens += cached;
+      if (typeof cost === 'number') totals.costUsd += cost;
     }
     this.usage = totals;
     this.contextTokens = lastPrompt;

@@ -15,8 +15,8 @@ export type SubagentEvent =
   | { type: 'tool_start'; name: string; id: string; args: Record<string, unknown> }
   | { type: 'tool_end'; name: string; id: string; ok: boolean; content: string }
   | { type: 'error'; text: string }
-  /** 该子代理一次 LLM 调用的用量，供界面右侧实时累计。 */
-  | { type: 'usage'; promptTokens: number; completionTokens: number };
+  /** 该子代理一次 LLM 调用的用量，供界面右侧实时累计。costUsd 仅在模型声明了单价时出现。 */
+  | { type: 'usage'; promptTokens: number; completionTokens: number; costUsd?: number };
 
 export type AgentEvent =
   | { type: 'status'; text: string; level?: 'dim' | 'warn' | 'error' }
@@ -32,8 +32,8 @@ export type AgentEvent =
   | { type: 'tool_start'; name: string; id: string; args: Record<string, unknown> }
   | { type: 'tool_end'; name: string; id: string; ok: boolean; content: string }
   | { type: 'ask'; id: string; tool: string; detail: string }
-  /** cachedTokens 仅在端点上报缓存用量时出现。 */
-  | { type: 'usage'; promptTokens: number; completionTokens: number; cachedTokens?: number }
+  /** cachedTokens 仅在端点上报缓存用量时出现；costUsd 仅在模型声明了单价时出现。 */
+  | { type: 'usage'; promptTokens: number; completionTokens: number; cachedTokens?: number; costUsd?: number }
   | { type: 'error'; text: string }
   /**
    * 压缩把后续轮次挪到一个新会话。

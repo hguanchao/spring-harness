@@ -185,3 +185,56 @@ describe('upsertModelApi', () => {
     assert.match(readFileSync(path, 'utf8'), /\$MAIN_KEY/, '$VAR 原样保留');
   });
 });
+
+describe('模型级 cost / reasoning / input 声明', () => {
+  const base = (model: unknown): string =>
+    JSON.stringify({
+      providers: {
+        main: {
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'k',
+          api: 'chat-completions',
+          models: [model],
+        },
+      },
+    });
+
+  it('cost 四项单价与能力声明被解析进模型声明', () => {
+    const registry = parseRegistry(JSON.parse(base({
+      id: 'gpt-x',
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+      reasoning: false,
+      input: ['text'],
+    })), {});
+    const model = registry.providers[0]!.models[0]!;
+    assert.deepEqual(model.cost, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+    assert.equal(model.reasoning, false);
+    assert.deepEqual(model.input, ['text']);
+    // resolveModel 透传给运行时
+    const resolved = resolveModel(registry.providers[0]!, 'gpt-x');
+    assert.equal(resolved.reasoning, false);
+    assert.deepEqual(resolved.input, ['text']);
+    assert.ok(resolved.cost);
+  });
+
+  it('cost 缺一项就报错：半份价格让缓存计价变成猜', () => {
+    assert.throws(
+      () => parseRegistry(JSON.parse(base({ id: 'gpt-x', cost: { input: 3, output: 15 } })), {}),
+      /cost\.cacheRead must be a non-negative number/,
+    );
+  });
+
+  it('input 里出现未知模态直接报错', () => {
+    assert.throws(
+      () => parseRegistry(JSON.parse(base({ id: 'gpt-x', input: ['text', 'video'] })), {}),
+      /accepts only "text" \/ "image"/,
+    );
+  });
+
+  it('reasoning 非布尔报错', () => {
+    assert.throws(
+      () => parseRegistry(JSON.parse(base({ id: 'gpt-x', reasoning: 'yes' })), {}),
+      /reasoning must be a boolean/,
+    );
+  });
+});

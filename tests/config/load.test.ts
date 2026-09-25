@@ -65,9 +65,21 @@ describe('启动校验', () => {
   it('缺 provider 拒绝启动', () => {
     const dir = tempDir();
     writeFileSync(join(dir, 'models.json'), JSON.stringify(MINIMAL_REGISTRY), 'utf8');
+    // 文件存在但没写 provider 指针：字段级校验的报错。
+    writeFileSync(join(dir, 'config.toml'), '', 'utf8');
     assert.throws(
       () => loadConfig({ configPath: join(dir, 'config.toml'), registryPath: join(dir, 'models.json'), env: {} }),
       /provider must be a non-empty string/,
+    );
+  });
+
+  it('config.toml 缺失时报错带路径与指路', () => {
+    // 文件整个缺席是另一回事（正常流程下首启脚手架会生成模板）。
+    const dir = tempDir();
+    writeFileSync(join(dir, 'models.json'), JSON.stringify(MINIMAL_REGISTRY), 'utf8');
+    assert.throws(
+      () => loadConfig({ configPath: join(dir, 'config.toml'), registryPath: join(dir, 'models.json'), env: {} }),
+      /config\.toml not found/,
     );
   });
 

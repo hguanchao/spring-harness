@@ -9,6 +9,7 @@ import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { ConfigError, loadConfig } from '../config/load.js';
 import { loadRegistry } from '../config/registry.js';
+import { scaffoldUserHome } from '../config/scaffold.js';
 import { sphConfigPath, sphModelsPath, sphSpillRoot } from '../home.js';
 import { combineListeners } from '../agent/events.js';
 import type { TokenUsage } from '../llm/client.js';
@@ -290,6 +291,14 @@ async function main(): Promise<void> {
   }
 
   const workspaceRoot = resolveWorkspaceRoot(process.cwd());
+
+  // 首次运行：~/.sph 缺配置就生成参考模板（已有的绝不覆盖）。生成后 loadConfig 会在
+  // 示例 provider 的空 key 处给出指路报错——模板 + 明确的下一步，首启体验才算完整。
+  const scaffolded = scaffoldUserHome();
+  if (scaffolded.length > 0) {
+    for (const path of scaffolded) process.stderr.write(`sph: generated reference config: ${path}\n`);
+    process.stderr.write('sph: edit ~/.sph/models.json (fill in your endpoint & key), point ~/.sph/config.toml at it, then run sph again\n');
+  }
 
   if (args.command === 'sessions') {
     await runSessionsCommand(workspaceRoot, args.search);

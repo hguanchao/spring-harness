@@ -118,6 +118,22 @@ export function imageMime(path: string): string | undefined {
 }
 
 /**
+ * 单个 PDF 文档上限。Anthropic 的 document 输入限 32MB/请求（含整个会话），
+ * Responses 的 input_file 走 base64 同样吃请求体积；10MB 经 base64 膨胀后
+ * 仍给会话历史留足余地。更大的 PDF 走 shell 提取文本（pdftotext 等）。
+ */
+export const DOCUMENT_BYTE_LIMIT = 10 * 1024 * 1024;
+
+const DOCUMENT_MIME: Record<string, string> = {
+  '.pdf': 'application/pdf',
+};
+
+/** 按扩展名给文档附件定 MIME；目前只有 PDF。不在表里的返回 undefined。 */
+export function documentMime(path: string): string | undefined {
+  return DOCUMENT_MIME[fileExt(path)];
+}
+
+/**
  * 只读文件头部最多 maxBytes 字节。
  * 旧实现 readFileSync 整文件、再 subarray 截断，读一个 1GB 的日志就等于
  * 分配 1GB 内存；这里用 fd 直接限定读取长度，内存占用与文件大小解耦。

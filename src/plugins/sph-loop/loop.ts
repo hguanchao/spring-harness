@@ -1,7 +1,7 @@
 import type { RunTurnOptions } from '../../agent/driver.js';
 import {
   appendableMessage,
-  flushWireImages,
+  flushWireAttachments,
   loadCompaction,
   openCompactedSession,
   projectContext,
@@ -290,6 +290,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     role: 'user',
     content: options.prompt,
     images: options.userImages,
+    documents: options.userDocuments,
     attachments: options.attachments,
   });
   // 环境和跨轮次状态都在尾部。与上一条逐字相同就不再追加：重复快照只涨上下文，不提供新信息。
@@ -474,7 +475,12 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         options.listener?.({
           type: 'subagent_event',
           id: subId,
-          event: { type: 'usage', promptTokens: event.promptTokens, completionTokens: event.completionTokens },
+          event: {
+            type: 'usage',
+            promptTokens: event.promptTokens,
+            completionTokens: event.completionTokens,
+            ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }),
+          },
         });
         return;
       }
@@ -724,7 +730,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     // 投影 + 压缩落盘集中一处：超限重试要再走一遍同样的流程。
     const buildProjection = async (force: boolean): Promise<ChatMessage[]> => {
       const auxUsage = options.onAuxUsage;
-      flushWireImages(wire);
+      flushWireAttachments(wire);
       const projection = await projectContext({
         messages: mirror,
         compaction,
@@ -897,6 +903,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         promptTokens: reply.usage.promptTokens,
         completionTokens: reply.usage.completionTokens,
         ...(reply.usage.cachedTokens === undefined ? {} : { cachedTokens: reply.usage.cachedTokens }),
+        ...(reply.usage.costUsd === undefined ? {} : { costUsd: reply.usage.costUsd }),
       });
       // 提示缓存未命中：不打扰界面（一次性的 best-effort 缓存抖动不值得打断阅读），
       // 落成会话事件留痕——反复出现时在会话文件里看得到规律，sph export 也能带出来。
@@ -1059,7 +1066,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         }
         // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
         // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
-        if (options.spill && result.ok && !result.images?.length) {
+        if (options.spill && result.ok && !result.images?.length && !result.documents?.length) {
           const spilled = options.spill.persist(call.name, result.content);
           if (spilled !== undefined) result = { ...result, content: spilled };
         }
@@ -1072,6 +1079,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           toolCallId: call.id,
           toolName: call.name,
           images: result.images,
+          documents: result.documents,
         });
         // 失败历史落盘：成功对恢复没有价值，失败能让恢复后的模型知道上次卡在哪。
         if (!result.ok) {

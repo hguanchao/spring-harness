@@ -286,3 +286,50 @@ describe('applyResponsesEvent 审核拒绝与 incomplete', () => {
     }
   });
 });
+
+describe('toResponsesInput 文档', () => {
+  const documentMessage: ChatMessage = {
+    role: 'user',
+    content: '总结这份 PDF',
+    parts: [{ type: 'document', document: { filename: 'spec.pdf', url: 'data:application/pdf;base64,JVBERi0=' } }],
+  };
+
+  it('document part 变成 input_file，file_data 是 data URL', () => {
+    const items = toResponsesInput([documentMessage]);
+    const content = items[0]?.content as Array<Record<string, unknown>>;
+    assert.deepEqual(content[1], {
+      type: 'input_file',
+      filename: 'spec.pdf',
+      file_data: 'data:application/pdf;base64,JVBERi0=',
+    });
+  });
+
+  it('sendDocuments 关闭时降级为 input_text 说明，模型知道文件没附上', () => {
+    const items = toResponsesInput([documentMessage], { ...DEFAULT_REQUEST_CAPS, sendDocuments: false });
+    const content = items[0]?.content as Array<Record<string, unknown>>;
+    assert.equal(content.some((item) => item.type === 'input_file'), false);
+    assert.ok(
+      content.some((item) => item.type === 'input_text' && String(item.text).includes('spec.pdf')),
+      '降级说明必须带文件名',
+    );
+  });
+});
+
+describe('toResponsesInput 图片降级', () => {
+  it('supportsImages=false：input_image 降级为说明文本', () => {
+    const items = toResponsesInput(
+      [{
+        role: 'user',
+        content: '看图',
+        parts: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,xx' } }],
+      }],
+      DEFAULT_REQUEST_CAPS,
+      { supportsImages: false },
+    );
+    const content = items[0]?.content as Array<Record<string, unknown>>;
+    assert.equal(content.some((item) => item.type === 'input_image'), false);
+    assert.ok(
+      content.some((item) => item.type === 'input_text' && String(item.text).includes('does not accept image input')),
+    );
+  });
+});

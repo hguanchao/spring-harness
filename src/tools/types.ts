@@ -1,6 +1,7 @@
 import type { PluginServices } from '../plugins/types.js';
 import type { JobBoardPort } from '../plugins/services.js';
 import type { SkillEntry, TodoService } from '../plugins/services.js';
+import type { DocumentAttachment } from '../session/types.js';
 import { assertWriteAllowed } from '../sandbox/policy.js';
 import type { SandboxMode } from '../sandbox/types.js';
 
@@ -16,6 +17,8 @@ export interface ToolResult {
   content: string;
   /** 工具产出的图片（data URL），由 loop 注入后续消息上下文。 */
   images?: string[];
+  /** 工具产出的 PDF 文档（data URL），由 loop 注入后续消息上下文。 */
+  documents?: DocumentAttachment[];
 }
 
 /** 工具执行需要的一切。只放工具真正会读的成员——冗余字段会让每个新工具都要假装理解它们。 */

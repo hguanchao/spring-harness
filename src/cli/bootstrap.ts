@@ -380,13 +380,16 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         apiKey: provider.apiKey,
         model: overrides.model,
         api: resolved.api,
-        reasoningEffort: overrides.effort,
+        // 模型声明不支持推理档位时直接不发：省掉一次「发了 → 400 → 降级 → 重发」。
+        reasoningEffort: resolved.reasoning === false ? undefined : overrides.effort,
         maxTokens: overrides.maxTokens ?? options.maxTokens ?? config.maxTokens,
         headers: provider.headers,
         promptCache: config.promptCache,
         sessionId: session.id,
         compat: resolved.compat,
         maxRetries: config.maxRetries,
+        costRates: resolved.cost,
+        supportsImages: resolved.input === undefined || resolved.input.includes('image'),
       });
     },
     makeAuxClient(auxModel) {
@@ -403,7 +406,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         apiKey: auxProvider.apiKey,
         model: auxModel,
         api: resolved.api,
-        reasoningEffort: config.reasoningEffort,
+        reasoningEffort: resolved.reasoning === false ? undefined : config.reasoningEffort,
         // max_tokens 只在同源时继承：不同厂商的输出上限不同，把主模型的限额发给别人的模型
         // 会直接 400。跨端点时交给端点默认值（anthropic 适配层自带 8192 兜底）。
         maxTokens: sharesMainEndpoint ? config.maxTokens : undefined,
@@ -412,6 +415,8 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
         sessionId: session.id,
         compat: resolved.compat,
         maxRetries: config.maxRetries,
+        costRates: resolved.cost,
+        supportsImages: resolved.input === undefined || resolved.input.includes('image'),
       });
     },
     reloadMcp,

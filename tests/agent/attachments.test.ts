@@ -139,3 +139,34 @@ describe('attachmentWireSuffix', () => {
     assert.equal(attachmentWireSuffix([]), '');
   });
 });
+
+describe('collectFileMentions PDF', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'sph-attach-pdf-'));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('PDF 提及转成文档附件，filename 取文件名，不进 attachments', () => {
+    writeFileSync(join(root, 'spec.pdf'), '%PDF-1.4 fake body');
+    const { attachments, images, documents } = collectFileMentions('总结 @spec.pdf', root);
+    assert.deepEqual(attachments, []);
+    assert.deepEqual(images, []);
+    assert.equal(documents.length, 1);
+    assert.equal(documents[0]!.filename, 'spec.pdf');
+    assert.match(documents[0]!.url, /^data:application\/pdf;base64,/);
+  });
+
+  it('超限 PDF 落成带提取建议的 error 占位，不进 documents', () => {
+    writeFileSync(join(root, 'big.pdf'), Buffer.alloc(11 * 1024 * 1024));
+    const { attachments, documents } = collectFileMentions('看 @big.pdf', root);
+    assert.deepEqual(documents, []);
+    assert.equal(attachments.length, 1);
+    assert.match(attachments[0]!.error ?? '', /pdf exceeds/);
+    assert.match(attachments[0]!.error ?? '', /pdftotext/);
+  });
+});

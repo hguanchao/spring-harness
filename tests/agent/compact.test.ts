@@ -9,7 +9,7 @@ import { jsonlSessionFactory } from '../../src/plugins/sph-session/store.js';
 import {
   estimateTokens,
   emptyWire,
-  flushWireImages,
+  flushWireAttachments,
   openCompactedSession,
   pairingBalancedCut,
   pushSessionMessage,
@@ -62,7 +62,7 @@ describe('wire incremental projection', () => {
     const full = toChatMessages(rows);
     const state = emptyWire();
     for (const row of rows) pushSessionMessage(state, row);
-    flushWireImages(state);
+    flushWireAttachments(state);
     assert.deepEqual(state.messages, full);
   });
 
@@ -386,5 +386,43 @@ describe('压缩新开会话', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('wire 文档投影', () => {
+  const document = { filename: 'spec.pdf', url: 'data:application/pdf;base64,JVBERi0=' };
+
+  it('user 消息的 documents 变成 document parts，与 images 同列表', () => {
+    const rows = [
+      session({ role: 'user', content: '看这份合同', images: ['data:image/png;base64,xx'], documents: [document] }),
+    ];
+    const [user] = toChatMessages(rows);
+    assert.deepEqual(user?.parts, [
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,xx' } },
+      { type: 'document', document },
+    ]);
+  });
+
+  it('tool 消息的 documents 走侧信道，flush 成一条 [tool result document]', () => {
+    const rows = [
+      session({ role: 'user', content: '读 spec.pdf' }),
+      session({
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'read', arguments: { path: 'spec.pdf' } }],
+      }),
+      session({ role: 'tool', content: 'pdf attached', toolCallId: 'c1', toolName: 'read', documents: [document] }),
+    ];
+    const messages = toChatMessages(rows);
+    assert.deepEqual(messages.at(-1), {
+      role: 'user',
+      content: '[tool result document]',
+      parts: [{ type: 'document', document }],
+    });
+    // 全量重建与增量投影一致：文档侧信道不破坏投影不变式。
+    const state = emptyWire();
+    for (const row of rows) pushSessionMessage(state, row);
+    flushWireAttachments(state);
+    assert.deepEqual(state.messages, messages);
   });
 });

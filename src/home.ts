@@ -21,10 +21,11 @@ export function sphSessionsRoot(): string {
 /**
  * 端点与模型的声明注册表。
  *
- * 全部由人写：provider 的 baseUrl / apiKey / headers 与每个模型的 id / contextWindow /
+ * 由人维护：provider 的 baseUrl / apiKey / headers 与每个模型的 id / contextWindow /
  * maxTokens 都在这里声明，`config.toml` 用 `provider` + `model` 两个指针选择。不再做
  * 上游 /models 拉取缓存——上游会新增模型，但缓存永不刷新只会静默地给出旧列表；既然
- * 目录靠人维护，就让唯一来源也是人。
+ * 目录靠人维护，就让唯一来源也是人。文件缺席时入口处只生成一份可解析的参考模板
+ * （见 config/scaffold.ts），绝不覆盖已存在的文件。
  */
 export function sphModelsPath(): string {
   return underHome('models.json');

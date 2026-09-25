@@ -201,8 +201,8 @@ export function shouldSuppressAutoRecapDisplay(raw: string, summary: string): bo
  *
  * 快照可能停在「assistant 发起工具调用、结果还没回来」的位置（后台任务唤醒、
  * 异常中断），此时 Anthropic Messages 协议会因为 tool_use 没有配对的 tool_result 而拒绝整条请求。
- * 工具结果图片（`[tool result image]`）是投影里跟在 tool 消息后的一条 user 消息，
- * 同属这一轮工具往来，一并摘掉。
+ * 工具结果图片 / 文档（`[tool result image]` / `[tool result document]`）是投影里跟在
+ * tool 消息后的一条 user 消息，同属这一轮工具往来，一并摘掉。
  */
 export function popTrailingToolRun(messages: ChatMessage[]): void {
   while (messages.length > 0) {
@@ -215,7 +215,7 @@ export function popTrailingToolRun(messages: ChatMessage[]): void {
       messages.pop();
       continue;
     }
-    if (last.role === 'user' && last.content === '[tool result image]') {
+    if (last.role === 'user' && (last.content === '[tool result image]' || last.content === '[tool result document]')) {
       messages.pop();
       continue;
     }
