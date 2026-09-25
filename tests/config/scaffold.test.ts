@@ -23,17 +23,32 @@ describe('scaffoldUserHome 首次运行脚手架', () => {
     const home = makeHome();
     const created = scaffoldUserHome({ homeDir: home });
     assert.equal(created.length, 2);
-    const registry = parseRegistry(JSON.parse(readFileSync(join(home, 'models.json'), 'utf8')), {});
+    // 模板 apiKey 是 $OPENAI_API_KEY 占位：设了变量即能原样解析（未设时的报错见下一个用例）。
+    const registry = parseRegistry(JSON.parse(readFileSync(join(home, 'models.json'), 'utf8')), {
+      OPENAI_API_KEY: 'test-key',
+    });
     assert.deepEqual(registry.providers.map((provider) => provider.name), ['example-openai']);
-    assert.equal(registry.providers[0]!.api, 'chat-completions');
+    const provider = registry.providers[0]!;
+    assert.equal(provider.api, 'chat-completions');
+    // 模板是完整字段参考：compat 与模型级 cost 都要能原样解析。
+    assert.deepEqual(provider.compat, {
+      promptCacheKey: true,
+      promptCacheRetention: false,
+      streamOptions: true,
+      sessionAffinity: 'off',
+    });
+    const full = provider.models[0]!;
+    assert.deepEqual(full.cost, { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 });
+    assert.deepEqual(full.input, ['text', 'image']);
     // 模型级 api 覆盖：缺席继承 provider,写了的按模型走——三种协议各演示一个。
-    const models = registry.providers[0]!.models;
-    assert.deepEqual(models.map((model) => model.api), [undefined, 'responses', 'anthropic-messages']);
+    assert.deepEqual(provider.models.map((model) => model.api), [undefined, 'responses', 'anthropic-messages']);
   });
 
-  it('config.toml 模板指向示例 provider：未填 key 时启动报错点名它，而不是 401', () => {
+  it('config.toml 模板指向示例 provider：key 未设置时启动报错指出变量名', () => {
     const home = makeHome();
     scaffoldUserHome({ homeDir: home });
+    // 占位用 $OPENAI_API_KEY 而不是空串：headers 非空时空串是「合法免鉴权」，
+    // 会静默启动到第一次请求 401；缺变量的报错则直接告诉用户该设哪个变量。
     assert.throws(
       () => loadConfig({
         configPath: join(home, 'config.toml'),
@@ -41,8 +56,8 @@ describe('scaffoldUserHome 首次运行脚手架', () => {
         env: {},
       }),
       (error: unknown) => error instanceof ConfigError
-        && /example-openai/.test(error.message)
-        && /no apiKey/.test(error.message),
+        && /\$OPENAI_API_KEY/.test(error.message)
+        && /not set/.test(error.message),
     );
   });
 
