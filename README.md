@@ -14,6 +14,10 @@ It is written from scratch in TypeScript with five runtime dependencies — no C
 - **MCP** — provided by the bundled `sph-mcp` plugin: stdio, streamable HTTP, and legacy SSE, discovered from five config sources, with lazy reconnect and hot reload. A `url` is HTTP unless `transport = "sse"` or the path ends in `/sse`. On Windows, bare commands (`npx`…) are resolved via `PATH × PATHEXT`; `.cmd`/`.bat` launchers run through `cmd.exe` with cmd-safe escaping (a bare `npx` is not an `.exe`, so naive spawning fails with ENOENT).
 - **Skills** — `SKILL.md` catalogs discovered from four roots.
 
+## Provenance
+
+sph is an independent, from-scratch implementation — no code, prompts, or documentation from other agent projects is included, and none is derived from them. It shares its shape with Pi, Claude Code, and Codex CLI because that shape is what a terminal coding agent converges on: a read/edit/bash-style core toolset, append-only JSONL sessions, a streaming tool-calling loop, and an interactive/one-shot/JSON/RPC mode split. Where it diverges, the divergence is deliberate: every capability behind a typed plugin seam (model, session, loop, tools, MCP, todo, plan, sandbox, subagent, scheduler, UI), approvals and a same-host sandbox as first-class layers rather than afterthoughts, subagents with worktree isolation, three hand-written protocol adapters covering any OpenAI-compatible endpoint instead of per-vendor adapters, and a compact codebase (≈40k lines, comments in Chinese recording the *why* behind every constraint) meant to be read end-to-end by one person.
+
 ## Requirements
 
 - Node.js **>= 22**. Bundled plugins are compiled with sph, so only **third-party** `.ts` plugins need **>= 22.18** (>= 23.6 on the 23 line) — that is when Node's native type stripping became the default. Ship a third-party plugin as `.js`/`.mjs` to support older Node.
