@@ -772,14 +772,14 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         const prompt = this.sendAfterInterrupt;
         this.sendAfterInterrupt = undefined;
         void this.executeTurn(prompt, true);
-        // biome-ignore lint/correctness/noUnsafeFinally: 轮次收尾接续开新轮是刻意的队列语义，return 用于阻止后续分支
+        // 轮次收尾接续开新轮是刻意的队列语义，return 用于阻止后续分支
         return;
       }
       if (!this.running && steerNext !== undefined) {
         this.steerBar.dropFirst();
         this.steerBar.resetState();
         void this.executeTurn(steerNext, true);
-        // biome-ignore lint/correctness/noUnsafeFinally: 同上——收尾后立即投递队首挂起消息
+        // 同上——收尾后立即投递队首挂起消息
         return;
       }
       if (!this.running && follow) void this.executeTurn(follow, true);
