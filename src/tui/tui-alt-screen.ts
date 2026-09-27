@@ -766,10 +766,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		if (this.handleRightClickCopy(raw)) return;
 		if (type === "press" && this.decodeMouseButton(raw.button) === "left") {
-			// 未被组件接管的按压（工具/思考行的正文按划词语义放行）先做命中测试：
-			// 落点落在某个可选中行的 region 里，就选中/保留那一行——否则点正文
-			// 会把刚钉上的选中条 ❙ 误清掉；真点在空白处时 selectable 为 undefined，
-			// selectRow(undefined) 维持「点空白取消选中」的原语义。
+			// 未被组件接管的按压（工具/思考行的正文按划词语义放行）交给 chrome。
+			// 行首的 ❙ 选中标记已移除，chrome 侧的 pressEmpty 现在是空语义占位。
 			const boxes = this.currentLayout ? getLayoutBoxesAt(this.currentLayout, raw.x, raw.y) : [];
 			if (this.chrome?.pressEmpty(boxes.map((box) => box.component))) this.requestViewportRender();
 		}

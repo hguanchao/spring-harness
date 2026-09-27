@@ -399,7 +399,7 @@ export class ToolGroupComponent extends VStack {
   ): TuiMouseEventResult | undefined {
     if (event.button !== 'left') return undefined;
     // 分行路由（y 为成员块内行号，0 = 标题行），与工具行同一套约定：
-    // - 标题行按压：钉行（❙ 标记）并接管——双击开合的触发面。
+    // - 标题行按压：接管——双击开合的触发面。
     // - 正文行按压：放行给全屏划词——推理正文才是要拖动复制的内容。
     //   正文上的双击会经「原位松开合成 click」回到这里，同样计开合（收起）。
     if (event.type === 'press') {

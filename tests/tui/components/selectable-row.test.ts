@@ -1,62 +1,50 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { LayoutBox, LayoutFrame } from '../../../src/tui/layout.js';
-import type { Component } from '../../../src/tui/tui.js';
+import type { Component, TuiMouseEvent } from '../../../src/tui/tui.js';
 import {
   asSelectableRow,
-  compositeRowSelection,
-  selectRow,
+  handleSelectablePress,
+  isSelectableRow,
 } from '../../../src/plugins/sph-tui/components/selectable-row.js';
 
-function box(component: Component, rect: { x: number; y: number; width: number; height: number }): LayoutBox {
-  return { component, rect, clip: { ...rect }, children: [], layer: 0 };
+function pressEvent(button: 'left' | 'right' = 'left'): TuiMouseEvent {
+  return {
+    type: 'press',
+    button,
+    x: 3,
+    y: 0,
+    screenX: 3,
+    screenY: 3,
+    width: 80,
+    height: 1,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  };
 }
 
-function frame(root: LayoutBox, width = 20, height = 8): LayoutFrame {
-  return { root, width, height, lines: [] };
-}
-
-function blank(rows: number, cols: number): string[] {
-  return Array.from({ length: rows }, () => ' '.repeat(cols));
-}
-
-/**
- * 只当身份标记用的假组件。
- *
- * 这两条用例关心的是「选择标记画在哪一行、滚出裁剪区要不要画」，组件自身行为无关紧要，
- * 所以给一个最小可用实现——`Component` 要求 `render` 与 `invalidate` 两个成员，
- * 少了 `invalidate` 编译期就不成立（此前靠 tsx 不做类型检查才漏过去）。
- */
 function stubRow(): Component {
   return { render: () => [''], invalidate() {} };
 }
 
-describe('compositeRowSelection', () => {
-  it('只在标题行画 ❙，不顺着展开后的正文往下铺', () => {
+/**
+ * 可选行的按压接管。行首的 ❙ 选中标记已移除——它总被读成行前缀的一部分(双击
+ * 展开详情后恰好落在工具行左侧),这里只守「按下接管、其余放行」的语义。
+ */
+describe('可选行按压接管', () => {
+  it('左键按下被接管——双击开合的触发面，不进全屏划词', () => {
     const row = asSelectableRow(stubRow());
-    selectRow(row);
-    const screen = blank(8, 20);
-    const out = compositeRowSelection(
-      screen,
-      frame(box(row, { x: 0, y: 2, width: 20, height: 5 })),
-      20,
-    );
-    assert.match(out[2] ?? '', /❙/);
-    assert.equal(out[3], screen[3], '正文行不应被 ❙ 盖住');
-    assert.equal(out[4], screen[4]);
-    assert.equal(out[5], screen[5]);
-    assert.equal(out[6], screen[6]);
-    selectRow(undefined);
+    assert.equal(isSelectableRow(row), true);
+    assert.ok(handleSelectablePress(row, pressEvent())?.handled);
   });
 
-  it('标题滚出裁剪区时不画', () => {
+  it('非左键与非按压事件放行', () => {
     const row = asSelectableRow(stubRow());
-    selectRow(row);
-    const root = box(row, { x: 0, y: 0, width: 20, height: 4 });
-    root.clip = { x: 0, y: 2, width: 20, height: 2 };
-    const screen = blank(8, 20);
-    const out = compositeRowSelection(screen, frame(root), 20);
-    assert.deepEqual(out, screen);
-    selectRow(undefined);
+    assert.equal(handleSelectablePress(row, pressEvent('right')), undefined);
+    assert.equal(handleSelectablePress(row, { ...pressEvent(), type: 'click' }), undefined);
+  });
+
+  it('未打标记的组件不被认领为可选行', () => {
+    assert.equal(isSelectableRow(stubRow()), false);
   });
 });

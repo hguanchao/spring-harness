@@ -3,7 +3,6 @@ import { describe, it } from 'node:test';
 import type { TUI, TuiMouseEvent } from '../../../src/tui/index.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from '../../../src/plugins/sph-tui/components/tool-execution.js';
 import { ToolGroupComponent } from '../../../src/plugins/sph-tui/components/tool-group.js';
-import { selectRow } from '../../../src/plugins/sph-tui/components/selectable-row.js';
 
 let renderCount = 0;
 let contentCount = 0;
@@ -353,13 +352,9 @@ describe('ToolGroupComponent 思考正文的交互', () => {
       return group.handleMouse(event);
     };
 
-    try {
-      // 标题行（成员块局部 y=0）：钉行（❙）并接管——双击开合的触发面。
-      assert.ok(press(titleY)?.handled, '标题行按压应被接管');
-      // 正文行（y≠0）：放行——TUI 层按划词语义接手（selectRow 兜底 + 全屏选词）。
-      assert.equal(press(bodyY), undefined, '正文行按压应放行给划词');
-    } finally {
-      selectRow(undefined);
-    }
+    // 标题行（成员块局部 y=0）：接管——双击开合的触发面。
+    assert.ok(press(titleY)?.handled, '标题行按压应被接管');
+    // 正文行（y≠0）：放行——TUI 层按划词语义接手（全屏选词）。
+    assert.equal(press(bodyY), undefined, '正文行按压应放行给划词');
   });
 });

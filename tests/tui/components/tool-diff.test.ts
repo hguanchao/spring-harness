@@ -96,3 +96,41 @@ describe('工具行 diff', () => {
     assert.equal(expanded.some((row) => row.includes('more')), false);
   });
 });
+
+/**
+ * 展开详情的竖轨：详情块整块挂在 `│` 上，轨与成员行前缀（`▸`/`▾`，第 5 列）同列，
+ * 内容仍从第 8 列起——和 Claude Code / Codex 的工具输出同款，详情一眼可知属于哪一行。
+ */
+describe('详情竖轨', () => {
+  function expandedBashRows(width: number): string[] {
+    const tool = new ToolExecutionComponent('bash', 'b1', { command: 'echo hi' }, ui);
+    tool.setCompact(true);
+    tool.markExecutionStarted();
+    tool.updateResult({ content: 'hi', isError: false });
+    tool.setExpanded(true);
+    return tool.render(width).map((row) => row.replace(/\x1b\[[0-9;]*m/g, ''));
+  }
+
+  it('详情行行首是竖轨，轨后内容仍落在第 8 列', () => {
+    const body = expandedBashRows(80).filter((row) => row.trim() !== '' && !row.includes('Bash'));
+    assert.ok(body.length > 0, '展开后应有详情行');
+    for (const row of body) {
+      assert.ok(row.startsWith('     │'), `详情行应以 5 空格 + 竖轨开头，实际: ${JSON.stringify(row)}`);
+      assert.match(row.slice(8), /\S/, '轨后的空格应把内容顶到第 8 列');
+      assert.equal(row.slice(5, 8), '│  ');
+    }
+  });
+
+  it('省略行（… N more）也在竖轨上，整块连贯', () => {
+    const tool = new ToolExecutionComponent('bash', 'b2', { command: 'seq 20' }, ui);
+    tool.setCompact(true);
+    tool.markExecutionStarted();
+    tool.updateResult({ content: Array.from({ length: 12 }, (_, i) => `out ${i + 1}`).join('\n'), isError: false });
+    tool.setExpanded(true);
+    const body = tool.render(80)
+      .map((row) => row.replace(/\x1b\[[0-9;]*m/g, ''))
+      .filter((row) => row.includes('more'));
+    assert.ok(body.length > 0, '应有省略提示行');
+    assert.ok(body.every((row) => row.startsWith('     │')), '省略行也要在竖轨上');
+  });
+});

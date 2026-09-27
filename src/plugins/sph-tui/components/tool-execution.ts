@@ -7,6 +7,8 @@
  *
  * 前缀按状态：折叠 `▸`、展开 `▾`、失败 `×`，箭头与行文同色（muted）；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
+ * 展开后的详情块整块挂在一条竖轨（`│`）上：轨与标题前缀同列，内容对齐详情缩进，
+ * 和 Claude Code / Codex 的工具输出同款——详情看一眼就知道属于上面的哪一行。
  */
 
 import { Container, MouseRegion, Text, truncateToWidth, type TUI, visibleWidth, wrapTextWithAnsi } from '../../../tui/index.js';
@@ -47,6 +49,15 @@ export const TOOL_MEMBER_INDENT = 5;
 /** 详情相对成员行再缩进，对齐前缀之后的标题列。 */
 export const TOOL_DETAIL_INDENT = 8;
 
+/**
+ * 详情块每行的左缘：竖轨 `│` 落在成员行前缀（`▸`/`▾`）同一列，轨后的空格把内容
+ * 顶到 TOOL_DETAIL_INDENT——可见宽度与纯缩进一致，折行宽度计算不用跟着变。
+ */
+function detailRailPad(): string {
+  const railColumns = TOOL_DETAIL_INDENT - TOOL_MEMBER_INDENT - 1;
+  return `${' '.repeat(TOOL_MEMBER_INDENT)}${theme.fg('muted', '│')}${' '.repeat(railColumns)}`;
+}
+
 function previewWindow(toolName: string): { first: number; last: number } {
   switch (toolName) {
     case 'read':
@@ -64,9 +75,9 @@ function previewWindow(toolName: string): { first: number; last: number } {
   }
 }
 
-/** 按左缩进折行并上色；每行单独着色，避免整块 ANSI 跨行把缩进吃掉。 */
+/** 按左缩进折行并上色，行首带详情竖轨；每行单独着色，避免整块 ANSI 跨行把缩进吃掉。 */
 function paintIndented(text: string, width: number, indent: number, paint: (s: string) => string): string {
-  const pad = ' '.repeat(indent);
+  const pad = detailRailPad();
   const inner = Math.max(1, width - indent);
   const lines: string[] = [];
   for (const raw of text.split(/\r\n|\r|\n/)) {
@@ -223,7 +234,7 @@ export class ToolExecutionComponent extends Container {
       }
       if (event.button !== 'left') return undefined;
       // 分行路由（y 为组件内行号，0 = 标题行）：
-      // - 标题行按压：钉行（❙ 标记）并接管，供合成 click——双击展开的触发面。
+      // - 标题行按压：接管，供合成 click——双击展开的触发面。
       // - 正文行按压：放行给全屏划词——工具输出是拖动复制的主要内容，划选后右键复制。
       //   正文上的双击会经「原位松开合成 click」回到这里：双击详情同样计开合（展开态即收起），
       //   划词路径顺带选中的那个词，会在 toggle 后的清选区里一并抹掉。
@@ -488,7 +499,7 @@ export class ToolExecutionComponent extends Container {
       return;
     }
     const skipped = visual.length - cap;
-    const pad = ' '.repeat(TOOL_DETAIL_INDENT);
+    const pad = detailRailPad();
     const head = visual.slice(0, first).map((line) => `${pad}${paint(line)}`);
     const tail = visual.slice(-last).map((line) => `${pad}${paint(line)}`);
     const ellipsis = `${pad}${theme.fg('muted', (this.toolName === 'bash' || this.toolName === 'pwsh') && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
@@ -500,7 +511,7 @@ export class ToolExecutionComponent extends Container {
    * write 的行全是新增，先标明这是写入内容，不是相对旧文件的差异。
    */
   private paintChange(change: FileChange, width: number): string {
-    const pad = ' '.repeat(TOOL_DETAIL_INDENT);
+    const pad = detailRailPad();
     const inner = Math.max(1, width - TOOL_DETAIL_INDENT);
     const limit = this.expanded || this.fullDetail ? DIFF_EXPANDED_LINES : DIFF_PREVIEW_LINES;
     const out: string[] = [];
