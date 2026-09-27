@@ -217,6 +217,8 @@ export interface OverlayOptions {
 	// === Sizing ===
 	/** Width in columns, or percentage of terminal width (e.g., "50%") */
 	width?: SizeValue;
+	/** Visual and keyboard priority among overlays. Equal priorities use focus order. */
+	priority?: number;
 	/** Minimum width in columns */
 	minWidth?: number;
 	/**
@@ -710,7 +712,7 @@ export abstract class TuiBase extends Container implements TUI {
 		};
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
-		if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
+		if (!options?.nonCapturing && this.isOverlayVisible(entry) && this.getTopmostVisibleOverlay() === entry) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -748,7 +750,7 @@ export abstract class TuiBase extends Container implements TUI {
 					// Restore focus to this overlay when showing (if it's actually visible)
 					if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
 						entry.focusOrder = ++this.focusOrderCounter;
-						this.setFocus(component);
+						if (this.getTopmostVisibleOverlay() === entry) this.setFocus(component);
 					}
 				}
 				this.requestViewportRender();
@@ -757,7 +759,7 @@ export abstract class TuiBase extends Container implements TUI {
 			focus: () => {
 				if (!this.overlayStack.includes(entry) || !this.isOverlayVisible(entry)) return;
 				entry.focusOrder = ++this.focusOrderCounter;
-				this.setFocus(component);
+				if (this.getTopmostVisibleOverlay() === entry) this.setFocus(component);
 				this.requestViewportRender();
 			},
 			unfocus: (unfocusOptions) => {
@@ -801,11 +803,12 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Hide the topmost overlay and restore previous focus. */
 	hideOverlay(): void {
-		const overlay = this.overlayStack[this.overlayStack.length - 1];
+		const overlay = this.getTopmostVisibleOverlay() ?? this.overlayStack[this.overlayStack.length - 1];
 		if (!overlay) return;
 		this.clearOverlayFocusRestoreFor(overlay);
 		this.retargetOverlayPreFocus(overlay);
-		this.overlayStack.pop();
+		const index = this.overlayStack.indexOf(overlay);
+		if (index !== -1) this.overlayStack.splice(index, 1);
 		if (this.focusedComponent === overlay.component) {
 			// Find topmost visible overlay, or fall back to preFocus
 			const topVisible = this.getTopmostVisibleOverlay();
@@ -829,8 +832,11 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Keep overlay containers as keyboard focus owners when a nested control is clicked. */
 	protected resolveMouseFocusTarget(component: Component): Component {
-		for (let index = this.overlayStack.length - 1; index >= 0; index--) {
-			const overlay = this.overlayStack[index]!;
+		const overlays = this.overlayStack
+			.filter((overlay) => this.isOverlayVisible(overlay))
+			.sort((a, b) => this.overlayPriority(a) - this.overlayPriority(b) || a.focusOrder - b.focusOrder);
+		for (let index = overlays.length - 1; index >= 0; index--) {
+			const overlay = overlays[index]!;
 			if (this.isOverlayVisible(overlay) && this.containsComponent(overlay.component, component)) {
 				return overlay.component;
 			}
@@ -881,11 +887,21 @@ export abstract class TuiBase extends Container implements TUI {
 		let topmost: OverlayStackEntry | undefined;
 		for (const overlay of this.overlayStack) {
 			if (overlay.options?.nonCapturing || !this.isOverlayVisible(overlay)) continue;
-			if (!topmost || overlay.focusOrder > topmost.focusOrder) {
-				topmost = overlay;
-			}
+			if (!topmost || this.isOverlayAbove(overlay, topmost)) topmost = overlay;
 		}
 		return topmost;
+	}
+
+	private isOverlayAbove(candidate: OverlayStackEntry, current: OverlayStackEntry): boolean {
+		return (
+			this.overlayPriority(candidate) > this.overlayPriority(current) ||
+			(this.overlayPriority(candidate) === this.overlayPriority(current) && candidate.focusOrder > current.focusOrder)
+		);
+	}
+
+	private overlayPriority(entry: OverlayStackEntry): number {
+		const priority = entry.options?.priority;
+		return priority !== undefined && Number.isFinite(priority) ? priority : 0;
 	}
 
 	override invalidate(): void {
@@ -1194,7 +1210,7 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 	}
 
-	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
+	/** Composite by priority, then focus order; later entries in this ascending list paint on top. */
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) {
 			this.renderedOverlayLayouts = [];
@@ -1209,7 +1225,9 @@ export abstract class TuiBase extends Container implements TUI {
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
-		visibleEntries.sort((a, b) => a.focusOrder - b.focusOrder);
+		visibleEntries.sort((a, b) =>
+			this.overlayPriority(a) - this.overlayPriority(b) || a.focusOrder - b.focusOrder,
+		);
 		for (const entry of visibleEntries) {
 			const { component, options } = entry;
 

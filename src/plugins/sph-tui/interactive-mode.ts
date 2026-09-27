@@ -81,7 +81,7 @@ import {
 } from '../../tui/index.js';
 import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
 import { InteractiveApprover, type ApprovalUi } from './permission.js';
-import { showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
+import { APPROVAL_OVERLAY_PRIORITY, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import { renderPluginsReport, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
 import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from './components/interaction.js';
@@ -1277,6 +1277,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       title: `Approve ${request.tool}?`,
       bodyText: body,
       bodyFormat: 'plain',
+      // 审批是安全边界；普通帮助/设置弹窗不能覆盖它，也不能抢走它的键盘焦点。
+      priority: APPROVAL_OVERLAY_PRIORITY,
       items: [
         { value: 'allow', label: 'Allow once' },
         { value: 'session', label: `Allow ${scope} for this session` },

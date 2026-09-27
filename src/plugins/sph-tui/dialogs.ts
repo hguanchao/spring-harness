@@ -488,11 +488,13 @@ function settleOnce<T>(handle: OverlayHandle, resolve: (value: T) => void): (val
 const DIALOG_WIDTH = '72%';
 const DIALOG_MAX_HEIGHT = '60%';
 const DIALOG_MAX_WIDTH = 84;
+export const APPROVAL_OVERLAY_PRIORITY = 100;
 
-function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT): {
+function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT, priority = 0): {
 	width: SizeValue;
 	maxHeight: SizeValue;
 	maxWidth: number;
+	priority: number;
 	anchor: 'center';
 	margin: number;
 	padX: number;
@@ -501,6 +503,7 @@ function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT): {
 		width: DIALOG_WIDTH,
 		maxHeight,
 		maxWidth: DIALOG_MAX_WIDTH,
+		priority,
 		anchor: 'center',
 		margin: 1,
 		// 弹窗两侧各留两列空白：浮层只盖自己的列区间，不留白的话底稿文字会直接
@@ -520,6 +523,8 @@ export function showSelectDialog(
 		bodyText?: string;
 		/** 正文渲染方式；含命令、路径等需要逐字展示的内容时用 plain。 */
 		bodyFormat?: DialogBodyFormat;
+		/** 更高优先级的弹窗会压过普通面板并保留键盘焦点。 */
+		priority?: number;
 		width?: SizeValue;
 		maxHeight?: SizeValue;
 	},
@@ -535,7 +540,7 @@ export function showSelectDialog(
 			() => rowBudget(tui, maxHeight),
 			options.bodyFormat ?? 'markdown',
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
+		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight, options.priority));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSelect((item) => finish(item.value));
 		dialog.onCancel(() => finish(undefined));
@@ -545,7 +550,7 @@ export function showSelectDialog(
 /** 单行输入对话框；返回输入值，取消返回 undefined。 */
 export function showInputDialog(
 	tui: TUI,
-	options: { title: string; initialValue?: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue },
+	options: { title: string; initialValue?: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue; priority?: number },
 ): Promise<string | undefined> {
 	return new Promise((resolve) => {
 		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
@@ -555,7 +560,7 @@ export function showInputDialog(
 			options.hint ?? 'Enter confirm · Esc cancel',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
+		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight, options.priority));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSubmit((value) => finish(value));
 		dialog.setCloseHandler(() => finish(undefined));
@@ -565,7 +570,7 @@ export function showInputDialog(
 /** 确认对话框；返回是否确认。 */
 export async function showConfirmDialog(
 	tui: TUI,
-	options: { title: string; message: string; confirmLabel?: string; cancelLabel?: string },
+	options: { title: string; message: string; confirmLabel?: string; cancelLabel?: string; priority?: number },
 ): Promise<boolean> {
 	const items: SelectItem[] = [
 		{ value: 'confirm', label: options.confirmLabel ?? 'Confirm' },
@@ -576,6 +581,7 @@ export async function showConfirmDialog(
 		bodyText: options.message,
 		items,
 		maxVisible: 2,
+		priority: options.priority,
 	});
 	return selected === 'confirm';
 }
@@ -588,16 +594,16 @@ export async function showConfirmDialog(
  */
 export function showLoadingDialog(
 	tui: TUI,
-	options: { title: string; text: string; width?: SizeValue },
+	options: { title: string; text: string; width?: SizeValue; priority?: number },
 ): OverlayHandle {
 	const dialog = new MessageDialog(options.title, options.text, '', () => rowBudget(tui, DIALOG_MAX_HEIGHT));
-	return tui.showOverlay(dialog, overlayOptions());
+	return tui.showOverlay(dialog, overlayOptions(DIALOG_MAX_HEIGHT, options.priority));
 }
 
 /** 只读长文本对话框（帮助、状态、待办、任务等）。 */
 export function showMessageDialog(
 	tui: TUI,
-	options: { title: string; text: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue },
+	options: { title: string; text: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue; priority?: number },
 ): Promise<void> {
 	return new Promise((resolve) => {
 		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
@@ -607,7 +613,7 @@ export function showMessageDialog(
 			options.hint ?? 'Esc close',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
+		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight, options.priority));
 		const finish = settleOnce<void>(handle, resolve);
 		dialog.setCloseHandler(() => finish());
 	});

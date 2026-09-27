@@ -1476,9 +1476,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		// 吸顶与正文气泡同宽，滑块最后盖回右缘，避免气泡短一列、滑块被灰底吃掉。
 		screen = compositeScrollbars(screen, nextLayout, width);
+		if (screen.length > height) screen = screen.slice(screen.length - height);
+		// 短暂提示盖住正文与滚动条，但不能遮挡需要用户响应的模态对话框。
+		screen = this.compositeFlashes(screen, width, height);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
-		screen = this.compositeFlashes(screen, width, height);
 
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => clipLineToWidth(line, width));
