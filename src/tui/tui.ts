@@ -395,6 +395,50 @@ export class Container implements Component {
 /** 浮层叠进一行：overlay 盖住 [startCol, startCol+overlayWidth)，两侧保留底稿。 */
 const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
+/**
+ * 把光标显式钉到第 col 列（0 基）。
+ *
+ * 合成器按**可见宽度**算列，看不见跳转：`\x1b[110G█` 的可见宽度是 1，`extractSegments`
+ * 就当这一格在第 0 列，跳过去的 109 列当不存在。不钉列的话，浮层文字会接在那个
+ * `\x1b[110G` 之后写出屏幕右缘，被终端换行回卷到下一行，再被下一行的重绘擦掉——
+ * 症状是审批弹窗整块不显示，而状态行照旧写着 `Waiting for approval…`。
+ */
+function pinColumn(col: number): string {
+	const column = Math.floor(col);
+	return column > 0 ? `\x1b[${column + 1}G` : "";
+}
+
+/**
+ * 摘出「跳到浮层区间之外、再写几格」的绝对定位片段。
+ *
+ * 滚动条那一格就是这么画的（layout.ts 的 replaceScrollbarCell 跳到最右缘），状态行右对齐的
+ * 计时也是。合成器按可见宽度顺序数格子，看不见跳转：滚条那一格的可见宽度是 1，就被算成紧挨着
+ * 左边、落进浮层区间里，于是跟着浮层一起被抹掉——症状是「弹窗一出现，滚动条被切成两段」。
+ *
+ * 区间外的片段整段还回去（连它自己的 CHA 与配色一起），由调用方在浮层之后原样补回；
+ * 区间内的片段不还，那是真被浮层盖住的部分。
+ */
+function splitAbsoluteIslands(
+	line: string,
+	startCol: number,
+	afterStart: number,
+): { head: string; tail: string } {
+	const jumps: Array<{ index: number; column: number }> = [];
+	const pattern = /\x1b\[(\d+)G/g;
+	for (let match = pattern.exec(line); match !== null; match = pattern.exec(line)) {
+		jumps.push({ index: match.index, column: Number(match[1]) - 1 });
+	}
+	if (jumps.length === 0) return { head: line, tail: "" };
+
+	let tail = "";
+	for (let i = 0; i < jumps.length; i += 1) {
+		const jump = jumps[i]!;
+		const end = jumps[i + 1]?.index ?? line.length;
+		if (jump.column >= afterStart || jump.column < startCol) tail += line.slice(jump.index, end);
+	}
+	return { head: line.slice(0, jumps[0]!.index), tail };
+}
+
 /** Composite overlay content into a terminal line at a fixed column. */
 export function compositeTuiLine(
 	baseLine: string,
@@ -404,23 +448,25 @@ export function compositeTuiLine(
 	totalWidth: number,
 ): string {
 	const afterStart = startCol + overlayWidth;
-	const base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, true);
+	// 绝对定位片段不参与切分：按可见宽度数会把它们错算成「被浮层盖住」，连滚动条一起抹掉。
+	const { head, tail } = splitAbsoluteIslands(baseLine, startCol, afterStart);
+	const base = extractSegments(head, startCol, afterStart, totalWidth - afterStart, true);
 	const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
-	const beforePad = Math.max(0, startCol - base.beforeWidth);
 	const overlayPad = Math.max(0, overlayWidth - overlay.width);
 	const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
-	const actualOverlayWidth = Math.max(overlayWidth, overlay.width);
-	const afterTarget = Math.max(0, totalWidth - actualBeforeWidth - actualOverlayWidth);
-	const afterPad = Math.max(0, afterTarget - base.afterWidth);
+	// 两侧不再补白：浮层只盖自己的列区间，别的列一律保留底稿。补白按可见宽度补，
+	// 盖掉的却是别的组件真写过的格子（浮层右侧的正文、滚条那一格），抹出一块深色空带。
 	const result =
 		base.before +
-		" ".repeat(beforePad) +
+		pinColumn(actualBeforeWidth) +
 		SEGMENT_RESET +
 		overlay.text +
 		" ".repeat(overlayPad) +
+		// 浮层行自己也可能跳列（计时、复读提示），after 段起点要重新钉一次。
+		pinColumn(actualBeforeWidth + overlayWidth) +
 		SEGMENT_RESET +
 		base.after +
-		" ".repeat(afterPad);
+		tail;
 
 	return clipLineToWidth(result, totalWidth);
 }
