@@ -58,6 +58,12 @@ function detailRailPad(): string {
   return `${' '.repeat(TOOL_MEMBER_INDENT)}${theme.fg('muted', '│')}${' '.repeat(railColumns)}`;
 }
 
+/**
+ * 折叠预览的窗口：头部行数 + 尾部行数，`…` 夹在中间。
+ *
+ * 这两组数字数的是**内容行**（见 previewContentLines），信封与空行不占预算。
+ * shell 给 4 行头（`exit`/`stdout:` 剥掉后才是真输出）、read 给 5 行。
+ */
 function previewWindow(toolName: string): { first: number; last: number } {
   switch (toolName) {
     case 'read':
@@ -67,12 +73,64 @@ function previewWindow(toolName: string): { first: number; last: number } {
       return { first: 8, last: 4 };
     case 'bash':
     case 'pwsh':
-      return { first: 2, last: 3 };
+      return { first: 4, last: 3 };
     case 'subagent':
       return { first: 12, last: 8 };
     default:
       return { first: 5, last: 3 };
   }
+}
+
+/**
+ * 工具输出里真正值得占窗口的行：剥掉信封，再丢掉空行。
+ *
+ * 两种信封都不是内容，却和内容抢同一份窗口预算：
+ * - `read` 的正文首行是工作区相对路径（工具行标题里已经写了一遍）；
+ * - `bash` / `pwsh` 的正文前两行固定是 `exit N` 与 `stdout:`，stderr 段前还有一条 `stderr:`。
+ *
+ * 曾经它们把预算吃掉一大截：read 头部 5 行里只看到 4 行源码（第 5 行掉进 `…`），
+ * 而 shell 的头部 2 行恰好是 `exit 0` + `stdout:`——一行真实输出都没有。
+ *
+ * 空行同样要丢，而且 read 的空行是带行号的（`   2|`），不能只看整行是否为空：
+ * README 头部 5 行里有 2 行是空行，`…` 于是出现在正文第 4 行，文件真正写的内容一行没露。
+ * 行号本身把「这里跳过了一行」记录下来，占一整行却不给信息的空行不值得占窗口。
+ */
+function previewContentLines(toolName: string, output: string): string[] {
+  const lines = output.split(/\r\n|\r|\n/);
+  if (toolName === 'read' && lines.length > 1 && !/^\s*\d+\|/.test(lines[0] ?? '')) lines.shift();
+  if (toolName === 'bash' || toolName === 'pwsh') {
+    if (/^exit \S+$/.test((lines[0] ?? '').trim())) lines.shift();
+    if (/^stdout:/.test((lines[0] ?? '').trim())) lines.shift();
+  }
+  return lines.filter((line) => {
+    const numbered = /^\s*\d+\|(.*)$/.exec(line);
+    return (numbered?.[1] ?? line).trim() !== '';
+  });
+}
+
+/** 行号列宽度（`   3|` 占 5 列）；没有行号的行返回 0。 */
+function hangingIndent(raw: string): number {
+  return /^\s*\d+\|/.exec(raw)?.[0].length ?? 0;
+}
+
+/**
+ * 按宽度折行，并给续行留悬挂缩进。
+ *
+ * `read` 的行长这样：`   3|xAI …（很长的一句话）`。续行不缩进就顶到竖轨上，读起来像另一行内容，
+ * 上一行反而被当成完整的一句。行号列是固定宽度（工具里 padStart(4) 加一个 `|`），
+ * 所以续行对齐到它的右边即可——和正文首字同一列。
+ *
+ * 缩进是从折行宽度里**扣**出来的，不是折完再补：补出来的续行会比可用宽度多出缩进那几列，
+ * 外层按宽度一裁，尾巴就没了。
+ *
+ * 折行器在第一段就是个超宽词时会先吐一个只含空白的行（行首缩进被 trimEnd 成空串），
+ * 详情块里那会变成一条只有竖轨的空行；预览行本来就都带内容，空行一律当噪音丢掉。
+ */
+function wrapIndented(raw: string, inner: number): string[] {
+  const indent = Math.min(hangingIndent(raw), Math.max(0, inner - 1));
+  const wrapped = wrapTextWithAnsi(raw, Math.max(1, inner - indent)).filter((line) => line !== '');
+  if (indent === 0 || wrapped.length <= 1) return wrapped;
+  return [wrapped[0]!, ...wrapped.slice(1).map((line) => `${' '.repeat(indent)}${line}`)];
 }
 
 /** 按左缩进折行并上色，行首带详情竖轨；每行单独着色，避免整块 ANSI 跨行把缩进吃掉。 */
@@ -81,7 +139,7 @@ function paintIndented(text: string, width: number, indent: number, paint: (s: s
   const inner = Math.max(1, width - indent);
   const lines: string[] = [];
   for (const raw of text.split(/\r\n|\r|\n/)) {
-    for (const wrapped of wrapTextWithAnsi(paint(raw), inner)) lines.push(pad + wrapped);
+    for (const wrapped of wrapIndented(raw, inner)) lines.push(`${pad}${paint(wrapped)}`);
   }
   return lines.join('\n');
 }
@@ -491,18 +549,27 @@ export class ToolExecutionComponent extends Container {
 
     const { first, last } = previewWindow(this.toolName);
     const inner = Math.max(1, width - TOOL_DETAIL_INDENT);
+    const content = previewContentLines(this.toolName, output);
     const visual: string[] = [];
-    for (const raw of output.split(/\r\n|\r|\n/)) visual.push(...wrapTextWithAnsi(raw, inner));
+    for (const raw of content) {
+      visual.push(...wrapIndented(raw, inner));
+    }
     const cap = first + last;
+    // 这里不能再走 paintIndented：它会按宽度**再折一次**，而折行已经带过悬挂缩进了，
+    // 第二遍会把缩进叠上去、行也切碎。使用折好的行，直接贴竖轨。
+    const pad = detailRailPad();
     if (visual.length <= cap) {
-      this.bodyText.setText(paintIndented(visual.join('\n'), width, TOOL_DETAIL_INDENT, paint));
+      this.bodyText.setText(visual.map((line) => `${pad}${paint(line)}`).join('\n'));
       return;
     }
+    // 省略行数按内容行算，与窗口同一把尺子：用户看到 `… (174 more)` 就知道后文还有多少行正文，
+    // 而不是只有裸的 `…` 让人以为折叠点后面没什么东西了。
     const skipped = visual.length - cap;
-    const pad = detailRailPad();
     const head = visual.slice(0, first).map((line) => `${pad}${paint(line)}`);
     const tail = visual.slice(-last).map((line) => `${pad}${paint(line)}`);
-    const ellipsis = `${pad}${theme.fg('muted', (this.toolName === 'bash' || this.toolName === 'pwsh') && !this.fullDetail ? `… (${skipped} more)` : '…')}`;
+    // 省略符与折行续行同一缩进：它标的是「正文被折掉的一截」，跟着正文走，不自成一行。
+    const markerIndent = hangingIndent(content[0] ?? '');
+    const ellipsis = `${pad}${' '.repeat(markerIndent)}${theme.fg('muted', `… (${skipped} more)`)}`;
     this.bodyText.setText([...head, ellipsis, ...tail].join('\n'));
   }
 
