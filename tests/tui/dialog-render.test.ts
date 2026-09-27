@@ -204,6 +204,35 @@ describe('上报弹窗的真实渲染', () => {
       ui.stop({ preserveScreen: true });
     }
   });
+
+  it('对话框整行铺浮层面色，行内 SGR 之后要重申', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const closed = showSelectDialog(ui, {
+        title: 'Help',
+        bodyText: '- `/help` — List commands and key bindings',
+        items: [{ value: 'ok', label: 'Close' }],
+        maxVisible: 1,
+      });
+      ui.renderNow(true);
+      const screen = terminal.screen();
+      const surface = theme.bgSeq('dialogBg');
+      // 画布与浮层同色时，卡片会被读成「抠掉一块露出黑底」——所以每条框线行都要有面层底色，
+      // 且行内 SGR（`0m` 全重置）之后要重申，否则整行后半截会掉回画布色。
+      const boxRows = screen.split(/\x1b\[\d+;1H/).filter((row) => row.includes('│') || row.includes('╭'));
+      assert.ok(boxRows.length >= 3, `应渲染出对话框框线行，实际 ${boxRows.length} 行`);
+      for (const row of boxRows) {
+        const count = row.split(surface).length - 1;
+        assert.ok(count >= 2, `框线行应铺底并在 SGR 后重申，实际出现 ${count} 次: ${JSON.stringify(row.slice(0, 80))}`);
+      }
+      terminal.send('\x1b');
+      await closed;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  });
 });
 
 /**

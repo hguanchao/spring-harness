@@ -149,6 +149,8 @@ const ANSI_FG: Record<string, string> = {
 const ANSI_BG: Record<string, string> = {
   bg: '49',
   userMessageBg: '100', toolPendingBg: '100',
+  // 浮层面与气泡同档：16 色里只有「亮黑」能当比画布亮一档的面色。
+  dialogBg: '100',
   // 挂起条悬停底用 256 色深灰：16 色档位里没有「只亮一档」的中间带。
   steerHoverBg: '48;5;236',
 };

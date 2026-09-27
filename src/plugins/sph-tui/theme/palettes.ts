@@ -10,6 +10,8 @@ const MUTED = '#6c6c6c';
 /** 画布底。纯黑会把 #c6c6c6 衬得过亮。 */
 const BG = '#141414';
 const CHROME = '#242424';
+/** 浮层面：画布 #141414 与气泡 #242424 之间的一档。 */
+const DIALOG = '#1f1f1f';
 /** 行内码、计划模式输入框。 */
 const SYNTAX = '#5c9cf5';
 
@@ -38,6 +40,13 @@ export const PALETTE = {
   /** 滑块前景：中性灰，与 dim 同色，不跟滚动状态变。 */
   scrollbarThumb: '#808080',
   userMessageBg: CHROME,
+  /**
+   * 浮层面（对话框）的底色。
+   *
+   * 画布给的是 #141414，浮层不铺底就只有边框、里面跟画布一个色——正文在浮层两侧被切断后
+   * 看起来像「抠掉一块露出黑底」。这一档比画布亮、比用户气泡暗，卡片浮起来又能和气泡区分开。
+   */
+  dialogBg: DIALOG,
   userMessageText: TEXT,
   toolPendingBg: MUTED,
   toolTitle: MUTED,

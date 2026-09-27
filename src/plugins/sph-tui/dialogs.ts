@@ -22,10 +22,38 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	truncateToWidth,
+	visibleWidth,
 	wrapTextWithAnsi,
 } from '../../tui/index.js';
-import { renderRoundedBox } from '../../tui/utils.js';
+import { extractAnsiCode, renderRoundedBox } from '../../tui/utils.js';
 import { getMarkdownTheme, getSelectListTheme, theme } from './theme/theme.js';
+
+/**
+ * 给对话框整行铺上浮层面色。
+ *
+ * 画布（#141414）不铺底的浮层只有一圈边框，里面跟背景一个色；正文在两列留白处被切断后，
+ * 整块看起来像「抠掉一块、露出黑底」——用户报的「弹窗有黑色背景」就是这个。
+ *
+ * 底色要挂在每个 SGR 之后重申：行内任何 `0m`（全重置）都会把底色一起清掉，
+ * 行尾必须回到 49m（画布/终端默认底），否则底色会渗到下一行。
+ */
+function fillDialogSurface(line: string, width: number, surface: string): string {
+	const padded = line + ' '.repeat(Math.max(0, width - visibleWidth(line)));
+	let out = surface;
+	let index = 0;
+	while (index < padded.length) {
+		const ansi = extractAnsiCode(padded, index);
+		if (ansi) {
+			out += ansi.code;
+			if (ansi.code.endsWith('m')) out += surface;
+			index += ansi.length;
+			continue;
+		}
+		out += padded[index]!;
+		index += 1;
+	}
+	return `${out}\x1b[49m`;
+}
 
 const DEFAULT_HINT = '↑/↓ select · Enter confirm · Esc cancel';
 const SCROLL_HINT = '↑/↓ scroll';
@@ -75,6 +103,7 @@ class RoundedDialogBox extends Container {
 					: [lines[lines.length - 1]!];
 		}
 		// 底边框在子组件渲染之后才拼,滚动位置之类的信息才是本帧的(与补全菜单盒同款)。
+		const surface = theme.bgSeq('dialogBg');
 		return renderRoundedBox({
 			width,
 			title: this.label,
@@ -82,7 +111,7 @@ class RoundedDialogBox extends Container {
 			bottomInfo: this.bottomInfo(),
 			frame: (text) => theme.fg('borderMuted', text),
 			titlePaint: (text) => theme.bold(theme.fg('primary', text)),
-		});
+		}).map((row) => fillDialogSurface(row, width, surface));
 	}
 
 	override handleMouse(event: TuiMouseEvent) {
