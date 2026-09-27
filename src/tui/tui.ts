@@ -245,6 +245,12 @@ export interface OverlayOptions {
 	/** Margin from terminal edges. Number applies to all sides. */
 	margin?: OverlayMargin | number;
 
+	/**
+	 * 弹窗两侧各抹掉几列底稿（留白）。浮层只盖自己的列区间,底稿文字会直接贴着
+	 * 边框,模态看起来像被正文穿透;留白给出与背后内容的视觉隔离。默认 0。
+	 */
+	padX?: number;
+
 	// === Visibility ===
 	/**
 	 * Control overlay visibility based on terminal dimensions.
@@ -1199,7 +1205,7 @@ export abstract class TuiBase extends Container implements TUI {
 		for (const entry of this.overlayStack) entry.bounds = undefined;
 
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { entry: OverlayStackEntry; overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		const rendered: { entry: OverlayStackEntry; overlayLines: string[]; row: number; col: number; w: number; pad: number }[] = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1223,7 +1229,9 @@ export abstract class TuiBase extends Container implements TUI {
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 			entry.bounds = { row, col, width, height: overlayLines.length };
 
-			rendered.push({ entry, overlayLines, row, col, w: width });
+			// 留白列数夹进左边界内,避免负列起步。
+			const pad = Math.max(0, Math.min(options?.padX ?? 0, col));
+			rendered.push({ entry, overlayLines, row, col, w: width, pad });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
 		this.renderedOverlayLayouts = rendered.map(({ entry, row, col, w, overlayLines }) => ({
@@ -1247,15 +1255,23 @@ export abstract class TuiBase extends Container implements TUI {
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
 		// Composite each overlay
-		for (const { overlayLines, row, col, w } of rendered) {
+		for (const { overlayLines, row, col, w, pad } of rendered) {
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
 				if (idx >= 0 && idx < result.length) {
 					// Defensive: truncate overlay line to declared width before compositing
 					// (components should already respect width, but this ensures it)
 					const truncatedOverlayLine = clipLineToWidth(overlayLines[i], w);
-					// 只盖住对话框自己的列。整行换成空白会把左右的转录擦掉，弹窗看起来像把屏幕换掉。
-					result[idx] = this.compositeLineAt(result[idx] ?? "", truncatedOverlayLine, col, w, termWidth);
+					if (pad > 0) {
+						// 两侧留白:把 pad 列并进盖写区间,底稿在那几列被抹成空格,
+						// 弹窗与背后的转录之间有一条干净的空白带。
+						const startCol = col - pad;
+						const padded = `${' '.repeat(pad)}${truncatedOverlayLine}`;
+						result[idx] = this.compositeLineAt(result[idx] ?? '', padded, startCol, w + pad * 2, termWidth);
+					} else {
+						// 只盖住对话框自己的列。整行换成空白会把左右的转录擦掉，弹窗看起来像把屏幕换掉。
+						result[idx] = this.compositeLineAt(result[idx] ?? '', truncatedOverlayLine, col, w, termWidth);
+					}
 				}
 			}
 		}

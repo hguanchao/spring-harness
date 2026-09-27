@@ -22,6 +22,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	truncateToWidth,
+	wrapTextWithAnsi,
 } from '../../tui/index.js';
 import { renderRoundedBox } from '../../tui/utils.js';
 import { getMarkdownTheme, getSelectListTheme, theme } from './theme/theme.js';
@@ -49,20 +50,35 @@ class RoundedDialogBox extends Container {
 	private readonly label: string;
 	/** 底边框右侧的状态文本（如滚动位置）。子组件渲染完才取值，所以拿到的是本帧状态。 */
 	private readonly bottomInfo: () => string;
+	/** 高度预算的硬封顶（与浮层 maxHeight 同源）。 */
+	private readonly maxRows?: () => number;
 
-	constructor(title: string, bottomInfo: () => string = () => '') {
+	constructor(title: string, bottomInfo: () => string = () => '', maxRows?: () => number) {
 		super();
 		this.label = ` ${title} `;
 		this.bottomInfo = bottomInfo;
+		this.maxRows = maxRows;
 	}
 
 	override render(width: number): string[] {
 		const inner = Math.max(1, width - 2);
+		// 浮层对超限内容只会整块从底部裁掉——底边框、页脚和最后几条选项会一起消失
+		// （见 compositeOverlays 的 slice）。所以内部行数在这里按同一份预算封顶：
+		// 宁可挤掉中间的行，标题、页脚和底边框必须保住。
+		let lines = super.render(inner);
+		const cap = this.maxRows?.();
+		const maxInterior = cap === undefined ? Number.POSITIVE_INFINITY : Math.max(1, cap - 2);
+		if (lines.length > maxInterior) {
+			lines =
+				maxInterior >= 2
+					? [...lines.slice(0, maxInterior - 1), lines[lines.length - 1]!]
+					: [lines[lines.length - 1]!];
+		}
 		// 底边框在子组件渲染之后才拼,滚动位置之类的信息才是本帧的(与补全菜单盒同款)。
 		return renderRoundedBox({
 			width,
 			title: this.label,
-			lines: super.render(inner),
+			lines,
 			bottomInfo: this.bottomInfo(),
 			frame: (text) => theme.fg('borderMuted', text),
 			titlePaint: (text) => theme.bold(theme.fg('primary', text)),
@@ -175,12 +191,16 @@ class ScrollableTextBody extends DialogBody {
 	}
 }
 
+/** 正文渲染方式。`plain` 原样保留文本——命令、路径这类内容过 Markdown 会被转义改写。 */
+export type DialogBodyFormat = 'markdown' | 'plain';
+
 /** 选择列表正文：把列表可见行数压进预算，矮终端下圆角边框与页脚依然完整。 */
 class SelectBody extends DialogBody {
 	/** 上一次渲染时列表在正文里的起始行与高度，鼠标事件按它换算坐标。 */
 	private listTop = 0;
 	private listRows = 0;
 	private readonly markdown: Markdown | undefined;
+	private readonly plainText: string | undefined;
 	private offset = 0;
 	private textHeight = 0;
 	private textViewport = 0;
@@ -190,13 +210,16 @@ class SelectBody extends DialogBody {
 		bodyText: string | undefined,
 		budget: () => number,
 		private readonly hint: string,
+		format: DialogBodyFormat = 'markdown',
 	) {
 		super(budget);
-		this.markdown = bodyText
-			? new Markdown(bodyText, 1, 0, getMarkdownTheme(), {
-					color: (content: string) => theme.fg('mdText', content),
-				})
-			: undefined;
+		this.plainText = format === 'plain' ? bodyText : undefined;
+		this.markdown =
+			bodyText && format === 'markdown'
+				? new Markdown(bodyText, 1, 0, getMarkdownTheme(), {
+						color: (content: string) => theme.fg('mdText', content),
+					})
+				: undefined;
 	}
 
 	getScrollInfo(): string {
@@ -281,7 +304,7 @@ class SelectBody extends DialogBody {
 	}
 
 	protected override renderContent(width: number, rows: number, leadingRows: number): string[] {
-		const textLines = this.markdown ? this.markdown.render(width) : [];
+		const textLines = this.renderBodyLines(width);
 		this.textHeight = textLines.length;
 		const listReserve = Math.min(this.list.itemCount, LIST_RESERVE_ROWS);
 		const maxTextRows = Math.max(0, rows - listReserve);
@@ -295,6 +318,14 @@ class SelectBody extends DialogBody {
 		this.listTop = leadingRows + visibleText.length;
 		this.listRows = listLines.length;
 		return [...visibleText, ...listLines];
+	}
+
+	/** 正文行：plain 逐字保留（只做按宽换行），markdown 走渲染器。 */
+	private renderBodyLines(width: number): string[] {
+		if (this.markdown) return this.markdown.render(width);
+		if (this.plainText === undefined) return [];
+		const wrapped = wrapTextWithAnsi(this.plainText, Math.max(1, width - 1));
+		return wrapped.map((line) => theme.fg('mdText', ` ${line}`));
 	}
 }
 
@@ -327,9 +358,9 @@ class DialogShell extends Container {
 	private bottomInfo: () => string = () => '';
 	private closeHandler: () => void = () => {};
 
-	protected constructor(title: string) {
+	protected constructor(title: string, maxRows?: () => number) {
 		super();
-		this.box = new RoundedDialogBox(title, () => this.bottomInfo());
+		this.box = new RoundedDialogBox(title, () => this.bottomInfo(), maxRows);
 		this.addChild(this.box);
 	}
 
@@ -362,10 +393,11 @@ class SelectDialog extends DialogShell {
 		hint: string,
 		bodyText: string | undefined,
 		budget: () => number,
+		format: DialogBodyFormat = 'markdown',
 	) {
-		super(title);
+		super(title, budget);
 		this.list = new SelectList(items, maxVisible, getSelectListTheme());
-		this.body = new SelectBody(this.list, bodyText, budget, hint);
+		this.body = new SelectBody(this.list, bodyText, budget, hint, format);
 		this.setBottomInfo(() => this.body.getScrollInfo());
 		this.addBody(this.body);
 	}
@@ -388,7 +420,7 @@ class InputDialog extends DialogShell {
 	private readonly input: Input;
 
 	constructor(title: string, initialValue: string, hint: string, budget: () => number) {
-		super(title);
+		super(title, budget);
 		this.input = new Input();
 		this.input.setValue(initialValue);
 		this.addBody(new InputBody(this.input, budget, hint));
@@ -411,7 +443,7 @@ class MessageDialog extends DialogShell {
 	private readonly body: ScrollableTextBody;
 
 	constructor(title: string, text: string, hint: string, budget: () => number) {
-		super(title);
+		super(title, budget);
 		this.body = new ScrollableTextBody(text, budget, hint);
 		this.setBottomInfo(() => this.body.getScrollInfo());
 		this.addBody(this.body);
@@ -463,6 +495,7 @@ function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT): {
 	maxWidth: number;
 	anchor: 'center';
 	margin: number;
+	padX: number;
 } {
 	return {
 		width: DIALOG_WIDTH,
@@ -470,6 +503,9 @@ function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT): {
 		maxWidth: DIALOG_MAX_WIDTH,
 		anchor: 'center',
 		margin: 1,
+		// 弹窗两侧各留两列空白：浮层只盖自己的列区间，不留白的话底稿文字会直接
+		// 贴着边框，看起来像穿透了弹窗。
+		padX: 2,
 	};
 }
 
@@ -482,6 +518,8 @@ export function showSelectDialog(
 		maxVisible?: number;
 		hint?: string;
 		bodyText?: string;
+		/** 正文渲染方式；含命令、路径等需要逐字展示的内容时用 plain。 */
+		bodyFormat?: DialogBodyFormat;
 		width?: SizeValue;
 		maxHeight?: SizeValue;
 	},
@@ -495,6 +533,7 @@ export function showSelectDialog(
 			options.hint ?? DEFAULT_HINT,
 			options.bodyText,
 			() => rowBudget(tui, maxHeight),
+			options.bodyFormat ?? 'markdown',
 		);
 		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight));
 		const finish = settleOnce(handle, resolve);

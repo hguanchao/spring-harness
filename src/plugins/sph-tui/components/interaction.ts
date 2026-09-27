@@ -100,6 +100,8 @@ export const WorkingLabel = {
   thinking: 'Thinking…',
   responding: 'Replying…',
   cancelling: 'Stopping…',
+  /** 工具已发出 tool_start 但卡在审批弹窗上,还没有真正执行。 */
+  awaitingApproval: 'Waiting for approval…',
   /** LLM 摘要压缩正在跑；loop 用同一句 status 通知 TUI，不要改成 notice。 */
   compacting: 'Folding context…',
   /**

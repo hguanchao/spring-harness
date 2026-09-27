@@ -1253,15 +1253,30 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   async requestApproval(request: ApprovalRequest, note?: string): Promise<boolean> {
+    // 审批等待期间工具并未执行:tool_start 在审批门之前就发出,状态行若沿用 running
+    // 文案,转圈加耗时会让人以为命令已经在跑。这里换成等待文案,弹窗关闭后还原。
+    const previousActivity = this.activityLabel;
+    this.setActivity(WorkingLabel.awaitingApproval);
+    try {
+      return await this.showApprovalDialog(request, note);
+    } finally {
+      if (previousActivity !== undefined) this.setActivity(previousActivity);
+    }
+  }
+
+  private async showApprovalDialog(request: ApprovalRequest, note?: string): Promise<boolean> {
     const detail = flattenWhitespace(request.command ?? request.path ?? '(no detail)');
     const preview = detail.length > 400 ? `${detail.slice(0, 400)}…` : detail;
     const body = note ? `${preview}\n\n${theme.fg('warning', note)}` : preview;
     // 两个「总是允许」的作用域不一样，文案必须写出来：一个活到进程结束，一个写进
     // ~/.sph/permissions.json 并且只对当前项目生效。
     const scope = this.approvalScopeLabel(request);
+    // 正文必须逐字展示:命令过 Markdown 会被转义规则改写(\| 变 | 等),批准看到的
+    // 和实际执行的就不是同一条命令了。
     const choice = await showSelectDialog(this.ui, {
       title: `Approve ${request.tool}?`,
       bodyText: body,
+      bodyFormat: 'plain',
       items: [
         { value: 'allow', label: 'Allow once' },
         { value: 'session', label: `Allow ${scope} for this session` },

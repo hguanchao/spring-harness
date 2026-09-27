@@ -548,8 +548,13 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	if (!until) return;
 	const untilBox = findLayoutBox(layoutRoot(box), until);
 	if (!untilBox || untilBox.rect.y <= viewBottom) return;
-	const thumbAtBottom = geometry.thumbTop + geometry.thumbHeight >= viewBottom;
-	if (!thumbAtBottom) return;
+	// 续接的前提是滑块「肉眼可见地」贴到了轨道底。若 clip 把轨道截短,可见滑块的
+	// 下缘够不到轨道底,这时续接会画出一截和滑块脱开的悬空段,看起来像第二条
+	// 滑块——此时宁可不断接。
+	const clipBottom = box.clip.y + box.clip.height;
+	const visibleTrackBottom = Math.min(viewBottom, clipBottom);
+	const visibleThumbBottom = Math.min(geometry.thumbTop + geometry.thumbHeight, clipBottom);
+	if (visibleThumbBottom < visibleTrackBottom) return;
 	for (let row = viewBottom; row < untilBox.rect.y; row++) paintRow(row);
 }
 

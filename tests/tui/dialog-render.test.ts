@@ -206,6 +206,70 @@ describe('上报弹窗的真实渲染', () => {
   });
 });
 
+/**
+ * 审批弹窗的完整性。
+ *
+ * 这里守的是两条用户可见的底线:命令要逐字展示(Markdown 的转义规则会改写 `\|`
+ * 这类内容,批准看到的和实际执行的必须是同一条命令);选项列表在高个子终端里
+ * 全部可见、在矮终端里靠列表自身滚动消化,无论哪种,页脚提示和底边框都不许被
+ * 浮层的超限裁切削掉。
+ */
+describe('审批弹窗的完整性', () => {
+  const backslash = String.fromCharCode(92);
+  const command = `grep -n "ROUTES${backslash}|def ${backslash}|path" server/api/server.py | head -80`;
+  const approvalItems = [
+    { value: 'allow', label: 'Allow once' },
+    { value: 'session', label: 'Allow this exact command for this session' },
+    { value: 'always', label: 'Always allow this exact command for this project' },
+    { value: 'deny', label: 'Deny' },
+  ];
+
+  async function renderApprovalDialog(columns: number, rows: number): Promise<string> {
+    const terminal = new FakeTerminal();
+    terminal.columns = columns;
+    terminal.rows = rows;
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const pending = showSelectDialog(ui, {
+        title: 'Approve bash?',
+        bodyText: command,
+        bodyFormat: 'plain',
+        items: approvalItems,
+        maxVisible: 4,
+      });
+      ui.renderNow(true);
+      const screen = terminal.screen();
+      terminal.send('\x1b');
+      await pending;
+      return screen;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  }
+
+  it('命令预览逐字保留，不再被 Markdown 转义吃掉反斜杠', async () => {
+    const screen = await renderApprovalDialog(125, 34);
+    assert.ok(screen.includes(`ROUTES${backslash}|def`), '弹窗里的命令必须与实际执行的一致');
+  });
+
+  it('常见终端高度下四个选项、快捷键提示与底边框全部可见', async () => {
+    const screen = await renderApprovalDialog(125, 34);
+    for (const label of approvalItems) {
+      assert.match(screen, new RegExp(label.label.replaceAll('|', String.raw`\|`)));
+    }
+    assert.match(screen, /Esc cancel/);
+    assert.match(screen, /╰/);
+  });
+
+  it('矮终端下选项交给列表滚动消化，页脚与底边框仍然完整', async () => {
+    const screen = await renderApprovalDialog(80, 12);
+    assert.match(screen, /Esc cancel/, '快捷键提示行不许被裁掉');
+    assert.match(screen, /╰/, '底边框不许被裁掉');
+    assert.match(screen, /\(1\/4\)/, '放不下的选项要作为可滚列表呈现');
+  });
+});
+
 /** 让 TUI 把一次输入处理完（渲染是同步的，只需让出事件循环）。 */
 const settle = (ms = 80): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
