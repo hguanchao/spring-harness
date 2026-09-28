@@ -1,9 +1,9 @@
 /**
  * Recap 块：会话「我讲到哪了」的一行摘要。
  *
- * 走工具行的观感（状态圆点 + 加粗 `Recap` 标签 + 弱化正文），
- * 与普通通知行区分开——recap 是会话级别的产物，不是又一条提示。正文按宽度折行并
- * 悬挂缩进，续行对齐到正文列（TOOL_MEMBER_INDENT）。
+ * 这是一句提示，不是正文：整行不加粗，统一用 muted，避免跟助手回复抢权重。
+ * 菱形仍区分完成（◆）和生成中（◇）。正文按宽度折行并悬挂缩进，续行对齐到
+ * 正文列（TOOL_MEMBER_INDENT）。
  *
  * 手动 `/recap` 先生成 pending 态（空心圆点 + `summarizing…`），拿到结果后**原地**换成
  * 正文：用户始终在同一行上看到进度，不会凭空多出一块、也不会留下占位的空行。
@@ -63,15 +63,13 @@ export class RecapMessageComponent implements Component {
     if (body === '') return [];
 
     // 前缀 `  ◆ ` 的可见宽度恰好是 TOOL_MEMBER_INDENT，续行直接按它悬挂。
+    // 标签和正文同一档 muted、都不加粗：提示行不该比正文更抢眼。
     const mark = this.pending ? RECAP_MARK.pending : RECAP_MARK.done;
-    const head = `${theme.bold(theme.fg('text', 'Recap'))}${theme.fg('dim', ' — ')}`;
-    const painted = this.pending
-      ? theme.bold(theme.fg('dim', body))
-      : theme.bold(theme.fg('muted', body));
+    const painted = theme.fg('muted', `Recap — ${body}`);
 
     const available = Math.max(1, width - TOOL_MEMBER_INDENT);
-    const wrapped = wrapTextWithAnsi(`${head}${painted}`, available);
-    const first = `${' '.repeat(TOOL_GROUP_INDENT)}${theme.fg(this.pending ? 'dim' : 'primary', mark)} `;
+    const wrapped = wrapTextWithAnsi(painted, available);
+    const first = `${' '.repeat(TOOL_GROUP_INDENT)}${theme.fg('muted', `${mark} `)}`;
     const hang = ' '.repeat(TOOL_MEMBER_INDENT);
 
     const lines = wrapped.map((line, index) => (index === 0 ? `${first}${line}` : `${hang}${line}`));

@@ -104,6 +104,14 @@ export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatc
 /** 范围拖选的边界。用户消息、思考组、助手回复各自一块，选区不跨块。 */
 export const SELECTION_BLOCK = Symbol.for("sph.selectionBlock");
 
+/**
+ * 双击/三击不升级成选词或选行。
+ *
+ * 工具行展开详情的双击是收起（shell / subagent 再展开一级）。选词抢的是同一次点击，
+ * 词吸附还会把松开误判成拖选。拖选仍按字符。
+ */
+export const SUPPRESS_MULTI_CLICK_SELECTION = Symbol.for("sph.suppressMultiClickSelection");
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width

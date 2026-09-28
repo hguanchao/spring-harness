@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { RecapMessageComponent } from '../../../src/plugins/sph-tui/components/recap.js';
+import { theme } from '../../../src/plugins/sph-tui/theme/theme.js';
 import { BLOCK_GAP, stripTerminalSequences, visibleWidth } from '../../../src/tui/index.js';
 
 /** 组件按主题上色（theme.fg 始终发 ANSI），断言前先剥掉转义序列。 */
@@ -11,6 +12,14 @@ function plain(lines: string[]): string[] {
 describe('RecapMessageComponent', () => {
   it('renders nothing for an empty, settled recap', () => {
     assert.deepEqual(new RecapMessageComponent('').render(80), []);
+  });
+
+  it('提示不加粗，整行用 muted', () => {
+    const row = new RecapMessageComponent('We fixed the parser.').render(80)[1] ?? '';
+    assert.equal(row.includes('\x1b[1m'), false, '提示不加粗');
+    assert.ok(row.includes(theme.fgSeq('muted')), '提示用 muted');
+    assert.equal(row.includes(theme.fgSeq('text')), false, '不用正文色');
+    assert.equal(row.includes(theme.fgSeq('primary')), false, '菱形不再用强调色');
   });
 
   it('renders the body on one line under a leading block gap', () => {

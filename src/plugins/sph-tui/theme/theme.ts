@@ -153,6 +153,8 @@ const ANSI_BG: Record<string, string> = {
   dialogBg: '100',
   // 挂起条悬停底用 256 色深灰：16 色档位里没有「只亮一档」的中间带。
   steerHoverBg: '48;5;236',
+  rowHoverBg: '48;5;237',
+  rowSelectedBg: '48;5;239',
 };
 
 function fgAnsi(color: string, mode: ColorMode): string {
@@ -281,6 +283,14 @@ export class Theme {
 
   bold(text: string): string {
     return sgr('\x1b[1m', '\x1b[22m', text);
+  }
+
+  /**
+   * 降低绘制强度（SGR 2）。
+   * 终端格子不能单独缩小字号，faint 把笔画收细，读起来比同一颜色的正文小一档。
+   */
+  faint(text: string): string {
+    return sgr('\x1b[2m', '\x1b[22m', text);
   }
 
   italic(text: string): string {

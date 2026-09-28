@@ -53,6 +53,12 @@ export const PALETTE = {
   toolOutput: MUTED,
   /** 挂起条悬停底：比画布（#141414）只亮一档的极浅带，hover 反馈不抢正文。 */
   steerHoverBg: '#202020',
+  /**
+   * 工具行 / 思考行悬停底。整行铺开，比挂起条更明显，靠近 Grok 里可点行的灰条。
+   * 选中再亮一档：鼠标移走后选中行还在，和正在悬停的另一行能分开。
+   */
+  rowHoverBg: '#2a2a2a',
+  rowSelectedBg: '#363636',
 
   mdText: TEXT,
   mdH1: PRIMARY,

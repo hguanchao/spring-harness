@@ -89,6 +89,7 @@ export {
 	type Component,
 	Container,
 	SELECTION_BLOCK,
+	SUPPRESS_MULTI_CLICK_SELECTION,
 	CURSOR_MARKER,
 	compositeTuiLine,
 	type Focusable,

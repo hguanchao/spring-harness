@@ -35,9 +35,9 @@ import { formatDuration } from '../../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker } from './interaction.js';
 import { armHoverHighlight } from './hover-highlight.js';
+import { rowChromeBg, selectTranscriptRow } from './row-selection.js';
 import { asSelectableRow, handleSelectablePress } from './selectable-row.js';
 import {
-  TOOL_DETAIL_INDENT,
   TOOL_GROUP_INDENT,
   TOOL_MARK,
   TOOL_MEMBER_INDENT,
@@ -156,8 +156,8 @@ class ThinkingMember {
   running = true;
   durationMs: number | undefined;
   expanded = false;
-  /** 正文当前挂的缩进档位；组开/合会改变它，变了就要重建 Markdown。 */
-  bodyIndent = TOOL_DETAIL_INDENT;
+  /** 正文当前挂的缩进。标题档位变了（纯思考组 / 有汇总行）要重建，Markdown 的 paddingX 建后不可变。 */
+  bodyIndent = -1;
   readonly row = new Text('', 0, 0);
   readonly body = new Container();
   /**
@@ -169,6 +169,28 @@ class ThinkingMember {
   readonly region: MouseRegion;
   readonly click = new DoubleClickTracker();
   markdown?: Markdown;
+  private hovered = false;
+  private selected = false;
+  /** 稳定身份：选中登记表靠函数引用认出「还是这一行」。 */
+  readonly releaseSelection = (): boolean => this.setSelected(false);
+
+  setHovered(on: boolean): boolean {
+    if (this.hovered === on) return false;
+    this.hovered = on;
+    this.paint();
+    return true;
+  }
+
+  setSelected(on: boolean): boolean {
+    if (this.selected === on) return false;
+    this.selected = on;
+    this.paint();
+    return true;
+  }
+
+  private paint(): void {
+    this.row.setCustomBgFn(rowChromeBg(this.selected, this.hovered));
+  }
 
   constructor(onToggle: (self: ThinkingMember, event: TuiMouseEvent) => TuiMouseEventResult | undefined) {
     this.block.addChild(this.row);
@@ -185,14 +207,15 @@ type GroupMember =
 let grayThinkingTheme: MarkdownTheme | undefined;
 
 /**
- * 思考正文专用主题：**一切元素压成中性灰**（toolTitle）。
+ * 思考正文专用主题：一切元素压成 muted，再用 faint 收细。
  *
- * 思考内容是 markdown——复用全局主题时，里面的标题/列表序号/行内码会吃到紫与蓝，
- * 而推理记录应当整体退到背景层。粗体/斜体保留字形，颜色统一灰。
+ * 思考内容是 markdown——复用全局主题时，里面的标题/列表序号/行内码会吃到紫与蓝。
+ * 详情比 Thought 标题再小一档：终端格子改不了字号，faint 让笔画更细。
+ * 这里不再加粗，否则标题会把刚收下去的一档加回来。
  */
 function thinkingMarkdownTheme(): MarkdownTheme {
   if (grayThinkingTheme) return grayThinkingTheme;
-  const gray = (text: string): string => theme.fg('toolTitle', text);
+  const gray = (text: string): string => theme.faint(theme.fg('muted', text));
   grayThinkingTheme = {
     heading: gray,
     link: gray,
@@ -204,7 +227,7 @@ function thinkingMarkdownTheme(): MarkdownTheme {
     quoteBorder: gray,
     hr: gray,
     listBullet: gray,
-    bold: (text) => theme.bold(gray(text)),
+    bold: gray,
     italic: (text) => theme.italic(gray(text)),
     emphasis: (text) => theme.italic(gray(text)),
     underline: gray,
@@ -373,13 +396,31 @@ export class ToolGroupComponent extends VStack {
   }
 
   private headerHovered = false;
+  private headerSelected = false;
+  private readonly releaseHeaderSelection = (): boolean => this.setHeaderSelected(false);
 
-  /** 悬停高亮：汇总行整行铺浅底（与挂起条悬停同一极浅色）。返回是否有变化。 */
+  /** 汇总行整行铺底。悬停和选中分两档，鼠标离开后选中还在。 */
+  private paintHeaderChrome(): void {
+    this.headerText.setCustomBgFn(rowChromeBg(this.headerSelected, this.headerHovered));
+  }
+
   private setHeaderHovered(on: boolean): boolean {
     if (this.headerHovered === on) return false;
     this.headerHovered = on;
-    this.headerText.setCustomBgFn(on ? (text) => theme.bg('steerHoverBg', text) : undefined);
+    this.paintHeaderChrome();
     return true;
+  }
+
+  private setHeaderSelected(on: boolean): boolean {
+    if (this.headerSelected === on) return false;
+    this.headerSelected = on;
+    this.paintHeaderChrome();
+    return true;
+  }
+
+  private selectHeader(): void {
+    selectTranscriptRow(this.releaseHeaderSelection);
+    if (this.setHeaderSelected(true)) this.ui.invalidateContent();
   }
 
   private handleHeaderMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -392,6 +433,7 @@ export class ToolGroupComponent extends VStack {
     const press = handleSelectablePress(this.headerRegion, event);
     if (press) return press;
     if (event.type !== 'click') return undefined;
+    this.selectHeader();
     if (this.headerClick.accept(event.x, event.y)) {
       // 展开时不动各工具：它们各自的输出仍由双击单独打开。
       this.setExpanded(!this.expanded, false);
@@ -404,9 +446,17 @@ export class ToolGroupComponent extends VStack {
     member: ThinkingMember,
     event: TuiMouseEvent,
   ): TuiMouseEventResult | undefined {
+    // 悬停只铺标题行。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
+    if (event.type === 'move') {
+      if (event.y === 0 && member.setHovered(true)) {
+        armHoverHighlight(() => member.setHovered(false));
+        this.ui.invalidateContent();
+      }
+      return undefined;
+    }
     if (event.button !== 'left') return undefined;
     // 分行路由（y 为成员块内行号，0 = 标题行），与工具行同一套约定：
-    // - 标题行按压：接管——双击开合的触发面。
+    // - 标题行按压：接管——双击开合的触发面。单击留下选中底。
     // - 正文行按压：放行给全屏划词——推理正文才是要拖动复制的内容。
     //   正文上的双击会经「原位松开合成 click」回到这里，同样计开合（收起）。
     if (event.type === 'press') {
@@ -415,6 +465,8 @@ export class ToolGroupComponent extends VStack {
       if (press) return press;
     }
     if (event.type !== 'click') return undefined;
+    selectTranscriptRow(member.releaseSelection);
+    if (member.setSelected(true)) this.ui.invalidateContent();
     if (member.click.accept(event.x, event.y)) {
       member.expanded = !member.expanded;
       this.markDirty();
@@ -446,36 +498,33 @@ export class ToolGroupComponent extends VStack {
   /** 重算一段思考的行文案；正文只在它自己展开时挂上。 */
   private updateThinking(member: ThinkingMember): void {
     // 收尾文案：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。空链不占行。
-    // 思考不用箭头：斜体本身就和工具行分开，再加 ▸ 会读成又一条进行中的工具。
+    // 前缀用 ✲，不用 ▸：斜体和箭头都会让思考行读成又一条工具。
     const label = member.running
       ? 'Thinking…'
       : member.durationMs === undefined
         ? 'Thought'
         : `Thought for ${formatDuration(member.durationMs)}`;
-    const labelColor: ThemeColor = member.running ? 'primary' : 'toolTitle';
-    // 组里有汇总行时，思考永远是成员：缩进一级，避免和汇总行并排读成两件并列的事。
-    // 纯思考组没有汇总行，思考行就是组头，仍停在组级。
+    // 组里有汇总行时，思考标题缩进一级，避免和汇总行并排。
+    // 展开的正文和 Thought 这几个字同一列，不跟前面的 ✲ 对齐。
     const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
+    const mark = '✲ ';
+    const textColumn = rowIndent + visibleWidth(mark);
     const painted = member.running
-      ? theme.italic(theme.shimmer(label, Date.now()))
-      : theme.italic(theme.fg(labelColor, label));
-    member.row.setText(`${' '.repeat(rowIndent)}${painted}`);
+      ? theme.shimmer(label, Date.now(), 'muted', 'dim')
+      : theme.fg('muted', label);
+    member.row.setText(`${' '.repeat(rowIndent)}${theme.fg('muted', mark)}${painted}`);
 
     member.body.clear();
     const detail = member.text.trim();
     if (!member.expanded || detail === '') return;
-    // 正文跟随自己的行：行缩进 +2（对齐标签列）。组开/合会改变档位，
-    // Markdown 的 paddingX 建后不可变，档位变了就重建。
-    const bodyIndent = rowIndent + 2;
-    if (member.markdown && member.bodyIndent !== bodyIndent) member.markdown = undefined;
+    if (member.markdown && member.bodyIndent !== textColumn) member.markdown = undefined;
     if (member.markdown) {
       member.markdown.setText(detail);
     } else {
-      member.markdown = new Markdown(detail, bodyIndent, 0, thinkingMarkdownTheme(), {
-        color: (content: string) => theme.fg('toolTitle', content),
-        italic: true,
+      member.markdown = new Markdown(detail, textColumn, 0, thinkingMarkdownTheme(), {
+        color: (content: string) => theme.faint(theme.fg('muted', content)),
       });
-      member.bodyIndent = bodyIndent;
+      member.bodyIndent = textColumn;
     }
     member.body.addChild(member.markdown);
   }

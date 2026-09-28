@@ -5,17 +5,27 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。edit / write 成功后，组一展开就在行下给出短 diff，双击再放长。
  *
- * 前缀按状态：进行中 `▸`、完成 `·`、展开 `▾`、失败 `×`；进行中的标题带 shimmer。
+ * 前缀按状态：进行中/完成 `▸`、展开 `▾`、失败 `×`；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  * 展开后的详情块整块挂在一条竖轨（`│`）上：轨与标题前缀同列，内容对齐详情缩进，
  * 和 Claude Code / Codex 的工具输出同款——详情看一眼就知道属于上面的哪一行。
  */
 
-import { Container, MouseRegion, Text, truncateToWidth, type TUI, visibleWidth, wrapTextWithAnsi } from '../../../tui/index.js';
+import {
+  Container,
+  MouseRegion,
+  SUPPRESS_MULTI_CLICK_SELECTION,
+  Text,
+  truncateToWidth,
+  type TUI,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from '../../../tui/index.js';
 import { flattenWhitespace } from '../../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
 import { DoubleClickTracker, failureHeadline, WorkingLabel } from './interaction.js';
 import { armHoverHighlight } from './hover-highlight.js';
+import { rowChromeBg, selectTranscriptRow } from './row-selection.js';
 import { handleSelectablePress, SELECTABLE_ROW } from './selectable-row.js';
 import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.js';
 import {
@@ -28,13 +38,13 @@ import {
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
 /**
- * 组头仍用 `▸` / `▾`。成员行完成之后换成 `·`：和还在跑的 `▸` 分开，不再看起来像进行中。
+ * 组头用 `▸` / `▾` 表达开合。成员行完成未展开时用 `▸`，和进行中同字形，靠标题 shimmer 停下来区分；展开后用 `▾`。
  * 失败仍用 `×`。
  */
 export const TOOL_MARK = {
   running: '▸',
   done: '▸',
-  settled: '·',
+  settled: '▸',
   expanded: '▾',
   fail: '×',
 } as const;
@@ -237,6 +247,8 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
 
 export class ToolExecutionComponent extends Container {
   readonly [SELECTABLE_ROW] = true as const;
+  /** 详情上的双击是收起，不参与选词；拖选复制仍走字符粒度。 */
+  readonly [SUPPRESS_MULTI_CLICK_SELECTION] = true as const;
   private readonly toolName: string;
   private readonly toolCallId: string;
   private args: Record<string, unknown>;
@@ -289,23 +301,29 @@ export class ToolExecutionComponent extends Container {
     this.content.addChild(this.titleText);
     this.content.addChild(this.bodyText);
     this.region = new MouseRegion(this.content, (event) => {
-      // 悬停高亮：标题行铺浅底。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
-      if (event.type === 'move' && this.setHovered(true)) {
-        armHoverHighlight(() => this.setHovered(false));
-        this.ui.invalidateContent();
+      // 悬停只铺标题行。移出的清除由 TUI.onMouseMotion 先行（先清后亮）。
+      // 详情行不铺：那一块是拖选复制的，整行亮底会盖住输出。
+      if (event.type === 'move') {
+        if (event.y === 0 && this.setHovered(true)) {
+          armHoverHighlight(() => this.setHovered(false));
+          this.ui.invalidateContent();
+        }
+        return undefined;
       }
       if (event.button !== 'left') return undefined;
       // 分行路由（y 为组件内行号，0 = 标题行）：
-      // - 标题行按压：接管，供合成 click——双击展开的触发面。
-      // - 正文行按压：放行给全屏划词——工具输出是拖动复制的主要内容，划选后右键复制。
-      //   正文上的双击会经「原位松开合成 click」回到这里：双击详情同样计开合（展开态即收起），
-      //   划词路径顺带选中的那个词，会在 toggle 后的清选区里一并抹掉。
+      // - 标题行按压：接管，供合成 click——双击展开的触发面。单击留下选中底。
+      // - 正文行按压：放行给拖选——工具输出仍可划选后右键复制。
+      //   双击不选词：这一下是收起（或再展开一级），和选词抢同一次点击。
+      //   组件带 SUPPRESS_MULTI_CLICK_SELECTION，选择层不会把这次按压升级成词/行选区。
+      //   原位松开仍会合成 click，双击详情照常开合。
       if (event.type === 'press') {
         if (event.y !== 0) return undefined;
         const press = handleSelectablePress(this, event);
         if (press) return press;
       }
       if (event.type !== 'click') return undefined;
+      this.selectRow();
       if (this.doubleClick.accept(event.x, event.y)) this.toggleDetail();
       return { handled: true };
     });
@@ -314,13 +332,32 @@ export class ToolExecutionComponent extends Container {
   }
 
   private hovered = false;
+  private selected = false;
+  private readonly releaseSelection = (): boolean => this.setSelected(false);
 
-  /** 悬停高亮只画标题行，底色与挂起条/汇总行同一极浅色（大面积亮底喧宾夺主）。返回是否有变化。 */
+  /** 单击标题或详情都算选中这一行；底只画在标题上。 */
+  private selectRow(): void {
+    selectTranscriptRow(this.releaseSelection);
+    if (this.setSelected(true)) this.ui.invalidateContent();
+  }
+
+  /** 标题行整行铺底：悬停一档，选中更亮一档。 */
+  private paintTitleChrome(): void {
+    this.titleText.setCustomBgFn(rowChromeBg(this.selected, this.hovered));
+    this.titleDirty = true;
+  }
+
   private setHovered(on: boolean): boolean {
     if (this.hovered === on) return false;
     this.hovered = on;
-    this.titleText.setCustomBgFn(on ? (text) => theme.bg('steerHoverBg', text) : undefined);
-    this.titleDirty = true;
+    this.paintTitleChrome();
+    return true;
+  }
+
+  private setSelected(on: boolean): boolean {
+    if (this.selected === on) return false;
+    this.selected = on;
+    this.paintTitleChrome();
     return true;
   }
 
@@ -457,10 +494,10 @@ export class ToolExecutionComponent extends Container {
   }
 
   /**
-   * 前缀颜色跟随行文：非失败行都是 muted，与标题文字同色；箭头只表达「可展开/已展开」。
+   * 前缀颜色跟随行文：非失败行都是 muted，与标题文字同色。
    *
-   * 进行与完成同字形同色（`▸`），靠标题 shimmer 区分——同一批工具行在跑完之后
-   * 只应该「静下来」，而不是整行换色，否则一轮收尾会有半屏颜色跳变。
+   * 进行与完成同字形同色（`▸`），靠标题 shimmer 停下来——
+   * 一轮收尾只该静下来，不该整行换色。展开后才换成 `▾`。
    */
   /** List 折叠行带 `(N entries)`，一行里能看出有多少项。 */
   private listEntrySuffix(): string {

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { TUI, TuiMouseEvent } from '../../../src/tui/index.js';
+import { visibleWidth } from '../../../src/tui/index.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT, ToolExecutionComponent } from '../../../src/plugins/sph-tui/components/tool-execution.js';
 import { ToolGroupComponent } from '../../../src/plugins/sph-tui/components/tool-group.js';
+import { theme } from '../../../src/plugins/sph-tui/theme/theme.js';
 
 let renderCount = 0;
 let contentCount = 0;
@@ -125,9 +127,12 @@ describe('ToolGroupComponent 缩进分层', () => {
     assert.equal(indentOfText('Listed'), TOOL_GROUP_INDENT, '汇总行在组级');
     assert.equal(indentOfText('Thought for'), TOOL_MEMBER_INDENT, '思考行与工具行同级');
     assert.equal(indentOfText('List a.java'), TOOL_MEMBER_INDENT, '工具行在成员级');
-    assert.equal(indentOfText('第一轮'), TOOL_MEMBER_INDENT + 2, '思考正文跟自己的行再缩 2');
-    // 关键回归：思考正文不能和工具行同级，否则一段散文会读成工具列表的第一项。
-    assert.notEqual(indentOfText('第一轮'), indentOfText('List a.java'));
+    assert.equal(
+      indentOfText('第一轮'),
+      TOOL_MEMBER_INDENT + visibleWidth('✲ '),
+      '展开的思考正文和 Thought 文字持平，不跟 ✲ 对齐',
+    );
+    assert.ok(lines.some((line) => line.replace(STRIP, '').includes('✲ Thought for')), '思考标题带 ✲');
   });
 
   it('折叠态进行中的思考也缩进，不和汇总行并排', () => {
@@ -162,11 +167,11 @@ function thinkingOf(group: ToolGroupComponent, index = 0): { expanded: boolean }
   return hit;
 }
 
-function clickGroup(group: ToolGroupComponent, y: number, x = 10): void {
+function pointerGroup(group: ToolGroupComponent, type: 'click' | 'move', y: number, x = 10): void {
   const lines = group.render(100);
   const event: TuiMouseEvent = {
-    type: 'click',
-    button: 'left',
+    type,
+    button: type === 'move' ? 'none' : 'left',
     x,
     y,
     screenX: x,
@@ -178,6 +183,10 @@ function clickGroup(group: ToolGroupComponent, y: number, x = 10): void {
     ctrl: false,
   };
   group.handleMouse(event);
+}
+
+function clickGroup(group: ToolGroupComponent, y: number, x = 10): void {
+  pointerGroup(group, 'click', y, x);
 }
 
 function lineIndex(group: ToolGroupComponent, needle: string): number {
@@ -260,11 +269,11 @@ describe('ToolGroupComponent 流式思考的绘制通道', () => {
 describe('思考正文统一中性灰', () => {
   const colorsOf = (text: string): string[] => text.match(/\x1b\[38;(?:5;\d+|2;\d+;\d+;\d+)m/g) ?? [];
 
-  it('详情里的标题/列表/序号/行内码全部压成 toolTitle 灰', async () => {
+  it('详情里的标题/列表/序号/行内码全部压成 muted', async () => {
     // 思考内容是 markdown：全局主题会给列表序号上紫、行内码上蓝——
-    // 推理记录是过程层，用户要求整体退成中性灰，一个彩字都不留。
+    // 推理记录是提示，整体退成 muted，一个彩字都不留。
     const { theme } = await import('../../../src/plugins/sph-tui/theme/theme.js');
-    const gray = colorsOf(theme.fg('toolTitle', 'x'))[0];
+    const gray = colorsOf(theme.fg('muted', 'x'))[0];
     const group = new ToolGroupComponent(ui);
     group.beginThinking();
     group.setThinking('#### 注意\n- 项目 `x`\n1. 序号 `y`', false, 500);
@@ -273,9 +282,16 @@ describe('思考正文统一中性灰', () => {
     const lines = group.render(100);
     const content = lines.filter((line) => /注意|项目|序号/.test(line.replace(STRIP, '')));
     assert.ok(content.length >= 3, '应有标题/列表/序号内容行');
+    const title = lines.find((line) => line.replace(STRIP, '').includes('Thought for'));
+    assert.ok(title, '应有 Thought 标题');
+    // 非 TTY / NO_COLOR 时 faint 不发码，强度断言只在发得出来的进程里做。
+    if (theme.faint('x').includes('\x1b[2m')) {
+      assert.equal(title.includes('\x1b[2m'), false, '标题不收细');
+      assert.ok(content.every((line) => line.includes('\x1b[2m')), '详情用 faint 收细笔画');
+    }
     for (const line of content) {
       const colors = [...new Set(colorsOf(line))];
-      assert.deepEqual(colors, [gray], `思考内容行应只有中性灰，实际: ${colors.join(',')} — ${line.replace(STRIP, '')}`);
+      assert.deepEqual(colors, [gray], `思考内容行应只有 muted，实际: ${colors.join(',')} — ${line.replace(STRIP, '')}`);
     }
   });
 });
@@ -295,9 +311,9 @@ describe('ToolGroupComponent 组收起复位下级', () => {
     group.setExpanded(true, false);
     const after = rowsOf(group);
     assert.equal(after.filter((row) => row.includes('ok')).length, 0, `重新展开后不应残留详情行，实际: ${after.join(' | ')}`);
-    assert.equal(after.filter((row) => row.startsWith('·')).length, 3, '完成的工具行用 ·，不再用进行中的 ▸');
+    assert.equal(after.filter((row) => row.startsWith('▸')).length, 3, '完成的工具行用 ▸');
     assert.equal(after.filter((row) => row.includes('Thought for')).length, 3, '思考行不再带箭头');
-    assert.equal(after.filter((row) => row.startsWith('▸')).length, 0, '折叠后的成员不该再是 ▸');
+    assert.equal(after.filter((row) => row.startsWith('▾') && !row.startsWith('▾ Listed')).length, 0, '未展开的成员不该是 ▾');
   });
 
   it('组收起时同样复位思考段详情', () => {
@@ -357,5 +373,79 @@ describe('ToolGroupComponent 思考正文的交互', () => {
     assert.ok(press(titleY)?.handled, '标题行按压应被接管');
     // 正文行（y≠0）：放行——TUI 层按划词语义接手（全屏选词）。
     assert.equal(press(bodyY), undefined, '正文行按压应放行给划词');
+  });
+});
+
+describe('工具行选中与悬停', () => {
+  const hoverBg = theme.bgSeq('rowHoverBg');
+  const selectedBg = theme.bgSeq('rowSelectedBg');
+
+  it('单击汇总行留下选中底，再点思考行选中挪过去', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    const headerY = lineIndex(group, 'Listed');
+    clickGroup(group, headerY);
+    assert.ok(group.render(100)[headerY]?.includes(selectedBg), '汇总行应整行铺选中底');
+
+    const thoughtY = lineIndex(group, 'Thought for');
+    clickGroup(group, thoughtY);
+    const lines = group.render(100);
+    assert.equal(lines[headerY]?.includes(selectedBg), false, '选中应离开汇总行');
+    assert.ok(lines[thoughtY]?.includes(selectedBg), '思考行应整行铺选中底');
+  });
+
+  it('悬停只铺当前标题，不抢走已选中的另一行', () => {
+    const group = buildThreeIterationGroup();
+    group.setExpanded(true, false);
+    const headerY = lineIndex(group, 'Listed');
+    clickGroup(group, headerY);
+    const thoughtY = lineIndex(group, 'Thought for');
+    pointerGroup(group, 'move', thoughtY);
+    const lines = group.render(100);
+    assert.ok(lines[headerY]?.includes(selectedBg), '悬停不应清掉汇总行的选中');
+    assert.ok(lines[thoughtY]?.includes(hoverBg), '思考标题应铺悬停底');
+    assert.equal(lines[thoughtY]?.includes(selectedBg), false, '悬停不是选中');
+  });
+
+  it('工具详情上的移动不给标题铺底，标题上的移动才铺', () => {
+    const tool = new ToolExecutionComponent('read', 'c-hover', { path: 'a.java' }, ui);
+    tool.markExecutionStarted();
+    tool.updateResult({ content: 'ok', isError: false });
+    tool.setExpanded(true);
+    const move = (y: number): void => {
+      tool.render(80);
+      tool.handleMouse({
+        type: 'move',
+        button: 'none',
+        x: 4,
+        y,
+        screenX: 4,
+        screenY: y,
+        width: 80,
+        height: 8,
+        shift: false,
+        alt: false,
+        ctrl: false,
+      });
+    };
+    move(1);
+    assert.equal(tool.render(80)[0]?.includes(hoverBg), false, '详情行不应点亮标题');
+    move(0);
+    assert.ok(tool.render(80)[0]?.includes(hoverBg), '标题行悬停应整行铺底');
+    tool.render(80);
+    tool.handleMouse({
+      type: 'click',
+      button: 'left',
+      x: 4,
+      y: 0,
+      screenX: 4,
+      screenY: 0,
+      width: 80,
+      height: 8,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+    assert.ok(tool.render(80)[0]?.includes(selectedBg), '单击工具行应留下选中底');
   });
 });

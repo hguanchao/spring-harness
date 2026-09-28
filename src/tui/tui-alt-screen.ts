@@ -20,6 +20,7 @@ import {
 	type Component,
 	Container,
 	CURSOR_MARKER,
+	SUPPRESS_MULTI_CLICK_SELECTION,
 	compositeTuiLine,
 	dispatchMouseEvent,
 	retargetMouseEvent,
@@ -1097,6 +1098,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.selectionSourceLines(point)[point.row] ?? "";
 	}
 
+	/** 命中声明了「双击不选词」的组件（工具行详情）。 */
+	private hitSuppressesMultiClickSelection(x: number, y: number): boolean {
+		const layout = this.currentLayout;
+		if (!layout) return false;
+		return getLayoutBoxesAt(layout, x, y).some(
+			(box) =>
+				(box.component as { [SUPPRESS_MULTI_CLICK_SELECTION]?: boolean })[SUPPRESS_MULTI_CLICK_SELECTION] ===
+				true,
+		);
+	}
+
 	private getWordSelection(point: SelectionPoint): SelectionRange | undefined {
 		const line = stripTerminalSequences(this.getSelectionSourceLine(point));
 		const segments: Array<{ start: number; end: number; selectable: boolean; joiner: boolean }> = [];
@@ -1329,7 +1341,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);
-		const word = this.getWordSelection(anchor);
+		// 工具详情的双击是收起，不在这里升级成选词/选行；拖选仍走字符粒度。
+		const word = this.hitSuppressesMultiClickSelection(event.x, event.y)
+			? undefined
+			: this.getWordSelection(anchor);
 		const clickCount = this.getClickCount(anchor, word);
 		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
