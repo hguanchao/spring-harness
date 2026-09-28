@@ -207,15 +207,14 @@ type GroupMember =
 let grayThinkingTheme: MarkdownTheme | undefined;
 
 /**
- * 思考正文专用主题：一切元素压成 muted，再用 faint 收细。
+ * 思考正文专用主题：颜色和 Thought 标题同一档 muted。
  *
  * 思考内容是 markdown——复用全局主题时，里面的标题/列表序号/行内码会吃到紫与蓝。
- * 详情比 Thought 标题再小一档：终端格子改不了字号，faint 让笔画更细。
- * 这里不再加粗，否则标题会把刚收下去的一档加回来。
+ * 这里不再加粗，避免详情比标题更重。终端格子不能单独缩小字号。
  */
 function thinkingMarkdownTheme(): MarkdownTheme {
   if (grayThinkingTheme) return grayThinkingTheme;
-  const gray = (text: string): string => theme.faint(theme.fg('muted', text));
+  const gray = (text: string): string => theme.fg('muted', text);
   grayThinkingTheme = {
     heading: gray,
     link: gray,
@@ -499,19 +498,19 @@ export class ToolGroupComponent extends VStack {
   private updateThinking(member: ThinkingMember): void {
     // 收尾文案：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。空链不占行。
     // 前缀用 ✲，不用 ▸：斜体和箭头都会让思考行读成又一条工具。
-    const label = member.running
-      ? 'Thinking…'
-      : member.durationMs === undefined
-        ? 'Thought'
-        : `Thought for ${formatDuration(member.durationMs)}`;
+    const head = member.running ? 'Thinking…' : member.durationMs === undefined ? 'Thought' : 'Thought for';
+    const tail = !member.running && member.durationMs !== undefined ? ` ${formatDuration(member.durationMs)}` : '';
     // 组里有汇总行时，思考标题缩进一级，避免和汇总行并排。
     // 展开的正文和 Thought 这几个字同一列，不跟前面的 ✲ 对齐。
     const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
     const mark = '✲ ';
     const textColumn = rowIndent + visibleWidth(mark);
+    // 展开后只把「Thought for」提成正文色。耗时和详情仍是 muted。
     const painted = member.running
-      ? theme.shimmer(label, Date.now(), 'muted', 'dim')
-      : theme.fg('muted', label);
+      ? theme.shimmer(head, Date.now(), 'muted', 'dim')
+      : member.expanded
+        ? `${theme.fg('text', head)}${tail ? theme.fg('muted', tail) : ''}`
+        : theme.fg('muted', `${head}${tail}`);
     member.row.setText(`${' '.repeat(rowIndent)}${theme.fg('muted', mark)}${painted}`);
 
     member.body.clear();
@@ -522,7 +521,7 @@ export class ToolGroupComponent extends VStack {
       member.markdown.setText(detail);
     } else {
       member.markdown = new Markdown(detail, textColumn, 0, thinkingMarkdownTheme(), {
-        color: (content: string) => theme.faint(theme.fg('muted', content)),
+        color: (content: string) => theme.fg('muted', content),
       });
       member.bodyIndent = textColumn;
     }

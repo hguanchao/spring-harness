@@ -285,14 +285,6 @@ export class Theme {
     return sgr('\x1b[1m', '\x1b[22m', text);
   }
 
-  /**
-   * 降低绘制强度（SGR 2）。
-   * 终端格子不能单独缩小字号，faint 把笔画收细，读起来比同一颜色的正文小一档。
-   */
-  faint(text: string): string {
-    return sgr('\x1b[2m', '\x1b[22m', text);
-  }
-
   italic(text: string): string {
     return sgr('\x1b[3m', '\x1b[23m', text);
   }

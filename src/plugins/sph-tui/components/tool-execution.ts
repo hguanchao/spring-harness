@@ -27,7 +27,7 @@ import { DoubleClickTracker, failureHeadline, WorkingLabel } from './interaction
 import { armHoverHighlight } from './hover-highlight.js';
 import { rowChromeBg, selectTranscriptRow } from './row-selection.js';
 import { handleSelectablePress, SELECTABLE_ROW } from './selectable-row.js';
-import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.js';
+import { type SubagentHeadParts } from './subagent-task.js';
 import {
   DIFF_EXPANDED_LINES,
   DIFF_PREVIEW_LINES,
@@ -517,26 +517,30 @@ export class ToolExecutionComponent extends Container {
     const summary = summarizeArgs(this.toolName, this.args);
     // subagent 行首用「序号 + 类型 + 简短描述」，与 dock 里的实时行同一文案；
     // 其余工具保持「显示名 + 参数摘要」；List 额外带 entry 计数。
-    const name = this.displayName();
-    const base = this.subagentMeta
-      ? subagentTranscriptText(this.subagentMeta)
-      : `${name}${summary ? ` ${summary}` : ''}${this.listEntrySuffix()}`;
+    const name = this.subagentMeta ? `Subagent ${this.subagentMeta.index}` : this.displayName();
+    const rest = this.subagentMeta
+      ? ` ${this.subagentMeta.description}`
+      : `${summary ? ` ${summary}` : ''}${this.listEntrySuffix()}`;
     // 失败时第一眼是人话。原文留在展开后的详情里，不铺在标题上。
-    const title = status === 'error' && this.result
-      ? `${base} · ${failureHeadline(this.result.content)}`
-      : base;
+    const failure = status === 'error' && this.result ? ` · ${failureHeadline(this.result.content)}` : '';
     const change = this.fileChange();
     const activitySuffix = this.activity
       ? this.activity.error
         ? theme.fg('error', ` · ${this.activity.text}`)
         : theme.fg('muted', ` · ${this.activity.text}`)
       : '';
-    const mark = toolMark(status, this.expanded || this.fullDetail);
-    const titleColor: ThemeColor = status === 'error' ? 'error' : 'muted';
+    const opened = this.expanded || this.fullDetail;
+    const mark = toolMark(status, opened);
     const live = status === 'pending' || status === 'running';
-    const painted = live ? theme.shimmer(title, Date.now()) : theme.fg(titleColor, title);
-    // 箭头与行文同色（muted），不再表达状态——状态语义在文字动效与颜色里。
-    const markColor: ThemeColor = status === 'error' ? 'error' : titleColor;
+    // 展开后只把工具名（Read / Glob）提成正文色 #c6c6c6。后面的路径、模式仍是 muted。
+    const painted = status === 'error'
+      ? theme.fg('error', `${name}${rest}${failure}`)
+      : live
+        ? theme.shimmer(`${name}${rest}`, Date.now())
+        : opened
+          ? `${theme.fg('text', name)}${rest ? theme.fg('muted', rest) : ''}`
+          : theme.fg('muted', `${name}${rest}`);
+    const markColor: ThemeColor = status === 'error' ? 'error' : 'muted';
     this.titleLine = `${theme.fg(markColor, mark)} ${painted}`;
     this.countsLine = this.counts ? theme.fg('muted', ` · ${this.counts.text}`) : '';
     this.activityLine = activitySuffix;

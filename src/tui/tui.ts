@@ -527,6 +527,15 @@ export interface TUI extends Component {
 	 * 供悬停类 UI 做「移出即隐藏」：观察者先清态，同帧内命中自己的 move 再重新点亮。
 	 */
 	onMouseMotion?: (x: number, y: number) => void;
+	/** move/drag 分发结束后调用。悬停清掉且没有新行接上时，用来让转录缓存失效。 */
+	finishMouseMotion?: () => void;
+	/**
+	 * 左键 click 分发前后各调用一次。
+	 * 用来做「点在可选行上就留下选中，点在别处就取消」：分发前清标记，行内的 click 再认领。
+	 */
+	prepareMouseClick?: () => void;
+	/** 返回 true 表示转录内容变了，需要让滚动缓存失效。 */
+	finishMouseClick?: () => boolean;
 }
 
 /** 备用屏幕才有的视口能力。模块内 Symbol，不用 Symbol.for。 */

@@ -387,6 +387,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private contentGeneration = 0;
 	/** 鼠标移动观察者：每个 move/drag 事件在组件分发前触发一次（见 TUI 接口说明）。 */
 	onMouseMotion?: (x: number, y: number) => void;
+	finishMouseMotion?: () => void;
+	prepareMouseClick?: () => void;
+	finishMouseClick?: () => boolean;
 
 	constructor(
 		terminal: Terminal,
@@ -737,6 +740,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return dispatchMouseEvent(target.component, retargetMouseEvent(event, target));
 	}
 
+	/**
+	 * 左键 click 包一层认领：分发前清标记，行自己的处理函数再认领。
+	 * 没人认领就取消工具行选中，并让转录缓存失效——选中底画在内容行上。
+	 */
+	private dispatchMouseClick(
+		event: TuiMouseEvent,
+		dispatch: () => TuiMouseDispatchResult | undefined,
+	): TuiMouseDispatchResult | undefined {
+		const track = event.button === "left";
+		if (track) this.prepareMouseClick?.();
+		const result = dispatch();
+		if (track && this.finishMouseClick?.()) this.invalidateContent();
+		return result;
+	}
+
 	private getComponentClickCount(target: TuiMouseDispatchTarget, x: number, y: number): number {
 		const now = Date.now();
 		const previous = this.lastComponentClick;
@@ -780,10 +798,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					: "drag"
 				: "press";
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
-		if ((type === "move" || type === "drag") && this.onMouseMotion) {
+		const trackMotion = type === "move" || type === "drag";
+		if (trackMotion && this.onMouseMotion) {
 			this.onMouseMotion(event.screenX, event.screenY);
 		}
+		try {
+			this.routeMouseEvent(raw, event, type);
+		} finally {
+			if (trackMotion) this.finishMouseMotion?.();
+		}
+	}
 
+	private routeMouseEvent(raw: SgrMouseEvent, event: TuiMouseEvent, type: TuiMouseEvent["type"]): void {
 		if (this.mouseCapture || this.mousePressTarget) {
 			const target = this.mouseCapture ?? this.mousePressTarget!;
 			// ±1 格内的手抖不算移动：按得准松得偏一格是双击的常态，太严会把 click 吞掉，
@@ -803,7 +829,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
 						clickCount: this.getComponentClickCount(target, raw.x, raw.y),
 					});
-					const clickResult = this.dispatchMouseToTarget(clickEvent, target);
+					const clickResult = this.dispatchMouseClick(clickEvent, () => this.dispatchMouseToTarget(clickEvent, target));
 					if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
 				}
 				this.clearComponentMouseGesture();
@@ -1302,8 +1328,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				const clickEvent = this.createMouseEvent("click", event.button, event.x, event.y, {
 					clickCount: this.lastClick?.count ?? 1,
 				});
-				const overlay = this.dispatchMouseToOverlay(clickEvent);
-				const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(clickEvent));
+				const result = this.dispatchMouseClick(
+					clickEvent,
+					() => {
+						const overlay = this.dispatchMouseToOverlay(clickEvent);
+						return overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(clickEvent));
+					},
+				);
 				if (result) {
 					const render = this.applyMouseDispatchResult(clickEvent, result);
 					this.clearTextSelection();

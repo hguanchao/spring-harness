@@ -284,10 +284,10 @@ describe('思考正文统一中性灰', () => {
     assert.ok(content.length >= 3, '应有标题/列表/序号内容行');
     const title = lines.find((line) => line.replace(STRIP, '').includes('Thought for'));
     assert.ok(title, '应有 Thought 标题');
-    // 非 TTY / NO_COLOR 时 faint 不发码，强度断言只在发得出来的进程里做。
-    if (theme.faint('x').includes('\x1b[2m')) {
-      assert.equal(title.includes('\x1b[2m'), false, '标题不收细');
-      assert.ok(content.every((line) => line.includes('\x1b[2m')), '详情用 faint 收细笔画');
+    assert.ok(title.includes(theme.fg('text', 'Thought for')), '展开后只有 Thought for 是 #c6c6c6');
+    assert.ok(title.includes(theme.fg('muted', ' 0.5s')), '耗时仍是 muted');
+    for (const line of content) {
+      assert.equal(line.includes('\x1b[2m'), false, '详情不用 faint，颜色和标题一致');
     }
     for (const line of content) {
       const colors = [...new Set(colorsOf(line))];

@@ -86,7 +86,8 @@ import { APPROVAL_OVERLAY_PRIORITY, showInputDialog, showMessageDialog, showSele
 import { renderPluginsReport, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
 import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from './components/interaction.js';
-import { clearHoverHighlight } from './components/hover-highlight.js';
+import { clearedHoverNeedsRepaint, clearHoverHighlight } from './components/hover-highlight.js';
+import { beginTranscriptClick, finishTranscriptClick } from './components/row-selection.js';
 
 import { CustomEditor } from './components/custom-editor.js';
 import { FooterComponent, type FooterData } from './components/footer.js';
@@ -433,11 +434,21 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     // Enter 重新挂起。全量搬回而不是逐条——一条规则讲清楚，没有歧义中间态。
     // 悬停离开检测：任何鼠标移动先清各类悬停高亮（挂起条浅底/提示/按钮、工具行/汇总行浅底）；
     // 若光标仍悬在原目标上，同帧的组件分发会重新点亮——监听器先于分发执行，一清一亮。
+    // 悬停先清再亮。清掉之后如果没有新行接上，requestRender 打不到转录缓存，
+    // 旧的 hover 底会留在屏幕上，所以这种时候要 invalidateContent。
+    let transcriptHoverCleared = false;
     this.ui.onMouseMotion = () => {
-      let changed = clearHoverHighlight();
-      if (this.steerBar.clearHover()) changed = true;
-      if (changed) this.ui.requestRender();
+      transcriptHoverCleared = clearHoverHighlight();
+      if (this.steerBar.clearHover()) this.ui.requestRender();
     };
+    this.ui.finishMouseMotion = () => {
+      const cleared = transcriptHoverCleared;
+      transcriptHoverCleared = false;
+      if (clearedHoverNeedsRepaint(cleared)) this.ui.invalidateContent();
+    };
+    // 点在工具行 / 思考行上留下选中；点在正文、空白、输入框上则取消。
+    this.ui.prepareMouseClick = () => beginTranscriptClick();
+    this.ui.finishMouseClick = () => finishTranscriptClick();
     this.editor.onAction('app.followUp', () => {
       const text = this.editor.getText().trim();
       if (text === '' || text.startsWith('/')) return;

@@ -20,3 +20,8 @@ export function clearHoverHighlight(): boolean {
   clearActive = undefined;
   return clear ? clear() : false;
 }
+
+/** 这次移动清掉了悬停，并且没有新行接上。转录缓存里还是旧底色，必须整份重画。 */
+export function clearedHoverNeedsRepaint(cleared: boolean): boolean {
+  return cleared && clearActive === undefined;
+}

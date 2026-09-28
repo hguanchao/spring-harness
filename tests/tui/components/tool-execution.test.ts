@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import type { TUI } from '../../../src/tui/index.js';
 import { visibleWidth } from '../../../src/tui/index.js';
 import { TOOL_DETAIL_INDENT, ToolExecutionComponent } from '../../../src/plugins/sph-tui/components/tool-execution.js';
+import { theme } from '../../../src/plugins/sph-tui/theme/theme.js';
 
 const ui = {
   invalidateContent() {},
@@ -138,5 +139,24 @@ describe('预览块的折行与省略符', () => {
     const marker = preview.find((row) => row.includes('more)'))!;
     assert.equal(marker.indexOf('…'), TOOL_DETAIL_INDENT);
     assert.equal(inkColumn(preview.find((row) => row.includes('entry-1'))!), TOOL_DETAIL_INDENT);
+  });
+});
+
+describe('展开后的工具行标题', () => {
+  const colorsOf = (text: string): string[] => text.match(/\x1b\[38;(?:5;\d+|2;\d+;\d+;\d+)m/g) ?? [];
+
+  it('双击展开后 Read 标题用正文色 #c6c6c6，收起后回到 muted', () => {
+    const muted = colorsOf(theme.fg('muted', 'x'))[0];
+    const text = colorsOf(theme.fg('text', 'x'))[0];
+    const tool = new ToolExecutionComponent('glob', 'g1', { pattern: '*.ts' }, ui);
+    tool.markExecutionStarted();
+    tool.updateResult({ content: 'a.ts', isError: false });
+    const folded = tool.render(80)[0] ?? '';
+    assert.ok(colorsOf(folded).includes(muted), '收起时标题是 muted');
+    assert.equal(colorsOf(folded).includes(text), false);
+    tool.toggleDetail();
+    const opened = tool.render(80)[0] ?? '';
+    assert.ok(opened.includes(theme.fg('text', 'Glob')), '展开后只有 Glob 是 #c6c6c6');
+    assert.ok(opened.includes(theme.fg('muted', ' *.ts')), '模式仍是 muted');
   });
 });
