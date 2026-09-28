@@ -107,7 +107,20 @@ describe('contentPaintRight', () => {
 });
 
 describe('auto 滚动条可见性', () => {
-  it('pin-reserve 时滑块按可滚高度缩放，不铺满整列', () => {
+  it('第一次进入、内容装得下且没有可滚留白时不画滚动条', () => {
+    const view = new ScrollView(new Text('Spring Harness', 0, 0), {
+      follow: 'end',
+      primary: true,
+      scrollbar: 'auto',
+    });
+    const frame = renderLayoutFrame(view, 80, 24, () => {});
+    const box = getScrollViewBox(frame, view);
+    assert.ok(box);
+    assert.equal(view.pinPad, 0);
+    assert.equal(getScrollbarGeometry(box), undefined);
+  });
+
+  it('短对话也有滑块，贴在转录区底部，不铺满整列', () => {
     const body = Array.from({ length: 8 }, (_, i) => `L${i}`).join('\n');
     const view = new ScrollView(new Text(body, 0, 0), {
       follow: 'end',
@@ -118,11 +131,13 @@ describe('auto 滚动条可见性', () => {
     const frame = renderLayoutFrame(view, 20, 20, () => {});
     const box = getScrollViewBox(frame, view);
     assert.ok(box);
-    assert.ok(view.pinPad > 0, '短内容应有 pin-reserve');
+    assert.ok(view.pinPad > 0, '短内容仍可以钉住用户消息');
     const geo = getScrollbarGeometry(box);
-    assert.ok(geo, '有可滚留白就应画滑块');
-    assert.ok(geo.thumbHeight < geo.trackHeight, '滑块应短于轨道，才能看出在动');
+    assert.ok(geo);
+    assert.ok(geo.thumbHeight < geo.trackHeight, '短对话的滑块应是一小节');
+    assert.equal(geo.thumbTop + geo.thumbHeight, geo.trackTop + geo.trackHeight);
   });
+
 });
 
 describe('scrollbarUntil', () => {
@@ -133,7 +148,6 @@ describe('scrollbarUntil', () => {
       follow: 'end',
       primary: true,
       scrollbar: 'always',
-      scrollbarUntil: editor,
     });
     const root = new VStack(
       [
@@ -159,9 +173,9 @@ describe('scrollbarUntil', () => {
     assert.ok(editorBox);
     assert.ok(editorBox.rect.y > scrollBox.rect.y + scrollBox.rect.height);
     const gutter = editorBox.rect.y - 1;
-    const gutterLine = frame.lines[gutter] ?? '';
-    assert.equal(stripTerminalSequences(gutterLine), '█');
-    assert.match(gutterLine, /\x1b\[\d+G/, '空隙行用 CHA 落到滑块列，不铺空格');
+    assert.equal(stripTerminalSequences(frame.lines[gutter] ?? '').includes('█'), false, '滑块不画出转录区');
+    assert.ok(geo.thumbTop >= scrollBox.rect.y);
+    assert.ok(geo.thumbTop + geo.thumbHeight <= scrollBox.rect.y + scrollBox.rect.height);
   });
 
   it('pin-reserve 吸顶时轨道仍铺满转录区，滑块同样接到 until', () => {
@@ -171,7 +185,6 @@ describe('scrollbarUntil', () => {
       follow: 'end',
       primary: true,
       scrollbar: 'auto',
-      scrollbarUntil: editor,
     });
     view.setPinY(12);
     const root = new VStack(
@@ -220,6 +233,6 @@ describe('scrollbarUntil', () => {
     const editorBox = visit(frame.root);
     assert.ok(editorBox);
     const gutter = editorBox.rect.y - 1;
-    assert.equal(stripTerminalSequences(frame.lines[gutter] ?? '').includes('█'), true, '吸顶跟底时滑块应接到对话框');
+    assert.equal(stripTerminalSequences(frame.lines[gutter] ?? '').includes('█'), false, '滑块不画出转录区');
   });
 });

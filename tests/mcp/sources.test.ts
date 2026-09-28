@@ -369,40 +369,49 @@ describe('discoverMcpServers 坏输入与信任门', () => {
   });
 });
 
-describe('discoverMcpServers 本地偏好与导入标记', () => {
-  it('disabled_servers 能关掉任何来源的条目，enabled_servers 能反过来打开', () => {
+describe('discoverMcpServers 禁用标记与导入标记', () => {
+  it('sph 自己的同名禁用标记盖住外部来源的条目（不需要 command）', () => {
+    // 这是「不动别人的配置文件也能关掉别人的 server」的全部机制：同名整条替换。
     const s = scaffold();
     try {
-      s.write('.mcp.json', JSON.stringify({ mcpServers: { a: { command: 'a' }, b: { command: 'b', disabled: true } } }));
+      s.write('.mcp.json', JSON.stringify({ mcpServers: { noisy: { command: 'noisy-mcp' } } }));
+      write(join(s.sphHome, 'config.toml'), '[mcp_servers.noisy]\ndisabled = true\n');
 
-      const found = byName(
-        discoverMcpServers(
-          s.options({
-            preferences: { disabledServers: ['a'], enabledServers: ['b'], lazyServers: [] },
-          }),
-        ),
-      );
-      assert.equal(found.get('a')?.enabled, false, '本地偏好要能盖过来源的默认启用');
-      assert.equal(found.get('b')?.enabled, true, '也要能打开来源自己声明关掉的');
+      const found = byName(discoverMcpServers(s.options()));
+      const noisy = found.get('noisy');
+      assert.equal(noisy?.enabled, false);
+      assert.equal(noisy?.command, undefined, '整条替换，不是字段合并');
+      assert.equal(noisy?.kind, 'sph', '定义出自 sph 自己的配置');
     } finally {
       s.cleanup();
     }
   });
 
-  it('lazy_servers 偏好按名字叠加到任意来源的条目上', () => {
+  it('sph 的 disabled = false 盖住外部来源自己的禁用，并沿用它的 command', () => {
     const s = scaffold();
     try {
-      s.write('.mcp.json', JSON.stringify({ mcpServers: { heavy: { command: 'npx' }, light: { command: 'node' } } }));
+      s.write('.mcp.json', JSON.stringify({ mcpServers: { quiet: { command: 'quiet-mcp', disabled: true } } }));
+      write(join(s.sphHome, 'config.toml'), '[mcp_servers.quiet]\ndisabled = false\n');
 
-      const found = byName(
-        discoverMcpServers(
-          s.options({
-            preferences: { disabledServers: [], enabledServers: [], lazyServers: ['heavy'] },
-          }),
-        ),
+      const quiet = byName(discoverMcpServers(s.options())).get('quiet');
+      assert.equal(quiet?.enabled, true);
+      assert.equal(quiet?.command, 'quiet-mcp', '启用标记自己没有命令，得把被盖住的那份找回来');
+      assert.equal(quiet?.kind, 'sph');
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it('没有 command / url 又不是禁用标记的条目：警告 + 丢弃，而不是留一条连不上的 server', () => {
+    const s = scaffold();
+    try {
+      write(join(s.sphHome, 'config.toml'), '[mcp_servers.half]\nargs = ["x"]\n');
+      const discovery = discoverMcpServers(s.options());
+      assert.equal(byName(discovery).has('half'), false);
+      assert.ok(
+        discovery.warnings.some((line) => line.includes('mcp_servers.half needs a command or a url')),
+        `应有指向该条目的警告，实际：${discovery.warnings.join(' | ')}`,
       );
-      assert.equal(found.get('heavy')?.lazy, true);
-      assert.equal(found.get('light')?.lazy, false);
     } finally {
       s.cleanup();
     }

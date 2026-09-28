@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { parse as parseToml } from 'smol-toml';
 import { createGrantStore, permissionScopeRoot } from '../../src/permission/store.js';
 
 /** 造一棵临时目录树；`git` 时在根上放 `.git`，`sub` 时再建一层子目录。 */
@@ -12,13 +11,6 @@ function tempTree(options: { git?: boolean; sub?: string } = {}): string {
   if (options.git) mkdirSync(join(root, '.git'), { recursive: true });
   if (options.sub) mkdirSync(join(root, options.sub), { recursive: true });
   return root;
-}
-
-/** 造一份最小可解析的 config.toml；grants 存在这里而不是单独的 JSON。 */
-function configWith(root: string, text = ''): string {
-  const file = join(root, 'config.toml');
-  writeFileSync(file, `provider = "p"\nmodel = "m"\n${text}`, 'utf8');
-  return file;
 }
 
 describe('permissionScopeRoot', () => {
@@ -61,61 +53,71 @@ describe('permissionScopeRoot', () => {
   });
 });
 
-describe('createGrantStore', () => {
+describe('createGrantStore（.sph/permissions.json）', () => {
   it('写进去的授权能读回来，重复批准不写重复项', () => {
     const root = tempTree({ git: true });
-    const file = configWith(root);
     try {
-      const store = createGrantStore(root, file);
+      const store = createGrantStore(root);
       assert.deepEqual([...store.load()], []);
       store.add('bash npm test');
       store.add('bash npm test');
       assert.deepEqual([...store.load()], ['bash npm test']);
+      assert.equal(store.path, join(root, '.sph', 'permissions.json'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('写一个作用域不会抹掉别的作用域', () => {
+  it('不同项目各自一份文件，互不串味', () => {
     const a = tempTree({ git: true });
     const b = tempTree({ git: true });
-    const file = configWith(a);
     try {
-      createGrantStore(a, file).add('bash npm test');
-      createGrantStore(b, file).add('bash cargo test');
-      assert.deepEqual([...createGrantStore(a, file).load()], ['bash npm test']);
-      assert.deepEqual([...createGrantStore(b, file).load()], ['bash cargo test']);
+      createGrantStore(a).add('bash npm test');
+      createGrantStore(b).add('bash cargo test');
+      assert.deepEqual([...createGrantStore(a).load()], ['bash npm test']);
+      assert.deepEqual([...createGrantStore(b).load()], ['bash cargo test']);
     } finally {
       rmSync(a, { recursive: true, force: true });
       rmSync(b, { recursive: true, force: true });
     }
   });
 
-  it('授权落在 [grants] 表里，且不破坏 config.toml 其余内容', () => {
+  it('首次写入时把授权文件追加进项目 .gitignore（授权不入库）', () => {
     const root = tempTree({ git: true });
-    const file = configWith(root, '\n[permissions]\nallow = ["bash:npm test"]\n');
     try {
-      createGrantStore(root, file).add('bash npm test');
-      const parsed = parseToml(readFileSync(file, 'utf8')) as {
-        provider: string;
-        permissions: { allow: string[] };
-        grants: Record<string, string[]>;
-      };
-      assert.equal(parsed.provider, 'p', 'provider 键原样保留');
-      assert.deepEqual(parsed.permissions.allow, ['bash:npm test'], '[permissions] 规则原样保留');
-      const scope = permissionScopeRoot(root);
-      assert.deepEqual(parsed.grants[scope], ['bash npm test'], 'grants 以作用域根为键写入');
+      writeFileSync(join(root, '.gitignore'), 'node_modules/\n', 'utf8');
+      createGrantStore(root).add('bash npm test');
+      const text = readFileSync(join(root, '.gitignore'), 'utf8');
+      assert.ok(text.includes('node_modules/'), '原有内容原样保留');
+      assert.ok(text.includes('.sph/permissions.json'), '追加授权文件一行');
+      // 第二次写入不重复追加。
+      createGrantStore(root).add('bash cargo test');
+      const after = readFileSync(join(root, '.gitignore'), 'utf8');
+      assert.equal((after.match(/sph\/permissions\.json/g) ?? []).length, 1, '已有条目就不重复追加');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('config.toml 语法坏掉时读取直接报错，不静默当作没有授权', () => {
+  it('坏文件按空集合处理并给出警告：丢授权只会多问一次，方向安全', () => {
     const root = tempTree({ git: true });
-    const file = configWith(root);
-    writeFileSync(file, 'provider = "p"\n[grants]\nbroken', 'utf8');
     try {
-      assert.throws(() => createGrantStore(root, file).load());
+      createGrantStore(root).add('bash npm test');
+      writeFileSync(join(root, '.sph', 'permissions.json'), '{ not json', 'utf8');
+      const store = createGrantStore(root);
+      assert.deepEqual([...store.load()], []);
+      assert.match(store.warning() ?? '', /treated as no grants/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('不在 git 仓库里时不碰 .gitignore（没有可提交的东西）', () => {
+    const root = tempTree();
+    try {
+      createGrantStore(root).add('bash npm test');
+      assert.equal(existsSync(join(root, '.gitignore')), false);
+      assert.equal(existsSync(join(root, '.sph', 'permissions.json')), true, '授权文件照常写');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

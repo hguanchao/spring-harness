@@ -32,6 +32,15 @@ export function displayNameForModel(id: string): string {
   return words.length > 0 ? words.join(' ') : id;
 }
 
+/** 欢迎头用的模型名：声明了 name 就用它，否则从 id 推导。不展示模型 id。 */
+export function modelHeaderLabel(
+  models: readonly { id: string; name?: string }[] | undefined,
+  modelId: string,
+): string {
+  const name = models?.find((row) => row.id === modelId)?.name?.trim();
+  return name ? name : displayNameForModel(modelId);
+}
+
 /**
  * 从当前上游读取模型目录。
  *

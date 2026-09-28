@@ -12,11 +12,6 @@ export interface ScrollViewOptions {
 	scrollbarTrackStyle?: (text: string) => string;
 	scrollbarThumbStyle?: (text: string) => string;
 	scrollbarHideDelayMs?: number;
-	/**
-	 * 滑块视觉下沿画到该组件顶（不含该组件）。转录区在输入框之上，
-	 * 把 until 设成 editor，滚动条就能接到对话框，而不是停在 Working 行上面。
-	 */
-	scrollbarUntil?: Component;
 }
 
 export interface ScrollViewScrollToOptions {
@@ -45,8 +40,6 @@ export class ScrollView extends Container {
 	readonly overscroll: "chain" | "contain";
 	readonly scrollbarTrackStyle: (text: string) => string;
 	readonly scrollbarThumbStyle: (text: string) => string;
-	/** 滑块视觉延伸到该组件顶；省略则只画在 ScrollView 自己的高度里。 */
-	readonly scrollbarUntil?: Component;
 	private currentScrollbar: ScrollViewScrollbar;
 	private currentScrollTop = 0;
 	private realContentHeight = 0;
@@ -59,6 +52,8 @@ export class ScrollView extends Container {
 	private pinY: number | undefined;
 	/** 为把 pinY 滚到视口顶而加在内容底的空行。 */
 	private reservedPad = 0;
+	/** 滑块出现过就一直留着这一列，避免正文宽度在临界高度上来回跳。 */
+	private gutterLatched = false;
 
 	constructor(component: Component, options: ScrollViewOptions = {}) {
 		super();
@@ -74,7 +69,6 @@ export class ScrollView extends Container {
 		this.currentScrollbar = options.scrollbar ?? "hidden";
 		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
 		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
-		this.scrollbarUntil = options.scrollbarUntil;
 	}
 
 	get scrollTop(): number {
@@ -94,9 +88,10 @@ export class ScrollView extends Container {
 	}
 
 	get isScrollbarVisible(): boolean {
-		if (this.scrollbar === "always") return this.currentViewportHeight > 0;
-		// 可滚高度（含底部留白）超出视口才画。留白让「用户消息钉在顶」成为真的滚动底，滑块跟这个范围走。
-		return this.scrollbar === "auto" && this.scrollHeight > this.currentViewportHeight;
+		if (this.scrollbar === "hidden" || this.currentViewportHeight <= 0) return false;
+		if (this.scrollbar === "always") return true;
+		// 欢迎页内容装得下、也没有可滚留白时不画。短对话只要 pin 留白让它真的能滚，滑块仍在。
+		return this.scrollHeight > this.currentViewportHeight;
 	}
 
 	/** 真实内容高度，不含 pin-reserve 留白。 */
@@ -129,7 +124,14 @@ export class ScrollView extends Container {
 	}
 
 	getContentWidth(width: number): number {
-		return this.scrollbar === "always" && width > 1 ? width - 1 : width;
+		// 滑块出现时独占最右一列。这一列是布局宽度，和滑块颜色无关。
+		// 一旦留过列就不再还回去，否则临界高度会让整屏重排，滑块跟着闪。
+		if (width <= 1 || this.scrollbar === "hidden") return width;
+		if (this.scrollbar === "always" || this.gutterLatched || this.isScrollbarVisible) {
+			if (this.isScrollbarVisible) this.gutterLatched = true;
+			return width - 1;
+		}
+		return width;
 	}
 
 	setScrollbarActive(active: boolean): void {

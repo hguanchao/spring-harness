@@ -319,14 +319,30 @@ export function stripTerminalSequences(str: string): string {
  * 去掉行尾铺满终端的空白后的列宽。
  * 全屏选区按这个宽度截断，避免空白格子被反色、拖动复制出一串空格。
  */
+/** 滑块印在行尾的 `█` 和它前面的填充空格都不是正文。 */
+function withoutScrollbarGutter(plain: string): string {
+	return plain.replace(/[ \t]*\u2588$/, "");
+}
+
 export function contentVisibleWidth(line: string): number {
-	return visibleWidth(stripTerminalSequences(line).trimEnd());
+	return visibleWidth(withoutScrollbarGutter(stripTerminalSequences(line)).trimEnd());
 }
 
 /**
  * 这一行选区的右缘（不含行尾填充空格）。
  * 气泡行再去掉左边框；普通行只砍末尾空白，行首缩进仍算正文。
  */
+/** 行首缩进不是正文。范围拖选从第一个字开始，不把这几列空白划进高亮和复制。 */
+export function textStartColumn(line: string): number {
+	const plain = stripTerminalSequences(line);
+	let column = 0;
+	for (const { segment } of graphemeSegmenter.segment(plain)) {
+		if (segment !== " " && segment !== "\t") return column;
+		column += graphemeWidth(segment);
+	}
+	return column;
+}
+
 export function selectionLineEnd(line: string): number {
 	const bubble = bubbleTextColumns(line);
 	return bubble ? bubble.end : contentVisibleWidth(line);
@@ -340,7 +356,7 @@ export function selectionLineEnd(line: string): number {
  * 不是气泡行时返回 undefined，选区仍走 contentVisibleWidth。
  */
 export function bubbleTextColumns(line: string): { start: number; end: number } | undefined {
-	const plain = stripTerminalSequences(line);
+	const plain = withoutScrollbarGutter(stripTerminalSequences(line));
 	let column = 0;
 	let sawRule = false;
 	let start: number | undefined;
@@ -372,6 +388,34 @@ export function bubbleTextColumns(line: string): { start: number; end: number } 
  * 指针落在气泡灰底上时，收到同一气泡里真正有字的那一行。
  * 不是气泡行时返回 undefined。
  */
+/**
+ * 范围拖选的落点。空白行收到最近一行有字的正文上；行尾填充收到最后一个字，
+ * 不把这一行收成整行，避免段首、段尾被一起划进去。
+ */
+export function snapRangeSelectionPoint(
+	lines: readonly string[],
+	row: number,
+	col: number,
+): { row: number; col: number } {
+	const endOf = (index: number): number => selectionLineEnd(lines[index] ?? "");
+	const hasText = (index: number): boolean => endOf(index) > 0;
+	let target = row;
+	if (!hasText(row)) {
+		let above = row - 1;
+		while (above >= 0 && !hasText(above)) above--;
+		let below = row + 1;
+		while (below < lines.length && !hasText(below)) below++;
+		if (above < 0 && below >= lines.length) return { row, col: 0 };
+		if (above < 0) target = below;
+		else if (below >= lines.length) target = above;
+		else target = row - above <= below - row ? above : below;
+	}
+	const end = endOf(target);
+	if (col < end) return { row: target, col: Math.max(0, col) };
+	const last = getGraphemeCellRange(lines[target] ?? "", Math.max(0, end - 1));
+	return { row: target, col: last?.start ?? Math.max(0, end - 1) };
+}
+
 export function snapBubbleSelection(
 	lines: readonly string[],
 	row: number,

@@ -71,6 +71,8 @@ function subagentActivity(event: SubagentEvent): string | undefined {
 export class TranscriptProjection {
   private streamingAssistant?: AssistantMessageComponent;
   private thinkingId?: string;
+  /** 已经收到思考增量。只有这时状态行才该写 Thinking…，空的 start 不算。 */
+  private thinkingLive = false;
   /**
    * 承载当前思考链的工具分组。
    *
@@ -140,6 +142,7 @@ export class TranscriptProjection {
   restartThinking(): void {
     this.thinkingGroup?.dropStreamingThinking();
     this.thinkingBuffer = '';
+    this.thinkingLive = false;
     this.thinkingStartedAt = Date.now();
     this.thinkingGroup?.beginThinking();
   }
@@ -168,6 +171,7 @@ export class TranscriptProjection {
     this.modelRespondedFlag = true;
     this.thinkingBuffer += text;
     this.thinkingGroup?.setThinking(this.thinkingBuffer, true);
+    this.thinkingLive = true;
     return true;
   }
 
@@ -185,6 +189,7 @@ export class TranscriptProjection {
     this.thinkingStartedAt = undefined;
     this.thinkingBuffer = '';
     this.thinkingId = undefined;
+    this.thinkingLive = false;
   }
 
   /** 本段思考链已耗时；没记到起点时返回 undefined（收尾文案退化成 `Thought`）。 */
@@ -212,8 +217,26 @@ export class TranscriptProjection {
     tool.markExecutionStarted();
     this.ensureToolGroup().addTool(tool);
     this.pendingTools.set(id, tool);
-    // subagent 的实时进度由转录内任务块承担，不进底部「正在跑」区。
-    if (name !== 'subagent') this.addPendingToolLine(id, name, args);
+    // task 的实时进度在输入框上方的 Subagents 块里。再写一行「正在跑」只会重复成光秃秃的 task。
+    if (name !== 'task' && name !== 'subagent') this.addPendingToolLine(id, name, args);
+  }
+
+  /**
+   * 状态行只描述当前这一件事：思考优先，其次还在执行的普通工具，最后才是子代理。
+   * 已经读完的 read 不该继续占着这行。
+   */
+  activityNow(): string | undefined {
+    if (this.thinkingLive) return WorkingLabel.thinking;
+    let subagent: string | undefined;
+    for (const tool of this.pendingTools.values()) {
+      if (tool.status() !== 'pending' && tool.status() !== 'running') continue;
+      if (tool.rawName() === 'task' || tool.rawName() === 'subagent') {
+        subagent ??= tool.runningLabel();
+        continue;
+      }
+      return tool.runningLabel();
+    }
+    return subagent;
   }
 
   /** 工具收尾：结果写进对应行；找不到（异常时序）只清 pending 提示行。 */
@@ -359,7 +382,7 @@ export class TranscriptProjection {
     const report = summary.trim();
     if (report !== '') entry.tool.updateResult({ content: report, isError: !ok });
     if (ok) entry.tool.setActivity(formatDuration(durationMs));
-    else entry.tool.setActivity(`FAILED: ${flattenWhitespace(summary).slice(0, 100)}`, true);
+    else entry.tool.setActivity('');
     this.subagentLines.delete(id);
     this.refreshDock();
     return true;

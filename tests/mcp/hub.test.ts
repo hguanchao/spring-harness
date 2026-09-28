@@ -309,73 +309,59 @@ describe('listTools 排序', () => {
   });
 });
 
-describe('McpHub lazy 连接', () => {
-  it('lazy 条目 reload 后不 spawn：状态是 lazy 而未连接，且没有 problem', async () => {
+describe('McpHub 后台连接', () => {
+  it('禁用条目在 reload 里不 spawn：状态给出 disabled，且没有子进程', async () => {
     const hub = new McpHub(testHostFacts());
     try {
-      await hub.reload([spec('lazy-one', { lazy: true })]);
+      const result = await hub.reload([spec('off', { enabled: false })]);
       await hub.whenReady();
+      assert.deepEqual(result.added, [], '被禁用的条目不算「新增装载」');
       const server = hub.listServers()[0];
-      assert.equal(server?.lazy, true);
-      assert.equal(server?.connected, false, 'reload 不该拉起 lazy server');
-      assert.equal(server?.problem, undefined, '懒而未连接是设计好的状态，不是故障');
+      assert.equal(server?.enabled, false);
+      assert.equal(server?.connected, false);
+      assert.equal(server?.problem, 'disabled', '原因是明确的，如实显示而不是笼统的「没连上」');
+      assert.equal(server?.connecting, undefined);
       assert.deepEqual(hub.listTools(), [], '工具清单也应是空的');
+      const child = (hub as unknown as { connections: Map<string, unknown> }).connections.get('off');
+      assert.equal(child, undefined, '连连接都不该建立');
     } finally {
       hub.dispose();
     }
   });
 
-  it('call 命中 lazy server 时自动连接并成功', async () => {
+  it('启用条目一律在 reload 时后台拉起：不阻塞返回，whenReady 后连上', async () => {
     const hub = new McpHub(testHostFacts());
     try {
-      await hub.reload([spec('lazy-call', { lazy: true })]);
-      const pid = await pidOf(hub, 'lazy-call');
-      assert.ok(Number.isFinite(pid), '首用即连接，call 正常返回');
-      assert.equal(hub.listServers()[0]?.connected, true);
-    } finally {
-      hub.dispose();
-    }
-  });
-
-  it('listToolsOf 触发定向连接并返回工具；listTools 保持只读', async () => {
-    const hub = new McpHub(testHostFacts());
-    try {
-      await hub.reload([spec('lazy-list', { lazy: true })]);
-      const tools = await hub.listToolsOf('lazy-list');
-      assert.ok(tools.length > 0, '握手完成后的工具清单应非空');
-      assert.equal(hub.listServers()[0]?.connected, true);
-      // 只读路径对照：另一台 lazy server 不因 listTools 被拉起。
-      await hub.reload([spec('lazy-idle', { lazy: true })]);
-      await hub.listTools();
-      assert.equal(hub.listServers().find((server) => server.name === 'lazy-idle')?.connected, false);
-    } finally {
-      hub.dispose();
-    }
-  });
-
-  it('签名变化后，死掉的 lazy 连接不会在 reload 里被重新拉起', async () => {
-    const hub = new McpHub(testHostFacts());
-    try {
-      await hub.reload([spec('lazy-sig', { lazy: true })]);
-      await pidOf(hub, 'lazy-sig');
-      // 签名变化会先 close 再决定 spawn：lazy 保持时不应重新拉起。
-      await hub.reload([spec('lazy-sig', { lazy: true, args: [FIXTURE, '--flag'] })]);
+      await hub.reload([spec('echo')]);
+      assert.equal(hub.listServers()[0]?.connecting, true, 'reload 返回时握手还在后台进行');
       await hub.whenReady();
       const server = hub.listServers()[0];
-      assert.equal(server?.connected, false, '签名变化杀掉旧连接后，lazy 不自动重连');
+      assert.equal(server?.connected, true);
       assert.equal(server?.problem, undefined);
+      assert.ok(Number.isFinite(await pidOf(hub, 'echo')), '没有懒加载：call 直接命中已连上的进程');
     } finally {
       hub.dispose();
     }
   });
 
-  it('非 lazy 条目行为不变：reload 后自动连接', async () => {
+  it('listToolsOf 定向重连并返回工具；listTools 保持只读不触发重连', async () => {
     const hub = new McpHub(testHostFacts());
     try {
-      await hub.reload([spec('eager')]);
+      await hub.reload([spec('alpha')]);
       await hub.whenReady();
+      const before = await pidOf(hub, 'alpha');
+
+      // 杀掉子进程模拟崩溃：只读的 listTools 不该把连接救回来，listToolsOf 才该。
+      process.kill(before);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(hub.listServers()[0]?.connected, false, '进程没了就是没连上');
+      hub.listTools();
+      assert.equal(hub.listServers()[0]?.connected, false, '读目录不该顺带重连');
+
+      const tools = await hub.listToolsOf('alpha');
+      assert.ok(tools.length > 0);
       assert.equal(hub.listServers()[0]?.connected, true);
-      assert.equal(hub.listServers()[0]?.lazy, false);
+      assert.notEqual(await pidOf(hub, 'alpha'), before, '重连的是新进程');
     } finally {
       hub.dispose();
     }

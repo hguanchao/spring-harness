@@ -71,10 +71,16 @@ Key facts:
 - `max_session_tokens` (default `0` = unlimited) caps cumulative prompt+completion tokens for the whole agent tree, including subagents and compaction. The count survives `--resume`; the turn stops before the next request when the budget is gone, and warns at 80%.
 - `max_retries` (default `10`) is how many times a failed upstream request is retried, not counting the first attempt. `0` fails immediately. Only 408/429/5xx, network errors, idle timeouts, and empty responses retry.
 - `subagent_max_depth` (default `1`) — `0` forbids delegation entirely.
-- `max_turns` (unset by default) — a positive integer cap on model calls in one turn. Omit it and a turn runs until the model stops. A subagent that reaches it is told to write up with a few steps left, then its last report comes back as a failed tool result marked with the step limit and a `resume_from` session id. The root session is not capped by this key.
+- `max_turns` (unset by default) — a positive integer cap on model calls in one subagent turn. Omit it and a subagent still stops after 20 calls: it is told to write up with a few steps left, then its last report comes back as a failed tool result marked with the step limit and a `resume_from` session id. A configured value replaces that 20. The root session is not capped by this key. A configured `max_session_tokens` is also enforced inside the running subagent, against the budget still left, not only on the parent's next step.
 - `subagent_approval` (default `inherit`) — `strict` makes subagents fail closed: reviewed tools are denied without prompting, and the parent session's grants are not shared. `inherit` hands the child the same approver, grants included.
-- `[permissions]` — `allow` / `ask` / `deny` lists whose entries are `<tool>` or `<tool>:<pattern>` (`*` any run, `?` one character; no wildcard means an exact match). Rules are more specific than the mode, so they outrank it: **`deny` beats every mode including `yolo`**, `ask` also beats `yolo`, and `allow` skips the prompt. In headless mode an `ask` rule is a denial — there is nobody to ask.
-- `trusted = [...]` (top level) and `[grants]` record cross-session state in config.toml itself: trusted workspace roots, and per-project approval grants keyed by git repo root. Both are written by sph when you confirm a workspace or pick *always allow* in the approval dialog.
+- `[permissions]` — `allow` / `ask` / `deny` lists of `Tool` or `Tool(specifier)` entries, evaluated `deny` → `ask` → `allow` **across layers** (any layer's `deny` outranks every `allow`; both outrank the mode, including `yolo`; in headless an `ask` rule is a denial — nobody to ask). Specifier is interpreted per tool:
+  - `bash(git log *)` / `bash(npm test:*)` — command prefix glob; `*` spans anything, a trailing ` *` also matches the bare command; `timeout` / `nice` / `nohup` / `KEY=value` prefixes are stripped first; `bash(background=true)` matches parameters
+  - `read(~/secrets/**)` / `edit(/src/**)` — gitignore-style paths (`//` absolute, `~/` home, `/` relative to the file declaring the rule, bare relative to the workspace; `!` negates, last match wins); relative patterns in `deny`/`ask` apply at any depth, `allow` anchors to the workspace
+  - `web_fetch(domain:example.com)`, `mcp(context7)` or `mcp(context7.tool)`
+  - a bare tool name (`Bash`) or a tool-name glob (`mcp*`) in `deny` removes the tool from the model's context entirely
+- Rules layer: user-level `[permissions]` in `~/.sph/config.toml` plus project-level `<repo>/.sph/config.toml`, which may set `[permissions]` and `[mcp_servers]` only; a project's `allow` rules are ignored until you trust the workspace (`deny`/`ask` always apply). Read-only shell commands (`ls`, `git status`, …) never prompt in any mode — gate them with `ask`/`deny` if you need to.
+- Approvals ("always allow") are recorded in `<repo>/.sph/permissions.json` (git-ignored automatically on first write), keyed by exact action; the dialog also offers "always allow rules like this", which promotes the suggested prefix rule into the project's `[permissions].allow`. The legacy `[grants]` table in config.toml is no longer read.
+- `sandbox_auto_allow` (default `false`) — when the sandbox is not `off`, shell commands stop prompting entirely. Opt in only after reading the sandbox notes below: this fence is same-host and partially enforced on Windows, not a process isolation boundary like Codex's.
 
 ## Usage
 
@@ -89,7 +95,7 @@ sph --resume <id>                    # reopen a specific session
 sph -c                               # continue the most recent one
 ```
 
-Useful flags: `--model`, `--effort` (`off|low|medium|high|xhigh|max`), `--max-tokens`, `--api`, `--approval ask|auto|yolo`, `--sandbox off|workspace|read-only`, `--trust`.
+Useful flags: `--model`, `--effort` (`off|low|medium|high|xhigh|max`), `--max-tokens`, `--api`, `--approval ask|auto|yolo`, `--sandbox off|workspace|read-only`, `--trust`, `sph rules check "<command>"` (preview how the rules judge a command).
 
 Theming: sph ships a fixed dark palette. Set `SPH_THEME=terminal` to drop hardcoded colors and emit basic ANSI codes instead, so the TUI follows your terminal emulator's own 16-color theme (canvas becomes the terminal's default background).
 
@@ -156,13 +162,14 @@ Servers are discovered from five sources. Later ones win on a name clash — a n
 
 Priority is **sph, then the other external configs, then `.mcp.json`**, and within a tool project beats user. Malformed entries in foreign files degrade to warnings — they never block startup.
 
-External files are **never written to**. Enable/disable is recorded as a local preference in `~/.sph/config.toml`:
+External files are **never written to**. To turn a server off — including one another tool declares — write a same-name entry in `~/.sph/config.toml`; it replaces the lower-priority definition whole, so it does not even need a `command`:
 
 ```toml
-[mcp]
-disabled_servers = ["noisy-server"]   # turn off something a source enables
-enabled_servers  = ["one-that-ships-off"]  # turn on what a source disables
+[mcp_servers.noisy-server]
+disabled = true
 ```
+
+Every enabled server connects **in the background at startup** (no lazy mode); a server that fails to start shows up as a problem in `/mcps` instead of blocking the first frame.
 
 `/mcps` can add and remove entries, but only in sph's own config. Only **stdio** servers run; HTTP entries are still discovered and listed as unsupported rather than dropped, so "I configured it but nothing happened" always has a visible answer.
 
@@ -260,7 +267,7 @@ One turn of `runTurn` looks like this:
 2. Project the session into a request, compacting if it is over the pressure line.
 3. Call the model, streaming text and reasoning to the UI.
 4. No tool calls and an explicit finish reason → done. Otherwise run the tool batch, committing results in model order.
-5. Persist, then repeat until the model stops. A configured `max_turns` ends a subagent turn at that count.
+5. Persist, then repeat until the model stops. A subagent also stops at `max_turns`, or at 20 calls when that key is omitted.
 
 ## Development
 

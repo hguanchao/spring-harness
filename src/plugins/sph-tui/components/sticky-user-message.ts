@@ -7,7 +7,7 @@
  */
 
 import { BLOCK_GAP } from '../../../tui/primitives.js';
-import { getScrollViewBox, type LayoutBox, type LayoutFrame } from '../../../tui/layout.js';
+import { contentPaintRight, getScrollViewBox, type LayoutBox, type LayoutFrame } from '../../../tui/layout.js';
 import { compositeTuiLine, type Component } from '../../../tui/tui.js';
 
 export const STICKY_USER_MESSAGE = Symbol.for('sph.sticky-user-message');
@@ -28,7 +28,7 @@ export function userMessageBubbleY(componentTop: number): number {
 
 export interface StickyUserMessage extends Component {
   readonly [STICKY_USER_MESSAGE]: true;
-  renderSticky(width: number, maxHeight?: number): string[];
+  renderSticky(width: number, maxHeight?: number, ellipsis?: boolean): string[];
 }
 
 export interface PromptDescriptor {
@@ -43,6 +43,8 @@ export interface RenderedPrompt {
   index: number;
   renderHeight: number;
   clipTop: number;
+  /** 已经收到最小高度。收缩途中只切行，到这里才在末行加省略号。 */
+  ellipsis: boolean;
 }
 
 export interface StickyHeaderLayout {
@@ -68,15 +70,16 @@ function bubbleMetrics(box: LayoutBox): { y: number; height: number } {
   return { y: box.rect.y + lead, height: Math.max(0, box.rect.height - lead) };
 }
 
-function calculateRenderHeight(
+function stickyMetrics(
   prompt: PromptDescriptor,
   scrollOffset: number,
   viewportHeight: number,
-): number {
+): { renderHeight: number; ellipsis: boolean } {
   const scrollPast = Math.max(0, scrollOffset - prompt.yVirtual);
-  const height = Math.max(0, prompt.fullHeight - scrollPast);
+  const raw = Math.max(0, prompt.fullHeight - scrollPast);
   const minHeight = Math.min(Math.max(prompt.minHeight, 1), Math.max(prompt.fullHeight, 1));
-  return Math.min(Math.max(height, minHeight), Math.max(0, viewportHeight));
+  const renderHeight = Math.min(Math.max(raw, minHeight), Math.max(0, viewportHeight));
+  return { renderHeight, ellipsis: raw < minHeight };
 }
 
 /**
@@ -93,7 +96,8 @@ export function computeStickyLayout(
   let pinnedIdx = -1;
   for (let index = prompts.length - 1; index >= 0; index--) {
     const prompt = prompts[index]!;
-    if (prompt.sticky && prompt.yVirtual < scrollOffset) {
+    // 刚好贴住视口顶也算吸住。用「已经滚过」会在这一行把上一条撤掉、下一条还没钉上。
+    if (prompt.sticky && prompt.yVirtual <= scrollOffset) {
       pinnedIdx = index;
       break;
     }
@@ -101,27 +105,30 @@ export function computeStickyLayout(
   if (pinnedIdx < 0) return {};
 
   const pinnedPrompt = prompts[pinnedIdx]!;
-  const renderHeight = calculateRenderHeight(pinnedPrompt, scrollOffset, viewportHeight);
+  const metrics = stickyMetrics(pinnedPrompt, scrollOffset, viewportHeight);
   const next = pinnedIdx + 1 < prompts.length ? prompts[pinnedIdx + 1] : undefined;
   if (!next) {
-    return { pinned: { index: pinnedPrompt.index, renderHeight, clipTop: 0 } };
+    return { pinned: { index: pinnedPrompt.index, renderHeight: metrics.renderHeight, clipTop: 0, ellipsis: metrics.ellipsis } };
   }
 
   const nextNaiveRow = Math.max(0, next.yVirtual - scrollOffset);
-  if (nextNaiveRow > renderHeight + HEADER_CONTENT_GAP) {
-    return { pinned: { index: pinnedPrompt.index, renderHeight, clipTop: 0 } };
+  if (nextNaiveRow > metrics.renderHeight + HEADER_CONTENT_GAP) {
+    return { pinned: { index: pinnedPrompt.index, renderHeight: metrics.renderHeight, clipTop: 0, ellipsis: metrics.ellipsis } };
   }
-  if (nextNaiveRow === 0) return {};
+  if (nextNaiveRow === 0) {
+    return { pinned: { index: next.index, renderHeight: Math.min(next.fullHeight, viewportHeight), clipTop: 0, ellipsis: false } };
+  }
 
   const pushedVisible = Math.max(0, nextNaiveRow - 1);
   if (pushedVisible === 0) return {};
 
-  const pushedRenderHeight = Math.min(pinnedPrompt.fullHeight, renderHeight);
+  const pushedRenderHeight = Math.min(pinnedPrompt.fullHeight, metrics.renderHeight);
   return {
     pushed: {
       index: pinnedPrompt.index,
       renderHeight: pushedRenderHeight,
       clipTop: Math.max(0, pushedRenderHeight - pushedVisible),
+      ellipsis: false,
     },
   };
 }
@@ -192,15 +199,16 @@ function stickyPlacement(frame: LayoutFrame): { x: number; y: number; width: num
   const sticky = messages[rendered.index];
   if (!sticky || !isStickyUserMessage(sticky.component)) return undefined;
 
-  const overlayWidth = Math.max(1, sticky.rect.width);
-  const overlay = sticky.component.renderSticky(overlayWidth, rendered.renderHeight);
+  // 吸顶停在滚动视口内，不盖滑块那一列，也不画出视口底。
+  const contentRight = contentPaintRight(scrollBox);
+  const overlayWidth = Math.max(1, Math.min(sticky.rect.width, contentRight - sticky.rect.x));
+  const overlay = sticky.component.renderSticky(
+    overlayWidth,
+    rendered.clipTop > 0 ? undefined : rendered.renderHeight,
+    rendered.ellipsis,
+  );
   if (overlay.length === 0) return undefined;
-  const visible = overlay.slice(rendered.clipTop);
+  const visible = overlay.slice(rendered.clipTop).slice(0, viewportHeight);
   if (visible.length === 0) return undefined;
-
-  // 与正文气泡同宽：auto 滚动条是叠在最后一列上的，为它让列会让吸顶比下面的气泡短一截。
-  // 滑块由 doRender 在装饰层之后重画，盖回最后一列。
-  const clipRight = scrollBox.clip.x + scrollBox.clip.width;
-  const paintWidth = Math.max(1, Math.min(overlayWidth, clipRight - sticky.rect.x));
-  return { x: sticky.rect.x, y: viewportTop, width: paintWidth, lines: visible };
+  return { x: sticky.rect.x, y: viewportTop, width: overlayWidth, lines: visible };
 }

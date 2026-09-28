@@ -11,9 +11,9 @@
  * ## 发现与装载都在这里
  *
  * 过去 `bootstrap` 调 `discoverMcpServers()` 再喂给 `McpHub.reload()`；现在两者都归本插件，
- * 核心只调 `service.reload({ workspaceRoot, fromDir, preferences, trusted })`。核心交出的
- * 是**宿主事实**（工作区、启停偏好、信任态），插件交出的是**MCP 领域逻辑**——这条分界线
- * 正是「MCP 是个插件」的含义：核心代码里搜不到 MCP 的来源清单与优先级规则。
+ * 核心只调 `service.reload({ workspaceRoot, fromDir, trusted })`。核心交出的是**宿主事实**
+ * （工作区、起始目录、信任态），插件交出的是**MCP 领域逻辑**——这条分界线正是「MCP 是个插件」
+ * 的含义：核心代码里搜不到 MCP 的来源清单与优先级规则。
  *
  * ## 装载失败不炸启动
  *
@@ -25,7 +25,6 @@
 import type { PluginApi } from '../types.js';
 import {
   MCP_SERVICE,
-  type McpPreferences,
   type McpReloadOptions,
   type McpReloadResult,
   type McpServerStatus,
@@ -35,12 +34,6 @@ import {
 import { McpHub } from './hub.js';
 import { discoverMcpServers } from './sources.js';
 import { createMcpTool } from './tool.js';
-
-const EMPTY_PREFERENCES: McpPreferences = {
-  disabledServers: [],
-  enabledServers: [],
-  lazyServers: [],
-};
 
 /**
  * 把 hub 与发现包成宿主认识的服务，并在插件内部持有两份状态：
@@ -70,7 +63,6 @@ class McpPluginService {
       workspaceRoot: options.workspaceRoot,
       host: this.hostFacts,
       fromDir: options.fromDir,
-      preferences: options.preferences ?? EMPTY_PREFERENCES,
       trusted: options.trusted,
     });
     this.reports = discovery.reports;

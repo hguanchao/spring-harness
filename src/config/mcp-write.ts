@@ -3,7 +3,7 @@
  *
  * 两件事：
  *   1. `[mcp_servers.<name>]` 的新增 / 更新 / 删除；
- *   2. `[mcp]` 段的 `disabled_servers` / `enabled_servers` 本地启停偏好。
+ *   2. 同一个表里的 `disabled` 启停开关。
  *
  * 为什么不用「解析成对象 → 序列化整份重写」：与 `config/save.ts` 同一理由——这是用户手改
  * 的文件，带注释、带键顺序、带自己排的对齐。整体重写会把它变成生成物。这里只动被改的那几行。
@@ -12,7 +12,8 @@
  * （`args = [\n "-a",\n]`）里以 `[` 开头的行不是表头。所以扫描时必须跟踪括号深度与
  * 三引号字符串——否则一次「删除某个 server」就可能把后面半份配置当成它的一部分删掉。
  *
- * 外部来源的文件**绝不写入**，启停改走本地偏好。
+ * 外部来源的文件**绝不写入**：关掉它们声明的 server 靠写一条同名的禁用标记，见
+ * {@link setSphMcpDisabled}。
  */
 
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -296,110 +297,73 @@ function trailingInsertAt(lines: readonly string[]): number {
 }
 
 /**
- * 启停偏好：写进 sph 用户级配置的 `[mcp]` 段。
+ * 启停一个 server：改写 `[mcp_servers.<name>]` 里的 `disabled` 键（缺省 false，即启用）。
  *
- * 两个列表各司其职，让它们只剩有意义的条目：
- *   - `disabled_servers`：本地关掉某个来源本来启用的 server；
- *   - `enabled_servers`：本地打开某个来源**自己声明了 `disabled = true`** 的 server。
+ * 关掉外部来源声明的 server 也走这里：sph 的配置优先级最高，写一条同名的
+ * `[mcp_servers.<name>] disabled = true`（可以没有 command / url）就整条盖住低优先级的定义，
+ * 于是不必去动别人的文件。
  *
- * 所以调用方要同时给出「期望状态」与「来源声明状态」——只写一个列表会导致另一个列表
- * 里留下过期的强制项，日后来源改了自己的默认值就会被那条陈旧偏好悄悄盖住。
+ * 重新启用时把键删掉而不是写 `false`：缺省本来就是启用，多一个 `disabled = false` 只是噪音。
+ * 若删完这块里再也没有 command / url（说明它当初只是一条禁用标记），连块一起删——留一个
+ * 没有定义的孤儿表，日后只会变成一条「needs a command or a url」的警告。
+ *
+ * 外部来源自己声明了 `disabled`、而 sph 配置里还没有同名块时，启用要写出
+ * `disabled = false`：缺省启用盖不住别人文件里明确写下的禁用。
  */
-export function setSphMcpPreference(
-  path: string,
-  name: string,
-  options: { enabled: boolean; sourceEnabled: boolean },
-): void {
+export function setSphMcpDisabled(path: string, name: string, disabled: boolean): void {
   const doc = open(path);
-  const headers = scanHeaders(doc.lines);
-  const table = tableRange(doc.lines, headers, 'mcp');
+  const block = mcpServerBlocks(doc.lines, scanHeaders(doc.lines)).find((item) => item.name === name);
 
-  const disabled = readArrayIn(doc.lines, table, 'disabled_servers');
-  const enabled = readArrayIn(doc.lines, table, 'enabled_servers');
-  const nextDisabled = new Set(disabled);
-  const nextEnabled = new Set(enabled);
-
-  if (options.enabled) {
-    nextDisabled.delete(name);
-    if (options.sourceEnabled) nextEnabled.delete(name);
-    else nextEnabled.add(name);
-  } else {
-    nextEnabled.delete(name);
-    nextDisabled.add(name);
-  }
-
-  writeArrayIn(path, doc, 'disabled_servers', [...nextDisabled], table);
-  // 第一次写入可能插入了新表或新键，行号随之变化：重新读取一次再定位，避免写到过期位置。
-  const refreshedDoc = open(path);
-  const refreshed = tableRange(refreshedDoc.lines, scanHeaders(refreshedDoc.lines), 'mcp');
-  writeArrayIn(path, refreshedDoc, 'enabled_servers', [...nextEnabled], refreshed);
-}
-
-/** lazy 偏好：`[mcp] lazy_servers` 只含**当前标记为懒**的 server，开/关即增/删一条。 */
-export function setSphMcpLazy(path: string, name: string, lazy: boolean): void {
-  const doc = open(path);
-  const table = tableRange(doc.lines, scanHeaders(doc.lines), 'mcp');
-  const next = new Set(readArrayIn(doc.lines, table, 'lazy_servers'));
-  if (lazy) next.add(name);
-  else next.delete(name);
-  writeArrayIn(path, doc, 'lazy_servers', [...next], table);
-}
-
-/** `[mcp]` 表的行区间；不存在时给一个「从文件末尾追加」的空区间。 */
-function tableRange(
-  lines: readonly string[],
-  headers: readonly (TomlHeader | undefined)[],
-  name: string,
-): { start: number; end: number } {
-  for (let i = 0; i < lines.length; i++) {
-    const header = headers[i];
-    if (header === undefined || header.array || header.name !== name) continue;
-    let end = lines.length;
-    for (let j = i + 1; j < lines.length; j++) {
-      if (headers[j] !== undefined) {
-        end = j;
-        break;
-      }
-    }
-    return { start: i, end };
-  }
-  return { start: -1, end: -1 };
-}
-
-function readArrayIn(lines: readonly string[], table: { start: number; end: number }, key: string): string[] {
-  if (table.start < 0) return [];
-  return readArray(lines, table.start + 1, table.end, key) ?? [];
-}
-
-function writeArrayIn(
-  path: string,
-  doc: Doc,
-  key: string,
-  values: readonly string[],
-  table: { start: number; end: number },
-): void {
-  const lines = [...doc.lines];
-  const rendered = tomlArray(values);
-  if (table.start >= 0) {
-    const re = new RegExp(`^(\\s*${key}\\s*=\\s*)(.*)$`);
-    for (let i = table.start + 1; i < table.end; i++) {
-      if (!re.test(lines[i]!)) continue;
-      // 值可能跨行：连同后续行一起吃掉，只留下渲染后的单行。
-      let end = i + 1;
-      let depth = bracketDelta(codeOf(lines[i]!));
-      while (depth > 0 && end < table.end) {
-        depth += bracketDelta(codeOf(lines[end]!));
-        end += 1;
-      }
-      lines.splice(i, end - i, `${key} = ${rendered}`);
+  if (block === undefined) {
+    if (!disabled) {
+      const at = trailingInsertAt(doc.lines);
+      const lines = [...doc.lines.slice(0, at), '', tomlServerHeader(name), 'disabled = false', ...doc.lines.slice(at)];
       commit(path, doc, lines);
       return;
     }
-    lines.splice(table.end, 0, `${key} = ${rendered}`);
+    const at = trailingInsertAt(doc.lines);
+    const lines = [...doc.lines.slice(0, at), '', tomlServerHeader(name), 'disabled = true', ...doc.lines.slice(at)];
     commit(path, doc, lines);
     return;
   }
-  const at = trailingInsertAt(lines);
-  lines.splice(at, 0, '', '[mcp]', `${key} = ${rendered}`);
-  commit(path, doc, lines);
+
+  const keyLine = keyLineIn(doc.lines, block, 'disabled');
+  if (disabled) {
+    const lines = [...doc.lines];
+    if (keyLine === -1) lines.splice(block.end, 0, 'disabled = true');
+    else {
+      // 只换值，缩进与行尾注释留着（用户可能写了 `disabled = false   # 先观望着`）。
+      const match = /^(\s*disabled\s*=\s*)\S+(.*)$/.exec(lines[keyLine]!);
+      lines[keyLine] = `${match?.[1] ?? 'disabled = '}true${match?.[2] ?? ''}`;
+    }
+    commit(path, doc, lines);
+    return;
+  }
+
+  // 要启用却没有这个键：本来就是启用态。不碰文件，免得白改一次 mtime。
+  if (keyLine === -1) return;
+  const lines = [...doc.lines];
+  lines.splice(keyLine, 1);
+  const end = block.end - 1;
+  const hasDefinition = lines
+    .slice(block.start + 1, end)
+    .some((line) => /^\s*(command|url)\s*=/.test(codeOf(line)));
+  if (hasDefinition) {
+    commit(path, doc, lines);
+    return;
+  }
+  let to = end;
+  while (to < lines.length && lines[to]!.trim() === '') to += 1;
+  let from = block.start;
+  while (from > 0 && lines[from - 1]!.trim() === '') from -= 1;
+  commit(path, doc, [...lines.slice(0, from), ...lines.slice(to)]);
+}
+
+/** 块内某个键的行号；没有返回 -1。 */
+function keyLineIn(lines: readonly string[], block: Block, key: string): number {
+  const re = new RegExp(`^\\s*${key}\\s*=`);
+  for (let i = block.start + 1; i < block.end; i++) {
+    if (re.test(codeOf(lines[i]!))) return i;
+  }
+  return -1;
 }

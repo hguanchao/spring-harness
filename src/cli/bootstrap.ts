@@ -9,6 +9,7 @@
  */
 
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { LlmClient, ReasoningEffort } from '../llm/client.js';
@@ -27,7 +28,6 @@ import {
   type LoopService,
   type ModelService,
   type SandboxBackendFactory,
-  type McpPreferences,
   type McpReloadResult,
   type McpService,
   type SchedulerService,
@@ -40,7 +40,10 @@ import { openSandbox } from '../sandbox/open.js';
 import { SandboxError, type SandboxHandle, type SandboxMode } from '../sandbox/types.js';
 import type { SessionFactory, SessionPort } from '../session/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import { ConfigError, loadConfig, readMcpPreferences, type ApiProtocol, type SphConfig } from '../config/load.js';
+import { ConfigError, loadConfig, type ApiProtocol, type SphConfig } from '../config/load.js';
+import { loadProjectPermissions } from '../config/project.js';
+import { readState } from '../config/state.js';
+import { createPermissionRuntime, type PermissionRuntime } from '../permission/runtime.js';
 import {
   findProvider,
   loadRegistry,
@@ -49,7 +52,7 @@ import {
   type ModelRegistry,
   type ResolvedModel,
 } from '../config/registry.js';
-import { sphConfigPath, sphModelsPath } from '../home.js';
+import { sphConfigPath, sphHome, sphModelsPath } from '../home.js';
 import { applyProxy } from '../net/proxy.js';
 import { isWorkspaceTrusted, rememberTrustedWorkspace } from '../workspace/trust.js';
 
@@ -83,6 +86,10 @@ export interface BootstrapOptions {
   untrusted: 'error' | 'confirm';
   /** TUI 启动前的信任确认；headless 不提供，继续走 fail-closed。 */
   confirmUntrustedWorkspace?: (workspaceRoot: string) => Promise<boolean>;
+  /**
+   * 交互模式。配置警告交给备用屏里的通知：写 stderr 会留在主屏幕上，退出时才看见。
+   */
+  interactive?: boolean;
   /** `-c` / `--continue`：续用本工作区最近一次会话；省略则新建。 */
   continueSession: boolean;
   /** `--resume <id>`：打开指定会话。 */
@@ -115,10 +122,8 @@ export interface Runtime {
   mcp(): McpService | undefined;
   /** 重新发现并装载 MCP server；启动时首次调用与 `/mcps` 的刷新走同一条路径。 */
   reloadMcp(): Promise<McpReloadResult>;
-  /** 重新读 `[mcp]` 偏好段（TUI 写回 config.toml 之后调用）。 */
-  refreshMcpPreferences(): void;
-  /** 生效中的 MCP 启停偏好（写回后由 refreshMcpPreferences 更新）。 */
-  readonly mcpPreferences: McpPreferences;
+  /** 权限运行时：规则分层、授权落盘、沙箱档位（审批器与 /permissions 共用一份）。 */
+  permission: PermissionRuntime;
   /** todo 服务（todo 插件提供；缺席即不可用）。 */
   todos: TodoService;
   jobs: ReturnType<SchedulerService['create']>;
@@ -164,6 +169,10 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   } catch (error) {
     if (error instanceof ConfigError) throw new CliError(error.message, 2);
     throw error;
+  }
+  // 交互模式进了备用屏：警告写在这里会留在主屏幕上，退出时才看见。交给 TUI 通知。
+  if (options.interactive !== true) {
+    for (const warning of config.startupWarnings) process.stderr.write(`warning: ${warning}\n`);
   }
   // 代理是进程级出网开关，必须在任何可能出网的步骤（MCP、模型目录预热）之前装好。
   applyProxy(config.proxy);
@@ -242,6 +251,21 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
   const trusted = isWorkspaceTrusted(options.workspaceRoot);
   const plugins = await openPlugins(trusted);
 
+  // 项目级权限规则：只有 permissions 段，未信任时 allow 被丢弃（见 config/project.ts）。
+  // 语法或键写错会让启动失败——它是仓库发出的安全声明，不能静默失效。
+  const projectPermissions = loadProjectPermissions(options.workspaceRoot, trusted);
+  const permission = createPermissionRuntime({
+    workspaceRoot: options.workspaceRoot,
+    userRules: config.permissions,
+    userRulesDir: sphHome(),
+    home: homedir(),
+    sandboxMode: config.sandbox,
+    sandboxAutoAllow: config.sandboxAutoAllow,
+    trusted,
+    ...(projectPermissions === undefined ? {} : { project: projectPermissions }),
+  });
+  reportLegacyGrants(permission.grants().path);
+
   const requireService = <T>(name: string): T => {
     const found = plugins.get<T>(name);
     if (found !== undefined) return found;
@@ -290,8 +314,6 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     throw error;
   }
 
-  const preferences = { ...config.mcpPreferences };
-
   /**
    * MCP 的域逻辑全在插件里，这里只做两件事：把宿主事实交给它，把结果转给界面。
    * 服务缺席（插件被禁用或加载失败）时返回空结果而不是抛错——`/mcps` 会如实说明
@@ -305,7 +327,6 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     return service.reload({
       workspaceRoot: options.workspaceRoot,
       fromDir: options.startDir ?? process.cwd(),
-      preferences,
       trusted,
     });
   };
@@ -420,20 +441,22 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
       });
     },
     reloadMcp,
-    refreshMcpPreferences() {
-      const fresh = readMcpPreferences(sphConfigPath());
-      // 读不回来就保持旧值：偏好刚写完，此时解析失败意味着文件被别的东西弄坏了，
-      // 用空偏好覆盖会让用户刚做的开关凭空消失。
-      if (fresh === undefined) return;
-      preferences.disabledServers = fresh.disabledServers;
-      preferences.enabledServers = fresh.enabledServers;
-      preferences.lazyServers = fresh.lazyServers;
-    },
-    get mcpPreferences() {
-      return preferences;
-    },
+    permission,
     cleanup,
   };
+}
+
+/**
+ * `[grants]` 已经不再被读取（授权改存 `<项目>/.sph/permissions.json`）。表里还有内容就明说
+ * 一次：静默留着，用户会以为那些授权仍然生效，于是对同一个动作反复被问感到莫名其妙。
+ */
+function reportLegacyGrants(grantPath: string): void {
+  const { grants } = readState(sphConfigPath());
+  const count = Object.values(grants).reduce((sum, keys) => sum + keys.length, 0);
+  if (count === 0) return;
+  process.stderr.write(
+    `warning: config.toml [grants] is no longer read (${count} entr${count === 1 ? 'y' : 'ies'} ignored); approvals now live in ${grantPath}\n`,
+  );
 }
 
 /** 未信任工作区的交互确认：信任意味着 AGENTS.md 与工具都能在该目录生效，必须显式同意。 */

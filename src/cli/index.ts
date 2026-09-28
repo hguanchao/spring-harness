@@ -1,16 +1,28 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { createJsonOutput, createTextOutput } from './output.js';
-import { HeadlessApprover, type ApprovalMode } from '../permission/policy.js';
+import {
+  evaluateRules,
+  HeadlessApprover,
+  isReadOnlyCommand,
+  splitShellCommands,
+  type ApprovalMode,
+  type ApproverEnv,
+  type RuleLayers,
+  type RuleSet,
+} from '../permission/policy.js';
 import { createLlmClassifier } from '../permission/auto.js';
 import { HELP, parseArgs, type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { ConfigError, loadConfig } from '../config/load.js';
+import { loadProjectPermissions } from '../config/project.js';
+import { readState } from '../config/state.js';
 import { loadRegistry } from '../config/registry.js';
 import { scaffoldUserHome } from '../config/scaffold.js';
-import { sphConfigPath, sphModelsPath, sphSpillRoot } from '../home.js';
+import { sphConfigPath, sphHome, sphModelsPath, sphSpillRoot } from '../home.js';
 import { combineListeners } from '../agent/events.js';
 import type { TokenUsage } from '../llm/client.js';
 import { PluginHost } from '../plugins/host.js';
@@ -18,6 +30,78 @@ import { discoverPlugins, userPluginsRoot } from '../plugins/loader.js';
 import { SESSION_SERVICE, STORAGE_SERVICE, UI_SERVICE, type SessionInfo, type SessionService, type StorageService, type UiService } from '../plugins/services.js';
 import { resolveWorkspaceRoot } from '../workspace/root.js';
 import { isWorkspaceTrusted } from '../workspace/trust.js';
+
+/**
+ * 沙箱事实：审批器用它判断「沙箱兜得住就不问」（`sandbox_auto_allow` 打开时）。
+ * 两个都是启动参数，运行中不变。
+ */
+function sandboxFacts(runtime: Runtime): Pick<ApproverEnv, 'sandboxMode' | 'sandboxAutoAllow'> {
+  return {
+    sandboxMode: () => runtime.config.sandbox,
+    sandboxAutoAllow: () => runtime.config.sandboxAutoAllow,
+  };
+}
+
+/** 读两份配置里的规则，不碰 provider / key —— 规则检查不该因为没填 key 就跑不了。 */
+function readRuleLayers(workspaceRoot: string): RuleLayers {
+  const user: RuleSet = { rules: readState(sphConfigPath()).rules, sourceDir: sphHome() };
+  const project = loadProjectPermissions(workspaceRoot, isWorkspaceTrusted(workspaceRoot));
+  return {
+    user,
+    ...(project === undefined
+      ? {}
+      : { project: { rules: project.rules, sourceDir: project.sourceDir } }),
+  };
+}
+
+/**
+ * `sph rules check "<command>"`：离线看一条命令会被规则判成什么。
+ *
+ * 规则写下去能不能生效，过去只能真跑一遍看它问不问——而「命中了哪一层、是不是只读、
+ * 复合命令的哪一段没被罩住」这些问题，光看配置文件答不出来。这里只读地算一次并打印。
+ */
+function runRulesCheck(workspaceRoot: string, command: string): void {
+  const out = (text: string): void => {
+    process.stdout.write(`${text}\n`);
+  };
+  const layers = readRuleLayers(workspaceRoot);
+  const env = { workspaceRoot, home: homedir() };
+  out(`workspace: ${workspaceRoot}`);
+  for (const [label, set] of [['user', layers.user], ['project', layers.project]] as const) {
+    if (set === undefined) {
+      out(`${label}: (no rules)`);
+      continue;
+    }
+    const count = set.rules.deny.length + set.rules.ask.length + set.rules.allow.length;
+    out(`${label}: ${count === 0 ? '(no rules)' : ''}`.trimEnd());
+    if (count === 0) continue;
+    for (const action of ['deny', 'ask', 'allow'] as const) {
+      for (const rule of set.rules[action]) out(`  ${action}: ${rule}`);
+    }
+  }
+  out('');
+  const parts = splitShellCommands(command);
+  out(`command: ${command}`);
+  out(`read-only: ${isReadOnlyCommand(command) ? 'yes — never asks in any mode' : 'no'}`);
+  if (parts === undefined) {
+    out('parse: unparsable — allow rules cannot match it (fail-closed)');
+  } else if (parts.length > 1) {
+    out(`parse: ${parts.length} segments`);
+  }
+  try {
+    const verdict = evaluateRules(layers, { tool: 'bash', command }, env) ?? 'none (falls through to the mode)';
+    out(`verdict: ${verdict}`);
+    if (parts !== undefined && parts.length > 1) {
+      for (const part of parts) {
+        const segment = evaluateRules(layers, { tool: 'bash', command: part }, env) ?? 'none';
+        out(`  segment: ${part} → ${segment}`);
+      }
+    }
+  } catch (error) {
+    out(`rule error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 2;
+  }
+}
 
 function printSessionInfos(infos: SessionInfo[]): void {
   for (const info of infos) {
@@ -124,6 +208,7 @@ async function bootstrap(
       startDir: process.cwd(),
       sandboxOverride: args.sandbox,
       trust: args.trust,
+      interactive: untrusted === 'confirm',
       untrusted,
       confirmUntrustedWorkspace,
       continueSession: args.continueSession,
@@ -243,12 +328,20 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
         approvalMode === 'auto'
           ? createLlmClassifier(reviewClient ?? client, { onUsage: (usage) => recordAuxUsage(usage, 'review') })
           : undefined,
-        config.permissions,
+        { layers: runtime.permission.layers(), ruleEnv: runtime.permission.ruleEnv, ...sandboxFacts(runtime) },
       ),
       // strict 子代理：fail-closed，不弹窗也不共享父会话的授权；策略判定在这里，loop 只挑。
       ...(config.subagentApproval === 'strict'
-        ? { subagentApprover: new HeadlessApprover('ask', undefined, config.permissions) }
+        ? {
+            subagentApprover: new HeadlessApprover('ask', undefined, {
+              layers: runtime.permission.layers(),
+              ruleEnv: runtime.permission.ruleEnv,
+            }),
+          }
         : {}),
+      // 文件类工具默认不弹窗（写权限由沙箱管），但规则里的 deny/ask 对它们同样生效。
+      rules: runtime.permission.layers(),
+      ruleEnv: runtime.permission.ruleEnv,
       contextWindow: config.contextWindow,
       depth: folded.depth,
       maxSubagentDepth: config.subagentMaxDepth,
@@ -306,6 +399,10 @@ async function main(): Promise<void> {
   }
   if (args.command === 'export') {
     await runExportCommand(workspaceRoot, args.sessionId, args.format);
+    return;
+  }
+  if (args.command === 'rules') {
+    runRulesCheck(workspaceRoot, args.rulesCheck ?? '');
     return;
   }
   if (args.rpc) {

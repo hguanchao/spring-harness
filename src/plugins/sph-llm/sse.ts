@@ -65,6 +65,19 @@ export class FatalStreamError extends Error {
   }
 }
 
+/**
+ * 对端把正文写完再拆连接。undici 不把它当成流结束，而报 Invalid EOF。
+ * 上游日志里这是一次正常响应。
+ */
+function isPeerClosed(error: unknown): boolean {
+  if (error instanceof Error && error.cause !== undefined && isPeerClosed(error.cause)) return true;
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  return /invalid eof|und_err_socket|econnreset|socket hang up|other side closed/i.test(`${message} ${code}`);
+}
+
 /** 空流 / 空 JSON 是网关抖动，可重试，不当成模型已经答完。 */
 function emptyStreamError(contentType: string, hint: string): RetryableError {
   return new RetryableError(
@@ -239,10 +252,23 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
     }
     if (!sawData && trimmed && sample.length < 256_000) sample += `${trimmed}\n`;
   };
+  // 正常读完就不必再 cancel：cancel 会把这条 keepalive 连接拆掉，下一次请求正好撞上 Invalid EOF。
+  let release = true;
   try {
     for (;;) {
       const waitMs = gotByte || idleMs <= 0 ? idleMs : Math.min(idleMs, firstByteMs);
-      const { value, done } = await readIdle(reader, waitMs);
+      let value: Uint8Array | undefined;
+      let done = false;
+      try {
+        const chunk = await readIdle(reader, waitMs);
+        value = chunk.value as Uint8Array | undefined;
+        done = chunk.done;
+      } catch (error) {
+        if (!isPeerClosed(error)) throw error;
+        // 一个字节都没有：连接没建好，重试。已经收到 SSE：对端写完就关了，按读完收工。
+        if (!sawData) throw new RetryableError(`network error: ${formatFetchError(error)}`);
+        done = true;
+      }
       if (value !== undefined && value.byteLength > 0) gotByte = true;
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
       if (buffer.charCodeAt(0) === 0xfeff) buffer = buffer.slice(1);
@@ -251,6 +277,7 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
       for (const line of lines) handleLine(line);
       if (done) {
         dispatch();
+        release = false;
         break;
       }
     }
@@ -267,8 +294,10 @@ export async function postSseStream(params: SseStreamParams): Promise<void> {
   } finally {
     // 提前退出（idle 超时 / onData 抛错 / 取消）时流还没读完：不 cancel 的话 undici 会把这条
     // 连接一直占着直到超时。重试与参数降级都可能连发多次请求，泄漏会按请求数累积。
-    void reader.cancel().catch(() => {
-      // 流已出错时 cancel 也会 reject，这里只关心释放连接。
-    });
+    if (release) {
+      void reader.cancel().catch(() => {
+        // 流已出错时 cancel 也会 reject，这里只关心释放连接。
+      });
+    }
   }
 }

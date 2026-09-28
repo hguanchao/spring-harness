@@ -10,12 +10,13 @@ import type { AgentDriver } from '../../agent/driver.js';
 import type { ApiProtocol } from '../../config/load.js';
 import type { ProviderDeclaration, ResolvedModel } from '../../config/registry.js';
 import type { LlmClient, ReasoningEffort } from '../sph-llm/openai.js';
-import type { McpReloadResult, McpPreferences, McpService } from '../services.js';
+import type { McpReloadResult, McpService } from '../services.js';
 import type { LoadedPlugin } from '../host.js';
 import type { PluginLoadFailure } from '../loader.js';
 import type { AgentListener } from '../../agent/events.js';
 import type { PluginCommand, PluginServices } from '../types.js';
-import type { ApprovalMode, PermissionRules, SubagentApprovalPolicy } from '../../permission/policy.js';
+import type { ApprovalMode, SubagentApprovalPolicy } from '../../permission/policy.js';
+import type { PermissionRuntime } from '../../permission/runtime.js';
 import type { JobBoardPort } from '../services.js';
 import type { TodoService } from '../services.js';
 import type { WorktreePort } from '../services.js';
@@ -56,10 +57,6 @@ export interface TuiDeps {
    * 而「改完配置要重启」正是这轮要消掉的那件事。
    */
   reloadMcp(): Promise<McpReloadResult>;
-  /** 重新读 `[mcp]` 偏好段；写回 config.toml 之后调用。 */
-  refreshMcpPreferences(): void;
-  /** 生效中的 MCP 启停偏好，供弹窗显示当前状态。 */
-  mcpPreferences: McpPreferences;
   /** 已装载插件与导入失败的摘要，供 `/plugins` 与诊断显示。 */
   pluginReport(): { plugins: LoadedPlugin[]; failures: PluginLoadFailure[]; shadowed: string[]; pinned?: string[] };
   /** 插件服务表；loop 按接缝名取用（sph-mcp 的清单进提示词），插件工具也靠它取兄弟服务。 */
@@ -72,8 +69,12 @@ export interface TuiDeps {
   todos: TodoService;
   jobs: JobBoardPort;
   approvalMode: ApprovalMode;
-  /** `[permissions]` 规则；省略即无规则。 */
-  permissionRules?: PermissionRules;
+  /**
+   * 权限运行时：分层规则、授权落盘、沙箱档位。
+   *
+   * 必需而非可选：漏接的后果是「某个入口没吃到规则」，而安全相关的东西不该有静默缺口。
+   */
+  permission: PermissionRuntime;
   /** 子代理审批策略；省略按 inherit。 */
   subagentApproval?: SubagentApprovalPolicy;
   model: string;
@@ -118,4 +119,6 @@ export interface TuiDeps {
   ui?: TUI;
   /** MCP 启动警告；在 TUI 里用通知展示，避免写 stderr 打穿替代屏幕。 */
   mcpWarnings?: readonly string[];
+  /** 端点指针对不上时的说明，进界面后用通知展示。 */
+  startupWarnings?: readonly string[];
 }

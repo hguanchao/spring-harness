@@ -6,15 +6,15 @@ import {
   type PermissionRules,
   type SubagentApprovalPolicy,
 } from '../permission/policy.js';
-import { SUBAGENT_APPROVAL_POLICIES } from '../permission/policy.js';
+import { SUBAGENT_APPROVAL_POLICIES, validateRules } from '../permission/policy.js';
 import { sphConfigPath, sphModelsPath } from '../home.js';
 import { DEFAULT_MAX_RETRIES, DEFAULT_SPILL_THRESHOLD, REASONING_EFFORTS, type ReasoningEffort } from '../llm/client.js';
-import type { McpServerConfig, McpPreferences } from '../plugins/services.js';
+import type { McpServerConfig } from '../plugins/services.js';
 import { type CompatProfile } from './primitives.js';
 import type { SandboxMode } from '../sandbox/types.js';
 import { ConfigError } from './errors.js';
 import { API_PROTOCOLS, type ApiProtocol } from './primitives.js';
-import { findProvider, loadRegistry, resolveModel, type ProviderDeclaration } from './registry.js';
+import { loadRegistry, resolveModel, type ProviderDeclaration } from './registry.js';
 import { parseGrants, parseRules, parseTrusted } from './state.js';
 
 export { ConfigError, API_PROTOCOLS };
@@ -61,6 +61,13 @@ export interface SphConfig {
   /** `[permissions]` 针对具体动作的长期规则；省略即无规则。 */
   permissions: PermissionRules;
   /**
+   * 沙箱内免问：`sandbox` 非 `off` 时，shell 命令不再逐条审批。
+   *
+   * 默认 false。sph 的沙箱是同主机文件策略、Windows 还只有部分强制，拿它当免问的依据比
+   * 进程隔离弱，所以显式开启才生效（见 permission/policy.ts 的 sandboxCovers）。
+   */
+  sandboxAutoAllow: boolean;
+  /**
    * 子代理的审批策略；省略按 `inherit`。
    *
    * `inherit` 复用父会话的审批器（含父会话已批准的授权），`strict` 让子代理 fail-closed：
@@ -105,14 +112,6 @@ export interface SphConfig {
    */
   maxRetries: number;
   /**
-   * MCP 的本地启停偏好（`[mcp]` 段）。
-   *
-   * 来自外部配置文件的 server 一概不写回原文件，启停只在
-   * 这里叠一层覆盖。这样「读别人的配置」和「改别人的配置」被彻底分开——后者会带来意料
-   * 之外的副作用，而且很难撤销。
-   */
-  mcpPreferences: McpPreferences;
-  /**
    * 被关掉的插件名（`[plugins] disabled`）。
    *
    * 插件是可选能力，所以这里只有「关」没有「开」：默认全装，坏插件由装载失败自己暴露。
@@ -120,6 +119,13 @@ export interface SphConfig {
    * 插件而不是核心能力的收益。
    */
   disabledPlugins: string[];
+  /**
+   * 端点指针对不上时的说明。
+   *
+   * provider / model 写错不再拒绝启动：首启模板和用户自己的 models.json 经常对不上，
+   * 拒启动等于把 `/provider` 也挡住。这里记下原因，调用方打出来，实际请求改走一份能用的声明。
+   */
+  startupWarnings: readonly string[];
 }
 
 /**
@@ -130,14 +136,6 @@ export function parseSandboxMode(value: string | undefined): SandboxMode {
   if (value === undefined || value === '') return 'off';
   if (value === 'off' || value === 'workspace' || value === 'read-only') return value;
   throw new ConfigError(`unknown sandbox mode: ${value} (off | workspace | read-only)`);
-}
-
-/** 非空字符串校验；调用方已自行处理 undefined / 空串的省略语义。 */
-function requireNonEmptyString(value: unknown, key: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new ConfigError(`${key} must be a non-empty string`);
-  }
-  return value.trim();
 }
 
 /** 缺 provider / model / key 时拒绝启动，避免绑死供应商或空跑。 */
@@ -164,57 +162,62 @@ export function loadConfig(options?: {
   }
   file = parsed as Record<string, unknown>;
 
-  const providerName = requireNonEmptyString(file.provider, 'provider');
-  const provider: ProviderDeclaration = findProvider(registry, providerName);
-  const model = requireNonEmptyString(file.model, 'model');
+  const writtenProvider = typeof file.provider === 'string' ? file.provider.trim() : '';
+  const writtenModel = typeof file.model === 'string' ? file.model.trim() : '';
+  const startupWarnings: string[] = [];
+  // 指针对不上就改用 models.json 里的第一份声明，而不是退出。用户要能进 /provider 把指针改对。
+  const provider = resolveConfiguredProvider(registry, writtenProvider, startupWarnings);
+  const model = resolveConfiguredModel(provider, writtenModel, writtenProvider !== provider.name, startupWarnings);
 
-  // 端点全部来自 provider 声明；空 key + 无 headers 的组合仍然拒绝——那是免鉴权网关
-  // 忘了写会话标识头的配置错误，启动时报错比第一轮请求 401 时报错好排查。
   if (provider.apiKey === '' && Object.keys(provider.headers).length === 0) {
-    throw new ConfigError(
-      `provider "${providerName}" has no apiKey and no headers. Set apiKey (or headers for keyless gateways).`,
+    startupWarnings.push(
+      `provider "${provider.name}" has no apiKey and no headers. Set apiKey (or headers for keyless gateways).`,
     );
   }
 
   const resolved = resolveModel(provider, model);
-  const contextRaw = file.context_window;
-  let contextWindow = 256_000;
-  if (contextRaw !== undefined) {
-    if (typeof contextRaw !== 'number' || !Number.isFinite(contextRaw) || contextRaw < 1000) {
-      throw new ConfigError('context_window must be a number >= 1000');
-    }
-    contextWindow = Math.floor(contextRaw);
-  }
+  const contextWindow = readContextWindow(file.context_window, startupWarnings);
 
   // 输出上限可选：模型声明 > 配置文件 > 保持协议现状（未配置时 chat-completions/responses
-  // 不发字段，anthropic 用默认 8192），避免为老配置无谓引入新约束。
-  const maxTokensRaw = file.max_tokens;
-  const configMaxTokens = maxTokensRaw === undefined
-    ? undefined
-    : requireInt(maxTokensRaw, 1, 'max_tokens must be a positive integer');
+  // 不发字段，anthropic 用默认 8192）。写错的数字丢掉，不挡启动。
+  const configMaxTokens = readPositiveInt(file.max_tokens, 'max_tokens', startupWarnings);
   const maxTokens = resolved.maxTokens ?? configMaxTokens;
 
-  const proxy = parseProxy(file.proxy);
+  const proxy = readProxy(file.proxy, startupWarnings);
 
-  const sandbox = options?.sandboxOverride ?? parseSandboxMode(asString(file.sandbox, 'sandbox'));
-  const reasoningEffort = parseReasoningEffort(file.reasoning_effort);
-  const approval = parseApprovalMode(file.approval);
+  const sandbox = options?.sandboxOverride
+    ?? readChoice(file.sandbox, 'sandbox', ['off', 'workspace', 'read-only'] as const, 'off', startupWarnings);
+  const reasoningEffort = readChoice(
+    file.reasoning_effort,
+    'reasoning_effort',
+    REASONING_EFFORTS,
+    undefined,
+    startupWarnings,
+  );
+  const approval = readChoice(file.approval, 'approval', APPROVAL_MODES, undefined, startupWarnings);
   const permissions = parseRules(file.permissions);
-  const subagentApproval = parseSubagentApproval(file.subagent_approval);
-  const mcpServers = parseMcpServers(file.mcp_servers);
-  const compactModel = parseOptionalModel(file.compact_model, 'compact_model');
-  const reviewModel = parseOptionalModel(file.review_model, 'review_model');
-  const aux = parseAux(file.aux);
-  const spillThreshold = parseSpillThreshold(file.spill_threshold);
-  const subagentMaxDepth = parseSubagentMaxDepth(file.subagent_max_depth);
-  const maxTurns = parseMaxTurns(file.max_turns);
-  const promptCache = parsePromptCache(file.prompt_cache);
-  const maxSessionTokens = parseMaxSessionTokens(file.max_session_tokens);
-  const maxRetries = parseMaxRetries(file.max_retries);
-  const mcpPreferences = parseMcpPreferences(file.mcp);
-  const disabledPlugins = parseDisabledPlugins(file.plugins);
+  validateRules(permissions, `permissions`, (message) => new ConfigError(message));
+  const sandboxAutoAllow = readBool(file.sandbox_auto_allow, 'sandbox_auto_allow', false, startupWarnings);
+  const subagentApproval = readChoice(
+    file.subagent_approval,
+    'subagent_approval',
+    SUBAGENT_APPROVAL_POLICIES,
+    'inherit',
+    startupWarnings,
+  );
+  const mcpServers = readMcpServers(file.mcp_servers, startupWarnings);
+  const compactModel = readDeclaredModel(file.compact_model, 'compact_model', provider, startupWarnings);
+  const reviewModel = readDeclaredModel(file.review_model, 'review_model', provider, startupWarnings);
+  const aux = readAux(file.aux, registry, startupWarnings);
+  const spillThreshold = readInt(file.spill_threshold, 'spill_threshold', 0, DEFAULT_SPILL_THRESHOLD, startupWarnings);
+  const subagentMaxDepth = readInt(file.subagent_max_depth, 'subagent_max_depth', 0, 1, startupWarnings);
+  const maxTurns = readMaxTurns(file.max_turns, startupWarnings);
+  const promptCache = readBool(file.prompt_cache, 'prompt_cache', true, startupWarnings);
+  const maxSessionTokens = readInt(file.max_session_tokens, 'max_session_tokens', 0, 0, startupWarnings);
+  const maxRetries = readInt(file.max_retries, 'max_retries', 0, DEFAULT_MAX_RETRIES, startupWarnings);
+  const disabledPlugins = readDisabledPlugins(file.plugins, startupWarnings);
   return {
-    provider: providerName,
+    provider: provider.name,
     model,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
@@ -224,10 +227,48 @@ export function loadConfig(options?: {
     contextWindow: resolved.contextWindow ?? contextWindow,
     maxTokens,
     sandbox, reasoningEffort, approval, mcpServers,
-    permissions, subagentApproval,
+    permissions, subagentApproval, sandboxAutoAllow,
     compactModel, reviewModel, aux, spillThreshold, proxy, subagentMaxDepth, maxTurns, promptCache,
-    maxSessionTokens, maxRetries, mcpPreferences, disabledPlugins,
+    maxSessionTokens, maxRetries, disabledPlugins, startupWarnings,
   };
+}
+
+/**
+ * config.toml 的 provider 指针。对不上时用登记表里的第一份，并说明原来写的是什么。
+ */
+function resolveConfiguredProvider(
+  registry: ReturnType<typeof loadRegistry>,
+  written: string,
+  warnings: string[],
+): ProviderDeclaration {
+  if (written === '') {
+    warnings.push('provider is not set in config.toml');
+  } else {
+    const found = registry.providers.find((item) => item.name === written);
+    if (found !== undefined) return found;
+    const known = registry.providers.map((item) => item.name).join(', ');
+    warnings.push(`unknown provider "${written}" in config.toml (models.json has: ${known})`);
+  }
+  const fallback = registry.providers[0];
+  if (fallback === undefined) throw new ConfigError('models.json declares no providers');
+  warnings.push(`using provider "${fallback.name}" until config.toml points at one that exists`);
+  return fallback;
+}
+
+/** 模型指针。换过 provider 之后，原来的模型 id 多半也不在新端点上，改用它的第一个模型。 */
+function resolveConfiguredModel(
+  provider: ProviderDeclaration,
+  written: string,
+  providerReplaced: boolean,
+  warnings: string[],
+): string {
+  const declared = provider.models.find((item) => item.id === written);
+  if (declared !== undefined) return declared.id;
+  if (!providerReplaced && written !== '') return written;
+  const fallback = provider.models[0]?.id ?? written;
+  if (written === '') warnings.push(`model is not set in config.toml; using "${fallback}"`);
+  else warnings.push(`model "${written}" is not declared by provider "${provider.name}"; using "${fallback}"`);
+  return fallback;
 }
 
 export function readTrustedGrants(path: string = sphConfigPath()): { trusted: string[]; grants: Record<string, string[]> } {
@@ -236,205 +277,247 @@ export function readTrustedGrants(path: string = sphConfigPath()): { trusted: st
   return { trusted: parseTrusted(parsed.trusted), grants: parseGrants(parsed.grants) };
 }
 
+/** 写错就记一条并改用 fallback。省略（undefined / 空串）安静地用 fallback。 */
+function note(warnings: string[], key: string, written: unknown, fallback: string): void {
+  const shown = typeof written === 'string' ? `"${written}"` : JSON.stringify(written);
+  warnings.push(`${key} ${shown} is invalid; using ${fallback}`);
+}
+
+/** 枚举键。fallback 为 undefined 时，写错等于没写。 */
+function readChoice<T extends string>(
+  value: unknown,
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+  warnings: string[],
+): T;
+function readChoice<T extends string>(
+  value: unknown,
+  key: string,
+  allowed: readonly T[],
+  fallback: undefined,
+  warnings: string[],
+): T | undefined;
+function readChoice<T extends string>(
+  value: unknown,
+  key: string,
+  allowed: readonly T[],
+  fallback: T | undefined,
+  warnings: string[],
+): T | undefined {
+  if (value === undefined || value === '') return fallback;
+  if (typeof value === 'string' && (allowed as readonly string[]).includes(value)) return value as T;
+  note(warnings, key, value, fallback === undefined ? 'the default' : `"${fallback}"`);
+  return fallback;
+}
+
+/** 布尔键。加引号的 `"true"` 是常见笔误，当写错处理而不是当成真。 */
+function readBool(value: unknown, key: string, fallback: boolean, warnings: string[]): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === 'boolean') return value;
+  note(warnings, key, value, String(fallback));
+  return fallback;
+}
+
+/** 整数键。低于 min 或不是整数时用 fallback。 */
+function readInt(value: unknown, key: string, min: number, fallback: number, warnings: string[]): number {
+  if (value === undefined) return fallback;
+  if (typeof value === 'number' && Number.isInteger(value) && Number.isFinite(value) && value >= min) return value;
+  note(warnings, key, value, String(fallback));
+  return fallback;
+}
+
+/** 正整数，写错当没写（交给模型声明或协议默认）。 */
+function readPositiveInt(value: unknown, key: string, warnings: string[]): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isInteger(value) && Number.isFinite(value) && value >= 1) return value;
+  note(warnings, key, value, 'the model default');
+  return undefined;
+}
+
+/** 全局上下文窗口。模型声明优先；这里写错就用内置 256000。 */
+function readContextWindow(value: unknown, warnings: string[]): number {
+  if (value === undefined) return 256_000;
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 1000) return Math.floor(value);
+  note(warnings, 'context_window', value, '256000');
+  return 256_000;
+}
+
+/** 一轮的模型调用上限。省略不限制；写 0 或负数没有「关掉」的语义，当没写。 */
+function readMaxTurns(value: unknown, warnings: string[]): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1) return value;
+  note(warnings, 'max_turns', value, 'no limit');
+  return undefined;
+}
+
 /**
- * `[aux]` 表：只有一个 provider 指针，省略即同源。
+ * `[aux]` 表：只有一个 provider 指针，省略或对不上即同源。
  *
- * `compact_model` / `review_model` 是 aux provider（缺省即主 provider）里的模型 id，
- * 协议按该 provider 的声明解析——这正是旧 `sharesMainEndpoint` 逻辑的结构化表达。
+ * `compact_model` / `review_model` 是 aux provider（缺省即主 provider）里的模型 id。
  */
-function parseAux(value: unknown): AuxConfig | undefined {
+function readAux(
+  value: unknown,
+  registry: ReturnType<typeof loadRegistry>,
+  warnings: string[],
+): AuxConfig | undefined {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('aux must be a table');
+    note(warnings, 'aux', value, 'the main provider');
+    return undefined;
   }
-  const row = value as Record<string, unknown>;
-  if (row.provider === undefined || row.provider === '') return undefined;
-  return { provider: requireNonEmptyString(row.provider, 'aux.provider') };
-}
-
-/** 会话 token 预算：非负整数，0 = 不限制（默认）。 */
-function parseMaxSessionTokens(value: unknown): number {
-  if (value === undefined) return 0;
-  return requireInt(value, 0, 'max_session_tokens must be a non-negative integer (0 disables the budget)');
-}
-
-/** 上游失败重试：非负整数，缺省 {@link DEFAULT_MAX_RETRIES}，0 = 失败即停。 */
-function parseMaxRetries(value: unknown): number {
-  if (value === undefined) return DEFAULT_MAX_RETRIES;
-  return requireInt(value, 0, 'max_retries must be a non-negative integer (0 fails immediately)');
-}
-
-/** prompt-cache 断点开关：默认开，只有显式 false 才关。 */
-function parsePromptCache(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (typeof value !== 'boolean') throw new ConfigError('prompt_cache must be a boolean');
-  return value;
-}
-
-/**
- * 子代理嵌套深度预算：非负整数，默认 1，防止子代理再往下派生。
- * 0 = 完全禁止派生；超出预算的调用在运行时被拒——工具保持对子代理可见，
- * 由运行时策略统一负责拒绝，schema 不做裁剪。
- */
-function requireInt(value: unknown, min: number, message: string): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || !Number.isFinite(value) || value < min) {
-    throw new ConfigError(message);
+  const written = (value as Record<string, unknown>).provider;
+  if (written === undefined || written === '') return undefined;
+  if (typeof written !== 'string' || !registry.providers.some((item) => item.name === written)) {
+    const known = registry.providers.map((item) => item.name).join(', ');
+    warnings.push(`aux.provider ${JSON.stringify(written)} is not in models.json (${known}); using the main provider`);
+    return undefined;
   }
-  return value;
+  return { provider: written };
 }
 
-function parseSubagentMaxDepth(value: unknown): number {
-  if (value === undefined) return 1;
-  return requireInt(value, 0, 'subagent_max_depth must be a non-negative integer (0 forbids delegation)');
-}
-
-/** 一轮的模型调用上限。省略不限制；0 没有意义，显式写 0 报错而不是悄悄关掉。 */
-function parseMaxTurns(value: unknown): number | undefined {
-  if (value === undefined) return undefined;
-  return requireInt(value, 1, 'max_turns must be a positive integer');
-}
-
-/** 辅助模型名可选：空串与缺省同义（用主模型），非字符串才报错。 */
-function parseOptionalModel(value: unknown, key: string): string | undefined {
+/** 辅助模型名。空着用主模型；写了却不在当前 provider 的声明里也当没写。 */
+function readDeclaredModel(
+  value: unknown,
+  key: string,
+  provider: ProviderDeclaration,
+  warnings: string[],
+): string | undefined {
   if (value === undefined || value === '') return undefined;
-  return requireNonEmptyString(value, key);
-}
-
-/**
- * spill 阈值：正数开启，0 关闭，缺省用内置默认（8KB）。
- * 显式给 0 是「我知道自己在做什么」的表达，不该被缺省值覆盖。
- */
-function parseSpillThreshold(value: unknown): number {
-  if (value === undefined) return DEFAULT_SPILL_THRESHOLD;
-  return requireInt(value, 0, 'spill_threshold must be a non-negative integer (0 disables spilling)');
-}
-
-/**
- * 审批模式可选。放在配置里是为了让 `/permission` 的选择能跨进程生效——
- * 在此之前它只能来自 `--approval` / `--yolo`，命令行一过就没了。
- */
-export function parseApprovalMode(value: unknown): ApprovalMode | undefined {
-  if (value === undefined || value === '') return undefined;
-  if (typeof value !== 'string' || !(APPROVAL_MODES as readonly string[]).includes(value)) {
-    throw new ConfigError(`approval must be one of: ${APPROVAL_MODES.join(' | ')}`);
+  if (typeof value !== 'string') {
+    note(warnings, key, value, 'the main model');
+    return undefined;
   }
-  return value as ApprovalMode;
-}
-
-/** 推理档位可选；未配置时保持 undefined（请求不带 reasoning_effort，走服务端默认）。 */
-export function parseReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  if (value === undefined || value === '') return undefined;
-  if (typeof value !== 'string' || !(REASONING_EFFORTS as readonly string[]).includes(value)) {
-    throw new ConfigError(`reasoning_effort must be one of: ${REASONING_EFFORTS.join(' | ')}`);
-  }
-  return value as ReasoningEffort;
-}
-
-/** 子代理审批策略；省略默认 inherit——沿用既有行为，不静默改语义。 */
-export function parseSubagentApproval(value: unknown): SubagentApprovalPolicy {
-  if (value === undefined || value === '') return 'inherit';
-  if (typeof value !== 'string' || !(SUBAGENT_APPROVAL_POLICIES as readonly string[]).includes(value)) {
-    throw new ConfigError(`subagent_approval must be one of: ${SUBAGENT_APPROVAL_POLICIES.join(' | ')}`);
-  }
-  return value as SubagentApprovalPolicy;
+  const id = value.trim();
+  if (provider.models.some((item) => item.id === id)) return id;
+  warnings.push(`${key} "${id}" is not declared by provider "${provider.name}"; using the main model`);
+  return undefined;
 }
 
 /**
  * 出站代理三态（与 api_key 的显式空串约定呼应）：
  * - 未配置 → 回退标准环境变量 HTTPS_PROXY / HTTP_PROXY（NO_PROXY 照常生效）；
  * - 显式 `""` → 强制直连——shell 里全局挂了代理、但上游本可直达时用它逃生；
- * - 非空 → 必须是 http(s) URL。undici 的代理不支持 socks，这里提前拦下，
- *   免得用户配了 socks5 却只看到一条莫名的连接错误。
+ * - 非空 → 必须是 http(s) URL。写错（含 socks）忽略并警告，改走环境变量。
  */
-function parseProxy(value: unknown): string | undefined {
+function readProxy(value: unknown, warnings: string[]): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'string') throw new ConfigError('proxy must be a string');
+  if (typeof value !== 'string') {
+    note(warnings, 'proxy', value, 'the environment proxy');
+    return undefined;
+  }
   const trimmed = value.trim();
   if (trimmed === '') return '';
   let url: URL;
   try {
     url = new URL(trimmed);
   } catch {
-    throw new ConfigError('proxy must be an http(s) URL (e.g. http://127.0.0.1:7890)');
+    note(warnings, 'proxy', value, 'the environment proxy');
+    return undefined;
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ConfigError('proxy must be an http(s) URL (socks is not supported)');
+    note(warnings, 'proxy', value, 'the environment proxy');
+    return undefined;
   }
   return trimmed;
-}
-
-function asString(value: unknown, key: string): string | undefined {
-  if (value === undefined) return undefined;
-  return requireNonEmptyString(value, key);
-}
-
-/**
- * `[mcp]` 表：三个名字列表，缺省即空。
- *
- * 名字列表里出现不存在的 server 不算错误：配置可能来自别的机器或还没导入，静默忽略比
- * 拒绝启动合理。写成非数组才是真的写错了，那时候报错更省事。
- */
-function parseMcpPreferences(value: unknown): McpPreferences {
-  if (value === undefined) return { disabledServers: [], enabledServers: [], lazyServers: [] };
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('mcp must be a table');
-  }
-  const row = value as Record<string, unknown>;
-  return {
-    disabledServers: parseNameList(row.disabled_servers, 'mcp.disabled_servers', 'server names'),
-    enabledServers: parseNameList(row.enabled_servers, 'mcp.enabled_servers', 'server names'),
-    lazyServers: parseNameList(row.lazy_servers, 'mcp.lazy_servers', 'server names'),
-  };
-}
-
-function parseNameList(value: unknown, key: string, noun: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new ConfigError(`${key} must be an array of ${noun}`);
-  return value.map((item, index) => {
-    if (typeof item !== 'string' || item.trim() === '') {
-      throw new ConfigError(`${key}[${index}] must be a non-empty string`);
-    }
-    return item.trim();
-  });
 }
 
 /**
  * `[plugins] disabled`：关掉的插件名。
  *
- * 与 `[mcp] disabled_servers` 同一套语义——列出不存在的插件名不算错误（你可能只是还没把
- * 插件放进 `plugins/`），写成非数组才报错。
+ * 列出不存在的插件名不算错误（你可能只是还没把插件放进 `plugins/`）。整段写错当没关任何插件。
  */
-function parseDisabledPlugins(value: unknown): string[] {
+function readDisabledPlugins(value: unknown, warnings: string[]): string[] {
   if (value === undefined) return [];
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('plugins must be a table');
+    note(warnings, 'plugins', value, 'every plugin');
+    return [];
   }
-  return parseNameList((value as Record<string, unknown>).disabled, 'plugins.disabled', 'plugin names');
+  const list = (value as Record<string, unknown>).disabled;
+  if (list === undefined) return [];
+  if (!Array.isArray(list)) {
+    note(warnings, 'plugins.disabled', list, 'every plugin');
+    return [];
+  }
+  const names = list.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+  if (names.length !== list.length) warnings.push('plugins.disabled has empty or non-string entries; those were dropped');
+  return names.map((item) => item.trim());
 }
 
 /**
- * 单独读 `[mcp]` 段。
- *
- * `/mcps` 写完启停偏好后需要就地刷新内存里的那份，而重新 `loadConfig` 会顺带重跑
- * 一堆与 MCP 无关的校验（缺 key 直接抛错），在一次交互中途是不合适的。
- *
- * 读不回来（文件没了/被改坏）返回 undefined，调用方保持旧值——偏好刚写完，此时用空值
- * 覆盖只会让用户刚做的开关凭空消失。
+ * 用户自己的 `[mcp_servers]`。坏条目丢掉并警告，不挡启动——外部来源已经是这个待遇，
+ * 自己这份配置不该更严。整段不是表时全部丢掉。
  */
-export function readMcpPreferences(path: string): McpPreferences | undefined {
-  if (!existsSync(path)) return { disabledServers: [], enabledServers: [], lazyServers: [] };
-  try {
-    const parsed: unknown = parseToml(readFileSync(path, 'utf8'));
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-    return parseMcpPreferences((parsed as Record<string, unknown>).mcp);
-  } catch {
-    return undefined;
+function readMcpServers(value: unknown, warnings: string[]): McpServerConfigFile[] {
+  if (value === undefined) return [];
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    note(warnings, 'mcp_servers', value, 'no servers from config.toml');
+    return [];
   }
+  const servers: McpServerConfigFile[] = [];
+  for (const [name, row] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = readMcpServer(name, row, warnings);
+    if (parsed !== undefined) servers.push(parsed);
+  }
+  return servers;
 }
 
-function parseMcpTransport(value: unknown, key: string): 'stdio' | 'http' | 'sse' | undefined {
+function readMcpServer(name: string, row: unknown, warnings: string[]): McpServerConfigFile | undefined {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+    warnings.push(`mcp_servers.${name} is not a table; dropped`);
+    return undefined;
+  }
+  const rec = row as Record<string, unknown>;
+  const command = optionalString(rec.command);
+  const url = optionalString(rec.url);
+  if (command === undefined && url === undefined) {
+    warnings.push(`mcp_servers.${name} needs a command or a url; dropped`);
+    return undefined;
+  }
+  const args = rec.args;
+  if (args !== undefined && (!Array.isArray(args) || args.some((item) => typeof item !== 'string'))) {
+    warnings.push(`mcp_servers.${name}.args must be a string array; dropped`);
+    return undefined;
+  }
+  const transport = readMcpTransport(rec.type ?? rec.transport, name, warnings);
+  if (transport === 'invalid') return undefined;
+  const headers = readStringMap(rec.headers, name, warnings);
+  if (headers === 'invalid') return undefined;
+  const title = optionalString(rec.name);
+  let callTimeoutMs: number | undefined;
+  if (rec.call_timeout_ms !== undefined) {
+    if (typeof rec.call_timeout_ms !== 'number' || !Number.isFinite(rec.call_timeout_ms) || rec.call_timeout_ms <= 0) {
+      warnings.push(`mcp_servers.${name}.call_timeout_ms must be a positive number; ignored`);
+    } else {
+      callTimeoutMs = rec.call_timeout_ms;
+    }
+  }
+  return {
+    name,
+    ...(title !== undefined && title !== name ? { title } : {}),
+    command,
+    args: args as string[] | undefined,
+    url,
+    transport,
+    headers,
+    ...(callTimeoutMs === undefined ? {} : { callTimeoutMs }),
+  };
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function readMcpTransport(
+  value: unknown,
+  name: string,
+  warnings: string[],
+): 'stdio' | 'http' | 'sse' | undefined | 'invalid' {
   if (value === undefined) return undefined;
-  if (typeof value !== 'string') throw new ConfigError(`${key} must be a string`);
+  if (typeof value !== 'string') {
+    warnings.push(`mcp_servers.${name}.type must be stdio, http, or sse; dropped`);
+    return 'invalid';
+  }
   switch (value.trim().toLowerCase()) {
     case 'stdio':
       return 'stdio';
@@ -445,59 +528,28 @@ function parseMcpTransport(value: unknown, key: string): 'stdio' | 'http' | 'sse
     case 'sse':
       return 'sse';
     default:
-      throw new ConfigError(`${key} must be stdio, http, or sse`);
+      warnings.push(`mcp_servers.${name}.type "${value}" must be stdio, http, or sse; dropped`);
+      return 'invalid';
   }
 }
 
-function parseStringMap(value: unknown, key: string): Record<string, string> | undefined {
+function readStringMap(
+  value: unknown,
+  name: string,
+  warnings: string[],
+): Record<string, string> | undefined | 'invalid' {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError(`${key} must be a table of strings`);
+    warnings.push(`mcp_servers.${name}.headers must be a table of strings; dropped`);
+    return 'invalid';
   }
   const out: Record<string, string> = {};
-  for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof item !== 'string') throw new ConfigError(`${key}.${name} must be a string`);
-    out[name] = item;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item !== 'string') {
+      warnings.push(`mcp_servers.${name}.headers.${key} must be a string; dropped`);
+      return 'invalid';
+    }
+    out[key] = item;
   }
   return out;
-}
-
-function parseMcpServers(value: unknown): McpServerConfigFile[] {
-  if (value === undefined) return [];
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new ConfigError('mcp_servers must be a table of tables ([mcp_servers.<name>])');
-  }
-  return Object.entries(value as Record<string, unknown>).map(([name, row]) => {
-    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
-      throw new ConfigError(`mcp_servers.${name} must be a table`);
-    }
-    const rec = row as Record<string, unknown>;
-    const command = asString(rec.command, `mcp_servers.${name}.command`);
-    const url = asString(rec.url, `mcp_servers.${name}.url`);
-    if (!command && !url) throw new ConfigError(`mcp_servers.${name} needs a command or a url`);
-    const args = rec.args;
-    if (args !== undefined && (!Array.isArray(args) || args.some((item) => typeof item !== 'string'))) {
-      throw new ConfigError(`mcp_servers.${name}.args must be a string array`);
-    }
-    const transport = parseMcpTransport(rec.type ?? rec.transport, `mcp_servers.${name}.type`);
-    const headers = parseStringMap(rec.headers, `mcp_servers.${name}.headers`);
-    const title = asString(rec.name, `mcp_servers.${name}.name`);
-    let callTimeoutMs: number | undefined;
-    if (rec.call_timeout_ms !== undefined) {
-      if (typeof rec.call_timeout_ms !== 'number' || !Number.isFinite(rec.call_timeout_ms) || rec.call_timeout_ms <= 0) {
-        throw new ConfigError(`mcp_servers.${name}.call_timeout_ms must be a positive number`);
-      }
-      callTimeoutMs = rec.call_timeout_ms;
-    }
-    return {
-      name,
-      ...(title !== undefined && title !== name ? { title } : {}),
-      command,
-      args: args as string[] | undefined,
-      url,
-      transport,
-      headers,
-      ...(callTimeoutMs === undefined ? {} : { callTimeoutMs }),
-    };
-  });
 }

@@ -9,6 +9,7 @@ import {
 	getScrollbarGeometry,
 	getScrollViewBox,
 	getScrollViewsAt,
+	selectionBlockRows,
 	type LayoutFrame,
 	renderLayoutFrame,
 	type ScrollbarGeometry,
@@ -35,7 +36,9 @@ import {
 	clipLineToWidth,
 	bubbleTextColumns,
 	selectionLineEnd,
+	textStartColumn,
 	snapBubbleSelection,
+	snapRangeSelectionPoint,
 	extractAnsiCode,
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
@@ -200,8 +203,66 @@ export interface SelectionHighlight {
 	fg: string;
 }
 
+/** 指针在滚动视口之外才自动滚。贴在首行或末行上拖选，不把选区扩到文档两头。 */
+export function selectionAutoScrollDirection(pointerY: number, visibleTop: number, visibleBottom: number): -1 | 0 | 1 {
+	if (pointerY < visibleTop) return -1;
+	if (pointerY > visibleBottom) return 1;
+	return 0;
+}
+
+interface VerticalShift {
+  /** 正数：内容上移（screen[row] 等于 previous[row + delta]）。 */
+  delta: number;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * 找一段纯垂直平移。终端用滚动区把这段像素挪走，只重画滚出来的新行和吸顶、滑块那些对不上的行。
+ */
+function verticalShift(screen: readonly string[], previous: readonly string[], height: number): VerticalShift | undefined {
+  // 滑块钉在视口上，不跟正文走。滚动区会把 █ 一起卷走，下一帧只补一部分行，滑块就会闪、会断。
+  if (screen.some((line) => line.includes("█")) || previous.some((line) => line.includes("█"))) return undefined;
+  let best: VerticalShift & { length: number } | undefined;
+  const maxDelta = Math.min(8, height - 1);
+  for (let distance = 1; distance <= maxDelta; distance++) {
+    for (const sign of [1, -1] as const) {
+      const delta = distance * sign;
+      let runStart = -1;
+      for (let row = 0; row <= height; row++) {
+        const src = row + delta;
+        const match = row < height && src >= 0 && src < previous.length && screen[row] === previous[src];
+        if (match && runStart < 0) runStart = row;
+        if (!match && runStart >= 0) {
+          const length = row - runStart;
+          if (length >= 4 && (best === undefined || length > best.length)) {
+            best = { delta, top: runStart, bottom: row - 1, length };
+          }
+          runStart = -1;
+        }
+      }
+    }
+  }
+  if (best === undefined) return undefined;
+  return { delta: best.delta, top: best.top, bottom: best.bottom };
+}
+
+function rowKeptByShift(
+  row: number,
+  shift: VerticalShift | undefined,
+  screen: readonly string[],
+  previous: readonly string[],
+): boolean {
+  if (shift === undefined) return false;
+  const src = row + shift.delta;
+  if (src < 0 || src >= previous.length || screen[row] !== previous[src]) return false;
+  if (shift.delta > 0) return row >= shift.top && row <= shift.bottom - shift.delta;
+  return row >= shift.top - shift.delta && row <= shift.bottom;
+}
+
 /**
  * 把这一帧和上一帧比完再写终端。未改的行跳过；宽高变了才清屏。
+ * 整段只是上下平移时用终端滚动区挪像素，不再把视口每一行擦掉重写。
  * 清行用默认底（OSC 11 / SGR 49），不用真彩 48;2，避免 Windows Terminal 上画出浅带。
  */
 export function paintScreenDiff(options: {
@@ -218,8 +279,17 @@ export function paintScreenDiff(options: {
   const fullRedraw = previous.length === 0 || previousWidth !== width || previousHeight !== height;
   let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
   if (fullRedraw) buffer += `\x1b[49m\x1b[2J`;
+  const shift = fullRedraw ? undefined : verticalShift(screen, previous, height);
+  if (shift) {
+    const top = shift.top + 1;
+    const bottom = shift.bottom + 1;
+    const distance = Math.abs(shift.delta);
+    // S 内容上移，T 内容下移。区域用完立刻复位，避免把光标和后续行卷进滚动区。
+    buffer += `\x1b[${top};${bottom}r\x1b[${distance}${shift.delta > 0 ? "S" : "T"}\x1b[r`;
+  }
   for (let row = 0; row < height; row++) {
     if (!fullRedraw && screen[row] === previous[row]) continue;
+    if (!fullRedraw && rowKeptByShift(row, shift, screen, previous)) continue;
     buffer += `\x1b[${row + 1};1H\x1b[49m\x1b[2K${screen[row] ?? ""}`;
   }
   if (cursor) {
@@ -275,6 +345,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly flashes: AltScreenFlashContainer;
 	private altScreenActive = false;
 	private selectionAnchor?: SelectionPoint;
+	/** 这次拖选开始时所在的内容块。选区不跨出这块。 */
+	private selectionBlock?: { start: number; end: number };
 	/** 按下时的原始格（未做词吸附）：松开判定 isClick 用它，而不是被 range 起点顶掉的 anchor。 */
 	private selectionPressCell?: { scrollView?: ScrollView; row: number; col: number };
 	private selectionFocus?: SelectionPoint;
@@ -331,7 +403,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		};
 		this.implicitScrollView = new ScrollView(this.implicitDocument, { follow: "end", primary: true });
 		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
-		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 3));
+		// 一格滚轮一行。终端滚轮只有方向、没有像素距离，默认 3 行会一截一截跳。
+		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 1));
 		this.mouseEnabled = options.mouse ?? true;
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
 		this.openUrl = options.openUrl;
@@ -681,6 +754,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	/** 清空拖选锚点/焦点（不动拖选手势与自动滚动状态）。 */
 	private clearSelectionState(): void {
 		this.selectionAnchor = undefined;
+		this.selectionBlock = undefined;
 		this.selectionPressCell = undefined;
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
@@ -995,14 +1069,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	/**
 	 * 行尾空白不可选。气泡灰底同样不可选：垫行只有左边框，拖在灰底上要落到正文那一行。
 	 */
+	private clampPointToBlock(point: SelectionPoint): SelectionPoint {
+		const block = this.selectionBlock;
+		if (!block || (point.row >= block.start && point.row <= block.end)) return point;
+		const row = Math.max(block.start, Math.min(block.end, point.row));
+		const snapped = snapRangeSelectionPoint(this.selectionSourceLines({ ...point, row }), row, point.col);
+		return { ...point, row: snapped.row, col: snapped.col };
+	}
+
 	private clampSelectionPoint(point: SelectionPoint): SelectionPoint {
 		const lines = this.selectionSourceLines(point);
 		const snapped = snapBubbleSelection(lines, point.row, point.col);
 		if (snapped) return { ...point, row: snapped.row, col: snapped.col };
-		// maxCol 是最后一个字的右缘。指针落到填充空格上时收到这条边上，不要停在空格格子里。
-		const maxCol = selectionLineEnd(lines[point.row] ?? "");
-		if (point.col < maxCol) return point;
-		return { ...point, col: maxCol };
+		const range = snapRangeSelectionPoint(lines, point.row, point.col);
+		return { ...point, row: range.row, col: range.col };
 	}
 
 	private selectionSourceLines(point: SelectionPoint): readonly string[] {
@@ -1134,7 +1214,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			box.clip.y + box.clip.height - 1,
 		);
 		this.selectionDragPointer = { x: event.x, y: event.y };
-		this.selectionAutoScrollDirection = event.y <= visibleTop ? -1 : event.y >= visibleBottom ? 1 : 0;
+		// 贴着视口第一行、最后一行拖，不能算移出。否则选区会自己窜到文档首尾。
+		this.selectionAutoScrollDirection = selectionAutoScrollDirection(event.y, visibleTop, visibleBottom);
 		if (this.selectionAutoScrollDirection === 0) {
 			this.stopSelectionAutoScroll();
 			return;
@@ -1157,7 +1238,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.stopSelectionAutoScroll();
 			return;
 		}
-		const point = this.getScrollSelectionPoint(scrollView, pointer.x, pointer.y);
+		const raw = this.getScrollSelectionPoint(scrollView, pointer.x, pointer.y);
+		const point = raw ? this.clampPointToBlock(raw) : undefined;
 		if (point) this.updateSelectionFocus(point);
 		this.requestViewportRender();
 	}
@@ -1175,7 +1257,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const button = event.button & 3;
 		if (button !== 0 && !(event.release && button === 3)) return;
 		const anchorScrollView = this.selectionAnchor?.scrollView;
-		const point = this.getSelectionPoint(event, anchorScrollView);
+		const point = this.clampPointToBlock(this.getSelectionPoint(event, anchorScrollView));
 		if (event.release) {
 			if (!this.selectionPressActive) return;
 			this.selectionPressActive = false;
@@ -1252,6 +1334,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
 		this.selectionInitialRange = range;
+		this.selectionBlock = scrollView && this.currentLayout
+			? selectionBlockRows(this.currentLayout, scrollView, event.y)
+			: undefined;
 		this.selectionAnchor = range?.start ?? anchor;
 		// 记下按下的原始格：词吸附会把 anchor 顶到词首，松开时若仍拿 anchor 比，
 		// 点在词中间的双击会被误判成拖选，click 不合成——工具行双击收起时好时坏的根源。
@@ -1292,9 +1377,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		maxColumn = selectionLineEnd(line),
 	): { start: number; end: number } {
 		const bubble = bubbleTextColumns(line);
-		// 右缘停在最后一个字。中间行也用这条，避免多行选区把换行前的填充空格划进去。
+		// 范围拖选是文本流：第一行从按下处收到行尾，最后一行从行首收到松开处。
 		const contentEnd = selectionLineEnd(line);
-		const contentStart = bubble ? bubble.start : 0;
+		const contentStart = bubble ? bubble.start : textStartColumn(line);
 		const cap = Math.min(maxColumn, contentEnd);
 		let start = Math.max(contentStart, minColumn);
 		let end = cap;

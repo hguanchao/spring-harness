@@ -295,8 +295,9 @@ describe('ToolGroupComponent 组收起复位下级', () => {
     group.setExpanded(true, false);
     const after = rowsOf(group);
     assert.equal(after.filter((row) => row.includes('ok')).length, 0, `重新展开后不应残留详情行，实际: ${after.join(' | ')}`);
-    // ▸ 行 = 3 工具 + 3 思考（展开态的汇总行是 ▾，不计入）
-    assert.equal(after.filter((row) => row.startsWith('▸')).length, 6, '成员行应全部折叠（▸ 标记）');
+    assert.equal(after.filter((row) => row.startsWith('·')).length, 3, '完成的工具行用 ·，不再用进行中的 ▸');
+    assert.equal(after.filter((row) => row.includes('Thought for')).length, 3, '思考行不再带箭头');
+    assert.equal(after.filter((row) => row.startsWith('▸')).length, 0, '折叠后的成员不该再是 ▸');
   });
 
   it('组收起时同样复位思考段详情', () => {

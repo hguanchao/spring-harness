@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { parse } from 'smol-toml';
-import { listSphMcpServers, removeSphMcpServer, setSphMcpLazy, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../../src/config/mcp-write.js';
+import { listSphMcpServers, removeSphMcpServer, setSphMcpDisabled, splitCommandLine, upsertSphMcpServer } from '../../src/config/mcp-write.js';
 
 function fixture(text: string): { path: string; read: () => string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'sph-mcpwrite-'));
@@ -179,82 +179,101 @@ describe('listSphMcpServers', () => {
   });
 });
 
-describe('setSphMcpPreference', () => {
-  it('没有 [mcp] 表时新建一个', () => {
+describe('setSphMcpDisabled', () => {
+  it('关掉一个只有外部来源声明的 server：写一条只有 disabled 的同名标记', () => {
     const f = fixture('model = "m"\n');
     try {
-      setSphMcpPreference(f.path, 'demo', { enabled: false, sourceEnabled: true });
-      assert.deepEqual(toml(f.path).mcp, { disabled_servers: ['demo'], enabled_servers: [] });
+      setSphMcpDisabled(f.path, 'demo', true);
+      assert.deepEqual(toml(f.path).mcp_servers, { demo: { disabled: true } });
     } finally {
       f.cleanup();
     }
   });
 
-  it('关掉来源本来启用的条目：只进 disabled_servers', () => {
-    const f = fixture('model = "m"\n\n[mcp]\ndisabled_servers = []\nenabled_servers = []\n');
-    try {
-      setSphMcpPreference(f.path, 'demo', { enabled: false, sourceEnabled: true });
-      assert.deepEqual(toml(f.path).mcp, { disabled_servers: ['demo'], enabled_servers: [] });
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it('打开来源自己声明关掉的条目：进 enabled_servers，不进 disabled_servers', () => {
-    // 只写一个列表会让另一个留下过期的强制项，日后来源改了自己的默认值就会被它悄悄盖住。
-    const f = fixture('model = "m"\n');
-    try {
-      setSphMcpPreference(f.path, 'demo', { enabled: true, sourceEnabled: false });
-      assert.deepEqual(toml(f.path).mcp, { disabled_servers: [], enabled_servers: ['demo'] });
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it('恢复来源默认：两个列表都不再留这个名字', () => {
-    const f = fixture('model = "m"\n\n[mcp]\ndisabled_servers = ["demo"]\nenabled_servers = ["other"]\n');
-    try {
-      setSphMcpPreference(f.path, 'demo', { enabled: true, sourceEnabled: true });
-      const mcp = toml(f.path).mcp as Record<string, string[]>;
-      assert.deepEqual(mcp.disabled_servers, []);
-      assert.deepEqual(mcp.enabled_servers, ['other'], '别的条目不该被牵连');
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it('setSphMcpLazy：标记与取消都只增删 lazy_servers 一条', () => {
-    const f = fixture('model = "m"\n');
-    try {
-      setSphMcpLazy(f.path, 'demo', true);
-      assert.deepEqual(toml(f.path).mcp, { lazy_servers: ['demo'] });
-      setSphMcpLazy(f.path, 'demo', false);
-      assert.deepEqual(toml(f.path).mcp, { lazy_servers: [] });
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it('反复来回切不会累积重复项', () => {
-    const f = fixture('model = "m"\n');
-    try {
-      setSphMcpPreference(f.path, 'demo', { enabled: false, sourceEnabled: true });
-      setSphMcpPreference(f.path, 'demo', { enabled: false, sourceEnabled: true });
-      setSphMcpPreference(f.path, 'demo', { enabled: true, sourceEnabled: true });
-      setSphMcpPreference(f.path, 'demo', { enabled: false, sourceEnabled: true });
-      assert.deepEqual(toml(f.path).mcp, { disabled_servers: ['demo'], enabled_servers: [] });
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it('偏好写在顶层 [mcp] 里，不混进 server 表', () => {
+  it('定义就在自己配置里时，只加一个 disabled 键，命令与注释都留着', () => {
     const f = fixture(EXISTING);
     try {
-      setSphMcpPreference(f.path, 'keep', { enabled: false, sourceEnabled: true });
-      const parsed = toml(f.path);
-      assert.deepEqual(parsed.mcp, { disabled_servers: ['keep'], enabled_servers: [] });
-      assert.deepEqual(Object.keys(parsed.mcp_servers as Record<string, unknown>), ['keep']);
+      setSphMcpDisabled(f.path, 'keep', true);
+      const text = f.read();
+      assert.ok(text.includes('command = "npx"          # 冷启动会比较慢'), '同一个块里的注释不能被动到');
+      assert.ok(text.includes('args = ["-y", "keep-mcp"]'));
+      const servers = toml(f.path).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(servers.keep?.disabled, true);
+      assert.equal((text.match(/\[mcp_servers\.keep\]/g) ?? []).length, 1, '不该再造一个块');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('已有的 disabled = false 就地改成 true，行尾注释留着', () => {
+    const f = fixture('[mcp_servers.a]\ncommand = "node"\ndisabled = false   # 先观望着\n');
+    try {
+      setSphMcpDisabled(f.path, 'a', true);
+      assert.ok(f.read().includes('disabled = true   # 先观望着'));
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('重新启用时删掉 disabled 键而不是写 false：默认本来就是启用', () => {
+    const f = fixture('[mcp_servers.a]\ncommand = "node"\ndisabled = true\n');
+    try {
+      setSphMcpDisabled(f.path, 'a', false);
+      const text = f.read();
+      assert.equal(text.includes('disabled'), false);
+      assert.equal(text, '[mcp_servers.a]\ncommand = "node"\n');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('配置里还没有这个块时，启用要写出 disabled = false：缺省启用盖不住外部来源的禁用', () => {
+    const f = fixture('model = "m"\n');
+    try {
+      setSphMcpDisabled(f.path, 'external', false);
+      assert.deepEqual(toml(f.path).mcp_servers, { external: { disabled: false } });
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('重新启用一条纯禁用标记时连块一起删：不留没有定义的孤儿表', () => {
+    const f = fixture('model = "m"\n\n[mcp_servers.gone]\ndisabled = true\n');
+    try {
+      setSphMcpDisabled(f.path, 'gone', false);
+      assert.equal(f.read(), 'model = "m"\n');
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('已是启用态时启用（无 disabled 键）不碰文件，反复来回切不累积重复键', () => {
+    const f = fixture(EXISTING);
+    try {
+      const before = statSync(f.path).mtimeMs;
+      setSphMcpDisabled(f.path, 'keep', false);
+      assert.equal(f.read(), EXISTING, '没有要改的东西就不写');
+      assert.equal(statSync(f.path).mtimeMs, before);
+
+      setSphMcpDisabled(f.path, 'keep', true);
+      setSphMcpDisabled(f.path, 'keep', true);
+      setSphMcpDisabled(f.path, 'keep', false);
+      setSphMcpDisabled(f.path, 'keep', true);
+      const text = f.read();
+      assert.equal((text.match(/^\s*disabled\s*=/gm) ?? []).length, 1, '只该有一个 disabled 键');
+      assert.ok(text.includes('disabled = true'));
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it('相邻的块不受影响：改一个不会吃掉前面那份配置', () => {
+    const f = fixture('[mcp_servers.a]\ncommand = "1"\n\n[mcp_servers.b]\ncommand = "2"\n');
+    try {
+      setSphMcpDisabled(f.path, 'a', true);
+      const servers = toml(f.path).mcp_servers as Record<string, Record<string, unknown>>;
+      assert.deepEqual(servers.a, { command: '1', disabled: true });
+      assert.deepEqual(servers.b, { command: '2' });
     } finally {
       f.cleanup();
     }

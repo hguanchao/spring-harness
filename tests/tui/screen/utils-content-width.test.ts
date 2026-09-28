@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { UserMessageComponent } from '../../../src/plugins/sph-tui/components/user-message.js';
-import { bubbleTextColumns, contentVisibleWidth, selectionLineEnd, snapBubbleSelection, sliceByColumn, stripTerminalSequences, visibleWidth } from '../../../src/tui/utils.js';
+import { bubbleTextColumns, contentVisibleWidth, selectionLineEnd, snapBubbleSelection, snapRangeSelectionPoint, sliceByColumn, stripTerminalSequences, textStartColumn, visibleWidth } from '../../../src/tui/utils.js';
 
 describe('contentVisibleWidth', () => {
   it('行尾铺满的空格不计入内容宽度', () => {
@@ -13,6 +13,12 @@ describe('contentVisibleWidth', () => {
   it('整行空白内容宽度为 0', () => {
     assert.equal(contentVisibleWidth(' '.repeat(80)), 0);
     assert.equal(contentVisibleWidth(''), 0);
+  });
+
+  it('行尾滑块和它前面的填充空格不计入内容宽度', () => {
+    const line = `hello${' '.repeat(10)}\x1b[20G█`;
+    assert.equal(contentVisibleWidth(line), 5);
+    assert.equal(selectionLineEnd(line), 5);
   });
 
   it('ANSI 着色后仍按可见字符截到 trimEnd', () => {
@@ -38,6 +44,21 @@ describe('用户气泡划词', () => {
     assert.deepEqual(acrossPad, { row: textRow, col: range.end });
     const fromRule = snapBubbleSelection(lines, textRow, 0);
     assert.equal(fromRule?.col, range.start);
+  });
+
+  it('行首缩进不算正文起点', () => {
+    assert.equal(textStartColumn('   我可以帮你处理：'), 3);
+    assert.equal(textStartColumn('我是'), 0);
+  });
+
+  it('空白行和行尾填充收到有字的最后一个字，不把整行收成起点', () => {
+    const lines = ['', '你好', `${' '.repeat(4)}世界${' '.repeat(10)}`];
+    assert.deepEqual(snapRangeSelectionPoint(lines, 0, 0), { row: 1, col: 0 });
+    assert.deepEqual(snapRangeSelectionPoint(lines, 0, 8), { row: 1, col: 2 });
+    const end = selectionLineEnd(lines[2] ?? '');
+    const snapped = snapRangeSelectionPoint(lines, 2, end + 5);
+    assert.equal(snapped.row, 2);
+    assert.ok(snapped.col < end);
   });
 
   it('拖到行尾填充空格上时，右缘停在最后一个字', () => {

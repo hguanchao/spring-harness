@@ -77,20 +77,47 @@ model = "gpt-5.2"
 # ── 权限与安全 ────────────────────────────────────────────────────────────────
 # approval = "ask"               # ask | auto | yolo
 # sandbox = "off"                # off | workspace | read-only
+# sandbox_auto_allow = false     # true = 沙箱非 off 时 shell 免审批(见 README 的风险说明)
 # subagent_approval = "inherit"  # inherit(复用父会话审批) | strict(受审工具一律拒绝)
 # subagent_max_depth = 1         # 子代理嵌套深度;0 = 禁止派生
 #
-# [permissions]                  # 长期规则,按顺序先匹配先生效;pattern 支持 * 和 ?
-# allow = ["bash:npm *", "bash:git status"]
-# ask = ["bash:curl *"]
-# deny = ["bash:rm *"]
+# [permissions]                  # 长期规则。跨层按 deny > ask > allow 求值,先命中先定论
+# deny = ["bash(rm *)", "read(~/.ssh/**)", "read(*.env)"]
+# ask = ["bash(git push *)", "web_fetch(domain:*.internal.example)"]
+# allow = ["bash(npm *)", "bash(git status)", "mcp(context7)"]
+#
+# 每条是 Tool 或 Tool(specifier)。旧的 tool:pattern 写法已不认。改完要重启才生效。
+# 任一层的 deny 都压过所有 allow,两者都压过 approval(包括 yolo)。sph -p 无人可问,
+# ask 等于拒绝。ls / git status / cat 这类只读命令默认不问,要拦就写进 ask 或 deny。
+#   bash / pwsh      命令前缀:* 含空格,末尾 " *" 也匹配不带参数的命令;:* 只在末尾生效
+#                    timeout / nice / nohup / KEY=value 会先剥掉再比
+#                    bash(background=true) 匹配参数,shell 只认 background 与 timeout_ms
+#   read write edit  路径,gitignore 风格。// 绝对(//C:/secret/**)、~/ 主目录、
+#   ls glob grep     / 相对这份配置所在目录,其余相对工作区
+#                    ! 否定,只在同一张表内、后写的盖过先写的
+#                    deny / ask 的相对模式匹配任意深度;allow 只锚定工作区
+#   web_fetch        domain:主机;*.example.com 匹配子域,不匹配根域本身
+#                    web_search 同样吃 domain:
+#   mcp              mcp(server) 或 mcp(server.tool)
+# 工具名可通配,且只在 deny / ask:deny = ["mcp*"]。allow 必须写字面工具名。
+# 裸工具名 deny(deny = ["bash"])把该工具从模型上下文整个移除。
+# 同一份规则可写到 <项目>/.sph/config.toml,该文件只认 [permissions] 与 [mcp_servers];
+# 工作区未信任时,项目级 allow 整段不生效,deny / ask 照常生效。
+# 预览一条命令:sph rules check "npm test";会话里看生效结果:/permissions
+#
+# 「这个动作以后别再问」不写在这里。审批弹窗的 always allow 记到
+# <项目>/.sph/permissions.json(按具体动作,首次写入时加入 .gitignore)。
+# always allow rules like this 会把建议的前缀规则追加进项目级 [permissions].allow。
+# config.toml 里的 [grants] 已不再读取;表里还有内容时,启动会警告一次。
 
 # ── 用量与预算 ────────────────────────────────────────────────────────────────
-# max_turns = 0                  # 一轮的模型调用上限;省略不限制
+# max_turns = 20                 # 子代理的模型调用上限;省略时子代理默认 20 步,根会话不封顶
 # max_session_tokens = 0         # 会话 token 预算(prompt+completion,含子代理);0 = 不限
 # spill_threshold = 8192         # 工具结果超过这个字符数落盘,上下文只留预览;0 = 关闭
 
 # ── MCP ───────────────────────────────────────────────────────────────────────
+# 启用的 server 一律在启动时后台连接,不等谁;连不上的进 /mcps 的报错清单,不挡启动。
+#
 # [mcp_servers.context7]         # stdio 型:本地进程
 # command = "npx"
 # args = ["-y", "@upstash/context7-mcp"]
@@ -99,19 +126,15 @@ model = "gpt-5.2"
 # type = "http"
 # url = "https://example.com/mcp"
 # headers = { Authorization = "Bearer $DOCS_KEY" }
-# call_timeout_ms = 120000
-#
-# [mcp]                          # 本地启停偏好(外部配置里的 server 也管得到)
-# disabled_servers = []
-# enabled_servers = []
-# lazy_servers = []              # 首次使用才连接的重型 server
+# call_timeout_ms = 120000       # 只作用于 tools/call;控制请求固定 15s
+# disabled = false               # true = 不连接(默认 false);写一条只有 disabled 的同名条目
+#                                # 即可关掉外部配置(~/.claude.json 等)里声明的 server
 
 # ── 插件与运行时状态 ──────────────────────────────────────────────────────────
 # [plugins]
 # disabled = ["sph-sandbox"]     # 关掉的插件;默认全装
 #
 # trusted = []                   # 已信任的工作区根;--trust 与信任页会自动回写,不必手填
-# [grants]                       # 已批准的授权(作用域 → 动作键);运行时自动回写
 `;
 
 /**

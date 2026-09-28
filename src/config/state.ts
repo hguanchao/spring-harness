@@ -1,23 +1,23 @@
 /**
- * `trusted` 清单与 `[grants]` 授权表：写在 config.toml 里的跨会话状态。
+ * `trusted` 清单与 `[permissions]` 规则表：写在 config.toml 里的用户意图。
  *
- * 为什么搬进来：trusted.json 与 permissions.json 是用户意图（信任哪些工作区、批准过
- * 哪些动作），和 sandbox / approval 一样属于「sph 的安全配置」，散落成两个 JSON 没有
- * 收益。合并后 ~/.sph 下只剩 config.toml（人的一切意图）与 models.json（端点声明）。
+ * 为什么都在这里：信任哪些工作区、哪些动作该拦/该问，和 sandbox / approval 一样都属于
+ * 「sph 的安全配置」。合并后 ~/.sph 下只剩 config.toml（人的一切意图）与 models.json
+ * （端点声明）。
  *
- * 与 load.ts 的分工：load 只**读**；这里提供**写**的入口（信任确认、批准动作时的回写）。
- * 读走 loadConfig 的解析；写走 save.ts 的外科手术式替换——config.toml 是手写文件，
- * 注释与键序必须原样保留。
+ * 与 load.ts 的分工：load 只**读**；这里提供**写**的入口（信任确认）。读走 loadConfig 的
+ * 解析；写走 save.ts 的外科手术式替换——config.toml 是手写文件，注释与键序必须原样保留。
  *
- * 段落名 `[grants]` 而不是 `[permissions]`：后者已被规则表（allow/ask/deny）占用，
- * 这里存的是**已批准的授权**，两个概念不能共用一个名字。
+ * `[grants]` 是**遗留**：授权已改存 `<项目>/.sph/permissions.json`（见 permission/
+ * grant-file.ts）。这里仍然解析它，唯一的用途是启动时告诉用户「这张表不再被读取」——
+ * 静默留着会让一条旧授权看起来还在生效。
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseToml } from 'smol-toml';
 import type { PermissionRules } from '../permission/policy.js';
 import { sphConfigPath } from '../home.js';
-import { updateConfigFile, updateConfigTableEntry } from './save.js';
+import { updateConfigFile } from './save.js';
 import { ConfigError } from './errors.js';
 
 /** 语义校验错误。继承 ConfigError：调用方把它与其它配置错误一视同仁（退出码 2）。 */
@@ -30,7 +30,12 @@ export class ConfigStateError extends ConfigError {
 
 export interface ConfigState {
   trusted: string[];
-  /** 作用域根 → 已批准的动作键（approvalScopeKey 的产物）。 */
+  /**
+   * 遗留的 `[grants]` 表：作用域根 → 已批准的动作键。
+   *
+   * **不再参与任何授权判定**，只用来在启动时提示用户「这张表已经不被读取」。保留解析是
+   * 为了让提示说得出「哪几条」，而不是只说一句「你有一张旧表」。
+   */
   grants: Record<string, string[]>;
   rules: PermissionRules;
 }
@@ -70,7 +75,7 @@ export function parseTrusted(value: unknown): string[] {
   });
 }
 
-/** 解析 `[grants]` 表：作用域根 → 已批准的动作键。 */
+/** 解析 `[grants]` 表：作用域根 → 已批准的动作键。遗留表，只用于启动提示。 */
 export function parseGrants(value: unknown): Record<string, string[]> {
   if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -126,10 +131,3 @@ export function addTrustedWorkspace(workspaceRoot: string, path: string = sphCon
   updateConfigFile(path, { trusted: [...trusted, workspaceRoot] });
 }
 
-/** 在当前作用域下记一条已批准的动作；重复批准不写重复项。 */
-export function addGrant(scope: string, actionKey: string, path: string = sphConfigPath()): void {
-  const { grants } = readState(path);
-  const current = grants[scope] ?? [];
-  if (current.includes(actionKey)) return;
-  updateConfigTableEntry(path, 'grants', scope, [...current, actionKey]);
-}

@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applySelectionHighlight, paintScreenDiff } from '../../../src/tui/tui-alt-screen.js';
+import { applySelectionHighlight, paintScreenDiff, selectionAutoScrollDirection } from '../../../src/tui/tui-alt-screen.js';
 import { compositeTuiLine } from '../../../src/tui/tui.js';
+
+describe('拖选自动滚动', () => {
+  it('指针还在视口首行或末行时不扩选', () => {
+    assert.equal(selectionAutoScrollDirection(4, 4, 20), 0);
+    assert.equal(selectionAutoScrollDirection(20, 4, 20), 0);
+  });
+
+  it('指针移出视口才向上或向下扩', () => {
+    assert.equal(selectionAutoScrollDirection(3, 4, 20), -1);
+    assert.equal(selectionAutoScrollDirection(21, 4, 20), 1);
+  });
+});
 
 describe('paintScreenDiff', () => {
   it('第一帧清屏并写出每一行', () => {
@@ -34,6 +46,40 @@ describe('paintScreenDiff', () => {
     assert.equal(buffer.includes('\x1b[2J'), false);
     assert.equal(buffer.includes('\x1b[1;1H'), false);
     assert.ok(buffer.includes('\x1b[2;1H\x1b[49m\x1b[2KB'));
+  });
+
+  it('带滑块的帧不用滚动区，避免把 █ 卷走后补不齐', () => {
+    const previous = ['head', 'a█', 'b█', 'c█', 'd█', 'e', 'foot'];
+    const screen = ['head', 'b█', 'c█', 'd█', 'e█', 'f', 'foot'];
+    const { buffer } = paintScreenDiff({
+      screen,
+      previous,
+      previousWidth: 4,
+      previousHeight: 7,
+      width: 4,
+      height: 7,
+    });
+    assert.equal(buffer.includes('\x1b[1S'), false);
+  });
+
+  it('整段上移时用滚动区挪像素，只重画滚出来的新行', () => {
+    const previous = ['head', 'a', 'b', 'c', 'd', 'e', 'foot'];
+    const screen = ['head', 'b', 'c', 'd', 'e', 'f', 'foot'];
+    const { buffer, fullRedraw } = paintScreenDiff({
+      screen,
+      previous,
+      previousWidth: 4,
+      previousHeight: 7,
+      width: 4,
+      height: 7,
+    });
+    assert.equal(fullRedraw, false);
+    assert.match(buffer, /\x1b\[2;5r\x1b\[1S\x1b\[r/);
+    assert.equal(buffer.includes('\x1b[2;1H'), false);
+    assert.equal(buffer.includes('\x1b[3;1H'), false);
+    assert.equal(buffer.includes('\x1b[4;1H'), false);
+    assert.ok(buffer.includes('\x1b[5;1H'));
+    assert.ok(buffer.includes('f'));
   });
 
   it('尺寸变了整屏重画', () => {

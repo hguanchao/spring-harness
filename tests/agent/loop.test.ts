@@ -156,6 +156,54 @@ describe('会话 token 预算', () => {
     }
   });
 
+  it('子代理按剩余预算停，不把整份预算再花一遍', async () => {
+    const { session, root, cleanup } = makeSession();
+    let calls = 0;
+    const usage = { promptTokens: 60, completionTokens: 40, totalTokens: 100 };
+    try {
+      const tools = await toolsWithSubagent(root);
+      await assert.rejects(
+        () =>
+          runTurn({
+            prompt: 'hi',
+            workspaceRoot: root,
+            client: {
+              async complete(): Promise<StreamDelta> {
+                calls++;
+                if (calls === 1) {
+                  return {
+                    text: '',
+                    finishReason: 'tool-calls',
+                    toolCalls: [{ id: 's1', name: 'task', arguments: '{"prompt":"keep going","description":"keep going","agent":"general"}' }],
+                    usage,
+                  };
+                }
+                return {
+                  text: '',
+                  finishReason: 'tool-calls',
+                  toolCalls: [{ id: `c${calls}`, name: 'glob', arguments: '{"pattern":"*.ts"}' }],
+                  usage,
+                };
+              },
+            },
+            session,
+            tools,
+            sessions: jsonlSessionFactory,
+            jobs: new JobBoard(),
+            sandbox,
+            approver,
+            contextWindow: 100_000,
+            // 父会话第一步花 100，剩下 50。子代理再花一步 100 后，下一步之前停。
+            maxSessionTokens: 150,
+          }),
+        /token budget exhausted/,
+      );
+      assert.equal(calls, 2, '父一步、子一步；子代理的第二次请求不该发出');
+    } finally {
+      cleanup();
+    }
+  });
+
   it('累计量从会话记录折叠而来：历史用量已经超预算时一次请求都不发', async () => {
     const { session, root, cleanup } = makeSession();
     const count = { calls: 0 };
@@ -728,6 +776,31 @@ describe('步数上限收束', () => {
       },
     };
   }
+
+  it('没配 maxTurns 的子会话停在默认 20 步', async () => {
+    const { session, root, cleanup } = makeSession();
+    const note = { calls: 0, toolCounts: [] as number[] };
+    try {
+      await runTurn({
+        prompt: 'map the runtime',
+        workspaceRoot: root,
+        client: toolForever(note, 2),
+        session,
+        tools: defaultTools,
+        sessions: jsonlSessionFactory,
+        jobs: new JobBoard(),
+        sandbox,
+        approver,
+        contextWindow: 100_000,
+        depth: 1,
+      });
+      assert.equal(note.calls, 20);
+      const end = session.readAll().find((row) => row.type === 'event' && row.kind === 'turn_end');
+      assert.equal(end && end.type === 'event' ? end.data.finishReason : undefined, 'step_limit');
+    } finally {
+      cleanup();
+    }
+  });
 
   it('没配 maxTurns 的根会话不停在固定步数', async () => {
     const { session, root, cleanup } = makeSession();

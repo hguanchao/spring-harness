@@ -5,13 +5,13 @@
  * 经插件系统装载后以服务名 `sph-mcp` 暴露给宿主界面与其它插件。
  *
  * 为什么 core 还要留着这些类型：宿主界面（`/mcps` 弹窗、上报文本）与核心配置解析
- * （`[mcp_servers.<name>]`、`[mcp]`）都要说这套数据结构。让它们 import 插件实现就等于把
+ * （`[mcp_servers.<name>]`）都要说这套数据结构。让它们 import 插件实现就等于把
  * MCP 重新焊回核心——插件被禁用时那些模块连编译都过不去。接缝留在这里，实现留在插件里。
  */
 
 /** `[mcp_servers.<id>]` 的一条声明。表头是 ID；`title` 来自表内可选的 `name`。 */
 export interface McpServerConfig {
-  /** 表头上的 ID。`mcp` 工具的 `server`、启停偏好都用它。 */
+  /** 表头上的 ID。`mcp` 工具的 `server` 参数用它。 */
   name: string;
   /** 表内 `name`。省略或与 ID 相同时界面只显示 ID。 */
   title?: string;
@@ -38,32 +38,23 @@ export interface McpServerConfig {
 
 /** 一个定义的出处：展示标签 + 可否就地改写。 */
 export interface McpOrigin {
-  /** 展示标签，如外部配置路径、`.sph/config.toml`、`[mcp] disabled_servers`。 */
+  /** 展示标签，如外部配置路径、`.sph/config.toml`、`[mcp_servers.x] disabled`。 */
   label: string;
-  /** 定义所在的文件路径；本地偏好来源指向 sph 用户配置。 */
+  /** 定义所在的文件路径。 */
   path: string;
   /**
    * sph 是否可以直接改写这个文件。
    *
-   * 外部配置文件一律 false：写入别人的配置会带来
-   * 意料之外的副作用，启停改为在 sph 自己配置里存一份本地偏好。
+   * 外部配置文件一律 false：写入别人的配置会带来意料之外的副作用。要关掉它们声明的
+   * server，就在 sph 自己的配置里写一条同名的 `disabled = true`——整条替换，照样生效。
    */
   editable: boolean;
 }
 
 /** `reload()` 的输入。两个字段都可省，省略时取默认值，便于测试与内部构造。 */
 export interface McpServerSpec extends McpServerConfig {
-  /** 省略即启用。 */
+  /** 省略即启用；`disabled = true` / `enabled = false` 的来源折算到这里。 */
   enabled?: boolean;
-  /**
-   * 来源声明的启用态（叠加本地偏好之前）。
-   *
-   * 弹窗切换开关时要靠它判断该写哪个偏好列表：只留最终值就只能猜，猜错会在另一个列表里
-   * 留下一条过期的强制项，日后来源改了自己的默认值就会被它悄悄盖住。
-   */
-  sourceEnabled?: boolean;
-  /** true = 不随 reload 拉起，首次 call / list(server) 才连接。省略即立即连。 */
-  lazy?: boolean;
   /** 省略时用中性标签。 */
   origin?: McpOrigin;
 }
@@ -84,10 +75,6 @@ export interface McpServerStatus {
   /** false = sph 跑不了这个传输，或定义本身无效。 */
   supported: boolean;
   enabled: boolean;
-  /** 来源声明的启用态；`enabled` 与它不同就说明本地偏好正在覆盖来源。 */
-  sourceEnabled?: boolean;
-  /** 首次使用才连接；与「连不上」区别在 problem——懒而未连的没有 problem。 */
-  lazy: boolean;
   /** 子进程还活着。崩溃、从未连上、被禁用、不支持的传输都是 false。 */
   connected: boolean;
   /** 握手还在后台进行。启动不为此阻塞——这也是它存在的意义。 */
@@ -126,22 +113,12 @@ export interface McpSourceReport {
   detail?: string;
 }
 
-/** 本地启停偏好：写在 sph 用户级配置的 `[mcp]` 段里，叠加在来源的 enabled 之上。 */
-export interface McpPreferences {
-  disabledServers: string[];
-  enabledServers: string[];
-  /** 首次使用才连接的 server（如重型的 npx server）；对任意来源生效，默认全部立即连。 */
-  lazyServers: string[];
-}
-
-/** `reload()` 的输入：发现要用的工作区信息，加上由核心交过来的启停偏好。 */
+/** `reload()` 的输入：发现要用的工作区信息。 */
 export interface McpReloadOptions {
   workspaceRoot: string;
   /** 项目级查找的起点，向上走到 `workspaceRoot`（含）。省略即从 `workspaceRoot` 开始。 */
   fromDir?: string;
-  /** 本地启停偏好，取自 sph 用户级配置。 */
-  preferences?: McpPreferences;
-  /** 工作区是否已信任；false 时项目级来源一律丢弃。省略则查 trusted.json。 */
+  /** 工作区是否已信任；false 时项目级来源一律丢弃。省略则查 config.toml 的 `trusted`。 */
   trusted?: boolean;
 }
 

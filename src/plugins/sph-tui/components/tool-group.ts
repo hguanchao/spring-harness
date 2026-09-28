@@ -18,6 +18,7 @@
 import {
   BLOCK_GAP,
   Container,
+  SELECTION_BLOCK,
   Markdown,
   type MarkdownTheme,
   MouseRegion,
@@ -61,9 +62,9 @@ type VerbKind =
   | 'other';
 
 interface VerbWords {
-  /** 全部成员都已收尾时用过去式。 */
+  /** 这一类都已收尾时用过去式。 */
   past: string;
-  /** 还有成员在跑时用进行式。 */
+  /** 这一类里还有成员在跑时用进行式。别的类已经结束不影响这里。 */
   present: string;
   one: string;
   many: string;
@@ -114,25 +115,30 @@ interface GroupSummary {
 
 /** 按 kind 首次出现的顺序聚合成员，拼出 `Read 3 files, Searched 2 patterns`。 */
 function summarize(tools: readonly ToolExecutionComponent[]): GroupSummary {
-  const buckets: Array<{ kind: VerbKind; count: number }> = [];
+  const buckets: Array<{ kind: VerbKind; count: number; running: boolean }> = [];
   let failed = 0;
   let running = false;
 
   for (const tool of tools) {
     const kind = TOOL_VERB_KINDS[tool.rawName()] ?? 'other';
+    const live = tool.status() === 'pending' || tool.status() === 'running';
     const bucket = buckets.find((entry) => entry.kind === kind);
-    if (bucket) bucket.count += 1;
-    else buckets.push({ kind, count: 1 });
+    if (bucket) {
+      bucket.count += 1;
+      if (live) bucket.running = true;
+    } else {
+      buckets.push({ kind, count: 1, running: live });
+    }
 
     const status = tool.status();
     if (status === 'error') failed += 1;
-    if (status === 'pending' || status === 'running') running = true;
+    if (live) running = true;
   }
 
   const text = buckets
     .map((bucket) => {
       const words = VERB_WORDS[bucket.kind];
-      const verb = running ? words.present : words.past;
+      const verb = bucket.running ? words.present : words.past;
       return `${verb} ${bucket.count} ${bucket.count === 1 ? words.one : words.many}`;
     })
     .join(', ');
@@ -208,6 +214,7 @@ function thinkingMarkdownTheme(): MarkdownTheme {
 }
 
 export class ToolGroupComponent extends VStack {
+  readonly [SELECTION_BLOCK] = true;
   private readonly ui: TUI;
   private readonly tools: ToolExecutionComponent[] = [];
   /**
@@ -438,23 +445,21 @@ export class ToolGroupComponent extends VStack {
 
   /** 重算一段思考的行文案；正文只在它自己展开时挂上。 */
   private updateThinking(member: ThinkingMember): void {
-    // 箭头只表达展开态；颜色跟标签文字，与成员行/汇总行同一套「灰箭头灰字」。
-    const caret = member.expanded ? TOOL_MARK.expanded : TOOL_MARK.done;
     // 收尾文案：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。空链不占行。
+    // 思考不用箭头：斜体本身就和工具行分开，再加 ▸ 会读成又一条进行中的工具。
     const label = member.running
       ? 'Thinking…'
       : member.durationMs === undefined
         ? 'Thought'
         : `Thought for ${formatDuration(member.durationMs)}`;
-    // 标签文字才是状态色：执行中紫、完成后灰。
     const labelColor: ThemeColor = member.running ? 'primary' : 'toolTitle';
     // 组里有汇总行时，思考永远是成员：缩进一级，避免和汇总行并排读成两件并列的事。
     // 纯思考组没有汇总行，思考行就是组头，仍停在组级。
     const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
-    const painted = member.running ? theme.shimmer(label, Date.now()) : theme.fg(labelColor, label);
-    member.row.setText(
-      `${' '.repeat(rowIndent)}${theme.fg(labelColor, caret)} ${painted}`,
-    );
+    const painted = member.running
+      ? theme.italic(theme.shimmer(label, Date.now()))
+      : theme.italic(theme.fg(labelColor, label));
+    member.row.setText(`${' '.repeat(rowIndent)}${painted}`);
 
     member.body.clear();
     const detail = member.text.trim();

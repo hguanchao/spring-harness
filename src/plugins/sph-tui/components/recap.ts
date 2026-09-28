@@ -13,7 +13,7 @@
  * 所以 pending 被撤掉时不会留下一道空行。
  */
 
-import { BLOCK_GAP, type Component, type TuiMouseEvent, type TuiMouseEventResult, wrapTextWithAnsi } from '../../../tui/index.js';
+import { BLOCK_GAP, type Component, SELECTION_BLOCK, type TuiMouseEvent, type TuiMouseEventResult, wrapTextWithAnsi } from '../../../tui/index.js';
 import { theme } from '../theme/theme.js';
 import { TOOL_GROUP_INDENT, TOOL_MEMBER_INDENT } from './tool-execution.js';
 
@@ -24,6 +24,7 @@ const PENDING_BODY = 'summarizing…';
 const RECAP_MARK = { done: '◆', pending: '◇' } as const;
 
 export class RecapMessageComponent implements Component {
+  readonly [SELECTION_BLOCK] = true;
   private summary: string;
   private pending: boolean;
 

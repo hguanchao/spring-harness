@@ -22,6 +22,28 @@ describe('isConcurrencySafe', () => {
 });
 
 describe('runToolBatch', () => {
+  it('报告执行完成不必等前面的调用提交', async () => {
+    const settled: string[] = [];
+    const committed: string[] = [];
+    await runToolBatch({
+      calls: [call('slow', 'task'), call('fast', 'read')],
+      isParallel: () => true,
+      async execute(item) {
+        await sleep(item.id === 'slow' ? 40 : 5);
+        return { ok: true, content: item.id };
+      },
+      onStart() {},
+      onSettled(item) {
+        settled.push(item.id);
+      },
+      onCommit(item) {
+        committed.push(item.id);
+      },
+    });
+    assert.deepEqual(settled, ['fast', 'slow']);
+    assert.deepEqual(committed, ['slow', 'fast']);
+  });
+
   it('commits in model order even when a later parallel call finishes first', async () => {
     const committed: string[] = [];
     await runToolBatch({

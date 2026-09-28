@@ -5,7 +5,7 @@
  * 通知行——这一域不触碰会话与轮次状态，是命令里最独立的一块。
  */
 
-import { removeSphMcpServer, setSphMcpLazy, setSphMcpPreference, splitCommandLine, upsertSphMcpServer } from '../../config/mcp-write.js';
+import { removeSphMcpServer, setSphMcpDisabled, splitCommandLine, upsertSphMcpServer } from '../../config/mcp-write.js';
 import type { TUI } from '../../tui/index.js';
 import type { TuiDeps } from './deps.js';
 import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
@@ -158,16 +158,11 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
     {
       value: 'toggle',
       label: server.enabled ? 'Disable' : 'Enable',
-      // 外部来源只读，开关记在 sph 自己的配置里——写别人的文件是不可逆的副作用。
+      // 定义就在 sph 配置里时直接改那一条；外部来源只读，改成写一条同名的禁用标记——
+      // 同名整条替换，照样盖得住，而别人的文件一个字节都不动。
       description: server.origin.editable
         ? `edit ${server.origin.path}`
-        : `recorded in ${deps.configPath} as a local preference`,
-    },
-    {
-      value: 'lazy',
-      label: server.lazy ? 'Connect eagerly' : 'Make lazy',
-      // lazy 与启停同源：都写在 [mcp] 本地偏好里，外部来源文件没有这个概念。
-      description: `recorded in ${deps.configPath} as [mcp] lazy_servers`,
+        : `override in ${deps.configPath} ([mcp_servers.${server.name}] disabled)`,
     },
   ];
   if (server.connected) {
@@ -184,18 +179,10 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
   });
 
   if (action === 'toggle') {
-    const enabled = !server.enabled;
-    setSphMcpPreference(deps.configPath, server.name, {
-      enabled,
-      sourceEnabled: server.sourceEnabled ?? server.enabled,
-    });
-    deps.refreshMcpPreferences();
-    await reloadMcpWithNotice(host);
-    return;
-  }
-  if (action === 'lazy') {
-    setSphMcpLazy(deps.configPath, server.name, !server.lazy);
-    deps.refreshMcpPreferences();
+    // 列表是上一轮取的，这里的 enabled 就是那一份快照：取反即本次要写的目标态。
+    // 外部来源自己写了 disabled 时，启用必须落在 sph 配置里（别人的文件不写）。
+    const target = server.origin.editable ? server.origin.path : deps.configPath;
+    setSphMcpDisabled(target, server.name, server.enabled);
     await reloadMcpWithNotice(host);
     return;
   }
@@ -219,9 +206,6 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
       removed ? `Removed ${server.name} from ${server.origin.path}` : `${server.name} was already gone`,
       removed ? 'success' : 'warn',
     );
-    // 名字没了，可能还留着一条只认识它的本地偏好；留着会在同名条目重新出现时突然生效。
-    setSphMcpPreference(deps.configPath, server.name, { enabled: true, sourceEnabled: true });
-    deps.refreshMcpPreferences();
     await reloadMcpWithNotice(host);
   }
 }

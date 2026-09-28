@@ -45,8 +45,6 @@ const ui: UiService = {
       session: rt.session,
       mcp: () => rt.mcp(),
       reloadMcp: () => rt.reloadMcp(),
-      refreshMcpPreferences: () => rt.refreshMcpPreferences(),
-      mcpPreferences: rt.mcpPreferences,
       pluginReport: () => rt.plugins.report(),
       pluginServices: rt.plugins,
       pluginCommands: rt.plugins.commands(),
@@ -54,10 +52,14 @@ const ui: UiService = {
       todos: rt.todos,
       jobs: rt.jobs,
       approvalMode: cli.approval ?? rt.config.approval ?? 'ask',
-      permissionRules: rt.config.permissions,
+      permission: rt.permission,
       subagentApproval: rt.config.subagentApproval,
       configPath: rt.configPath,
-      authLabel: rt.config.apiKey === '' ? 'Logged in with HTTP headers' : 'Logged in with API key',
+      authLabel: rt.config.startupWarnings.length > 0
+        ? 'Model pointer needs fixing — open /provider'
+        : rt.config.apiKey === ''
+          ? 'Logged in with HTTP headers'
+          : 'Logged in with API key',
       providerName: rt.config.provider,
       models: () => rt.registry.providers,
       resolveModel: (model, provider) => rt.resolveModel({ model, provider }),
@@ -79,6 +81,7 @@ const ui: UiService = {
       sessions: rt.sessions,
       driver: rt.driver,
       claimSession: (id) => rt.claimSession(id),
+      startupWarnings: rt.config.startupWarnings,
     });
   },
 };

@@ -5,7 +5,7 @@
  */
 import type { AgentListener } from './events.js';
 import type { LlmClient, TokenUsage } from '../llm/client.js';
-import type { Approver } from '../permission/policy.js';
+import type { Approver, RuleEnv, RuleLayers } from '../permission/policy.js';
 import type { SpillStorePort, TodoService, WorktreePort } from '../plugins/services.js';
 import type { PluginHook, PluginServices } from '../plugins/types.js';
 import type { JobBoardPort, SubagentInbox } from '../runtime/scheduler.js';
@@ -31,6 +31,14 @@ export interface RunTurnOptions {
   sessions?: SessionFactory;
   sandbox: SandboxHandle;
   approver: Approver;
+  /**
+   * 规则分层与锚定环境。
+   *
+   * 审批器自己也会求值规则，但**文件类工具默认不走审批**（写权限由沙箱管），所以循环必须
+   * 自己拿规则做一次前置判定，否则 `deny` 一条路径规则就是写了不生效。
+   */
+  rules?: RuleLayers;
+  ruleEnv?: RuleEnv;
   /**
    * 子代理专用的审批器；省略则复用 approver。
    * strict 时调用方传入 fail-closed 的审批器。策略留在调用方，循环只负责选用。
@@ -67,7 +75,7 @@ export interface RunTurnOptions {
    */
   maxSubagentDepth?: number;
   /**
-   * 一轮的模型调用上限。省略不限制。
+   * 一轮的模型调用上限。省略时子会话默认 20 步，根会话不封顶。
    * 子会话在最后几步收束，到顶后把已有正文作为失败结果交回父代理。
    */
   maxTurns?: number;

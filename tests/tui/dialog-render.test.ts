@@ -10,6 +10,7 @@ import { PALETTE } from '../../src/plugins/sph-tui/theme/palettes.js';
 import { theme } from '../../src/plugins/sph-tui/theme/theme.js';
 import { renderMcpReport, renderSkillsReport } from '../../src/plugins/sph-tui/reports.js';
 import { runTui, type TuiDeps } from '../../src/plugins/sph-tui/interactive-mode.js';
+import { createPermissionRuntime } from '../../src/permission/runtime.js';
 import type { ProviderDeclaration } from '../../src/config/registry.js';
 import { PluginHost } from '../../src/plugins/host.js';
 import { discoverPlugins } from '../../src/plugins/loader.js';
@@ -100,7 +101,6 @@ describe('上报弹窗的真实渲染', () => {
           transport: 'stdio',
           supported: true,
           enabled: true,
-          lazy: false,
           connected: false,
           target: 'npx -y broken-mcp',
           problem: 'failed to start: spawn npx ENOENT',
@@ -353,8 +353,15 @@ function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
     session: new JsonlSession(root, 'test'),
     mcp: () => mcpService(mcp),
     reloadMcp: async () => ({ warnings: [], added: [], removed: [], restarted: [] }),
-    refreshMcpPreferences: () => {},
-    mcpPreferences: { disabledServers: [], enabledServers: [], lazyServers: [] },
+    permission: createPermissionRuntime({
+      workspaceRoot: root,
+      userRules: { allow: [], ask: [], deny: [] },
+      userRulesDir: root,
+      home: root,
+      sandboxMode: 'off',
+      sandboxAutoAllow: false,
+      trusted: true,
+    }),
     pluginReport: () => ({ plugins: [], failures: [], shadowed: [] }),
     pluginServices: EMPTY_PLUGIN_SERVICES,
     todos: EMPTY_TODO,

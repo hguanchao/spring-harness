@@ -56,6 +56,6 @@ From `src/plugins/types.ts`; not MCP-specific.
 discovery and loading live here too: once the plugin owns the hub, it must own the reload
 path, and `reload()` is the only load path (`connect()` is its first call).
 
-Core hands over **host facts** (workspace, start dir, `[mcp]` preferences, trust state) via
+Core hands over **host facts** (workspace, start dir, trust state) via
 `McpReloadOptions`; the plugin supplies the **MCP domain logic**. Core has no MCP source
 list, no priority rules, and no server registry to search for.

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
-import { addGrant, addTrustedWorkspace, parseGrants, parseRules, parseTrusted, readState } from '../../src/config/state.js';
+import { addTrustedWorkspace, parseGrants, parseRules, parseTrusted, readState } from '../../src/config/state.js';
 
 const dirs: string[] = [];
 
@@ -65,21 +65,6 @@ describe('写回 config.toml', () => {
     const parsed = parseToml(readFileSync(path, 'utf8')) as { trusted: string[]; grants: Record<string, string[]> };
     assert.deepEqual(parsed.trusted, ['E:\\b'], 'trusted 必须落在顶层');
     assert.deepEqual(parsed.grants['E:\\a'], ['k'], '不能挤掉已有的表');
-  });
-
-  it('addGrant 在 [grants] 表体内追加一行，同作用域累积', () => {
-    const path = configWith('provider = "p"\nmodel = "m"\n\n[grants]\n"E:\\\\a" = ["bash npm test"]\n');
-    addGrant('E:\\a', 'bash npm test', path);
-    addGrant('E:\\a', 'mcp fs.read_file', path);
-    const parsed = parseToml(readFileSync(path, 'utf8')) as { grants: Record<string, string[]> };
-    assert.deepEqual(parsed.grants['E:\\a'], ['bash npm test', 'mcp fs.read_file']);
-  });
-
-  it('addGrant 在没有 [grants] 表时整表新建', () => {
-    const path = configWith('provider = "p"\nmodel = "m"\n');
-    addGrant('E:\\a', 'bash npm test', path);
-    const parsed = parseToml(readFileSync(path, 'utf8')) as { grants: Record<string, string[]> };
-    assert.deepEqual(parsed.grants['E:\\a'], ['bash npm test']);
   });
 
   it('config.toml 语法坏掉时读态直接报错，不静默清空', () => {

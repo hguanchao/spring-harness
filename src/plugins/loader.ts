@@ -64,7 +64,7 @@ export interface DiscoverPluginsOptions {
   bundledRoot?: string;
   /**
    * 工作区是否已信任。false 时**丢弃**项目级候选。
-   * 省略即查 trusted.json（与 MCP 项目级来源同一道门）。
+   * 省略即查 config.toml 的 `trusted`（与 MCP 项目级来源同一道门）。
    */
   trusted?: boolean;
   /** `[plugins] disabled` 里的插件名，逐个丢掉。 */

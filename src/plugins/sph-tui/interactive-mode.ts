@@ -26,6 +26,7 @@ import { collectFileMentions } from '../sph-loop/attachments.js';
 import { loadCompaction, openCompactedSession, projectContext } from '../sph-loop/compact.js';
 import { loadUserTheme } from './theme/theme.js';
 import { sphModelsPath, sphThemePath } from '../../home.js';
+import { modelHeaderLabel } from '../sph-llm/models.js';
 
 import { createSteeringInbox, STEERING_QUEUE_LIMIT, type SteeringInbox } from '../sph-schedule/jobs.js';
 
@@ -45,8 +46,8 @@ import {
 import { scanSkills, skillRoots } from '../sph-skills/scan.js';
 import { builtinAgents } from '../sph-subagent/agents.js';
 import { createLlmClassifier } from '../../permission/auto.js';
-import { HeadlessApprover, type ApprovalMode, type ApprovalRequest, type Approver } from '../../permission/policy.js';
-import { createGrantStore } from '../../permission/store.js';
+import { HeadlessApprover, visibleTools, type ApprovalMode, type ApprovalRequest, type Approver } from '../../permission/policy.js';
+import type { SandboxMode } from '../../sandbox/types.js';
 import { updateConfigFile } from '../../config/save.js';
 import { upsertModelApi, type ProviderDeclaration } from '../../config/registry.js';
 import type { ApiProtocol } from '../../config/load.js';
@@ -80,13 +81,13 @@ import {
   formatKeyText,
 } from '../../tui/index.js';
 import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
-import { InteractiveApprover, type ApprovalUi } from './permission.js';
+import { InteractiveApprover, type ApprovalChoice, type ApprovalUi } from './permission.js';
 import { APPROVAL_OVERLAY_PRIORITY, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
 import { renderPluginsReport, renderSkillsReport } from './reports.js';
 import { readGitBranch } from './git.js';
 import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from './components/interaction.js';
 import { clearHoverHighlight } from './components/hover-highlight.js';
-import { toolDisplayName, summarizeArgs } from './components/tool-execution.js';
+
 import { CustomEditor } from './components/custom-editor.js';
 import { FooterComponent, type FooterData } from './components/footer.js';
 import { HeaderComponent } from './components/header.js';
@@ -105,7 +106,7 @@ import { restoreSessionInto, type ReplayHost } from './session-replay.js';
 import { commandMcps } from './mcp-commands.js';
 import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from './session-commands.js';
 import { commandDiff, commandFork, commandPrompts, invocableSkillPrompt } from './workspace-commands.js';
-import { commandModel, commandProvider, commandEffort, commandPermission, cycleApprovalMode, type SettingsCommandHost } from './settings-commands.js';
+import { commandModel, commandProvider, commandEffort, commandPermission, commandPermissions, cycleApprovalMode, type SettingsCommandHost } from './settings-commands.js';
 import type { TuiDeps } from './deps.js';
 
 /** 命令模块和测试从这里拿 TuiDeps。进程入口不再把屏幕类型一起导出。 */
@@ -261,13 +262,23 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
           })
         : undefined,
       // 作用域在构造时解析一次：工作区根在一次进程里不会变。
-      createGrantStore(deps.workspaceRoot),
-      deps.permissionRules,
+      deps.permission.grants(),
+      {
+        layers: deps.permission.layers(),
+        ruleEnv: deps.permission.ruleEnv,
+        sandboxMode: () => deps.permission.sandbox().mode,
+        sandboxAutoAllow: () => deps.permission.sandbox().autoAllow,
+      },
+      // 未信任的仓库不写规则：那种规则本来就会被信任门丢掉，写进去只会让人以为它生效了。
+      deps.permission.canWriteProjectRule() ? (rule) => deps.permission.addProjectRule(rule) : undefined,
     );
     // `strict` 子代理的审批器：fail-closed，不弹窗，也不共享父会话攒下的授权集合。
     // 在构造时建好，每次 runTurn 直接带上。
     this.subagentApprover = deps.subagentApproval === 'strict'
-      ? new HeadlessApprover('ask', undefined, deps.permissionRules)
+      ? new HeadlessApprover('ask', undefined, {
+          layers: deps.permission.layers(),
+          ruleEnv: deps.permission.ruleEnv,
+        })
       : undefined;
 
     // 复制反馈落输入框右上角（状态行右侧），不走全屏 flash；未注入 deps.ui 的测试路径保持默认。
@@ -349,6 +360,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.setupInput();
     this.restoreSession();
     this.refreshCounters();
+    for (const warning of this.deps.startupWarnings ?? []) this.addNotice(warning, 'warn');
     for (const warning of this.deps.mcpWarnings ?? []) this.addNotice(warning, 'warn');
 
     // 信任页已经 start 过同一块替代屏幕时，这里只换 layout，不再进第二次屏。
@@ -377,7 +389,6 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       scrollbar: 'auto',
       scrollbarTrackStyle: (text) => theme.fg('scrollbarThumb', text),
       scrollbarThumbStyle: (text) => theme.fg('scrollbarThumb', text),
-      scrollbarUntil: this.editorContainer,
     });
     this.transcriptView = transcript;
     const dock = new VStack([
@@ -675,6 +686,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
           ?? (this.deps.pluginServices === EMPTY_PLUGIN_SERVICES ? jsonlSessionFactory : undefined),
         sandbox: this.deps.sandbox,
         approver: this.approver,
+        // 文件类工具不走审批器，路径规则与「裸工具名 deny 摘掉工具」都靠这两项。
+        rules: this.deps.permission.layers(),
+        ruleEnv: this.deps.permission.ruleEnv,
         contextWindow: this.contextWindow,
         depth: this.sessionDepth,
         maxSubagentDepth: this.deps.maxSubagentDepth,
@@ -921,13 +935,23 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         this.projection.endThinking(event.id, event.content);
         // 没 reasoning 的工具轮次不会再来 thinking_delta；状态行若还停在 Thinking…，
         // 这里立刻离开，别等下一步工具/正文。
-        if (this.activityLabel === WorkingLabel.thinking) this.setActivity(WorkingLabel.working);
+        if (this.activityLabel === WorkingLabel.thinking) {
+          this.setActivity(this.projection.activityNow() ?? WorkingLabel.working);
+        }
         this.paint('transcript');
         return;
       }
       case 'tool_start': {
         this.projection.startTool(event.id, event.name, event.args);
-        this.setActivity(WorkingLabel.running(toolDisplayName(event.name), summarizeArgs(event.name, event.args)));
+        const activity = this.projection.activityNow();
+        if (activity !== undefined) this.setActivity(activity);
+        this.paint('transcript');
+        return;
+      }
+      case 'tool_settled': {
+        this.projection.endTool(event.id, event.content, event.ok);
+        const still = this.projection.activityNow();
+        if (still !== undefined) this.setActivity(still);
         this.paint('transcript');
         return;
       }
@@ -1195,7 +1219,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       gitBranch: this.gitBranch,
       sessionId: this.session.id,
       provider: this.provider,
-      model: this.model,
+      model: modelHeaderLabel(
+        this.deps.models().find((item) => item.name === this.provider)?.models,
+        this.model,
+      ),
       effort: this.effort,
       approvalMode: this.approval,
       sandboxMode: this.deps.sandbox.status.mode,
@@ -1222,9 +1249,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       agent: this.agentName || undefined,
       model: this.model,
       effort: this.effort,
+      approval: this.approval,
       contextWindow: this.contextWindow,
       contextTokens: this.contextTokens,
-      usage: this.usage,
     };
   }
 
@@ -1252,24 +1279,38 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     return this.approval;
   }
 
-  async requestApproval(request: ApprovalRequest, note?: string): Promise<boolean> {
+  /** 审批器要知道沙箱兜不兜得住（`sandbox_auto_allow` 打开时免问）。 */
+  sandbox(): { mode: SandboxMode; autoAllow: boolean } {
+    return this.deps.permission.sandbox();
+  }
+
+  async requestApproval(request: ApprovalRequest, note?: string, suggestedRule?: string): Promise<ApprovalChoice> {
     // 审批等待期间工具并未执行:tool_start 在审批门之前就发出,状态行若沿用 running
     // 文案,转圈加耗时会让人以为命令已经在跑。这里换成等待文案,弹窗关闭后还原。
     const previousActivity = this.activityLabel;
     this.setActivity(WorkingLabel.awaitingApproval);
     try {
-      return await this.showApprovalDialog(request, note);
+      return await this.showApprovalDialog(request, note, suggestedRule);
     } finally {
       if (previousActivity !== undefined) this.setActivity(previousActivity);
     }
   }
 
-  private async showApprovalDialog(request: ApprovalRequest, note?: string): Promise<boolean> {
+  private async showApprovalDialog(
+    request: ApprovalRequest,
+    note?: string,
+    suggestedRule?: string,
+  ): Promise<ApprovalChoice> {
     const detail = flattenWhitespace(request.command ?? request.path ?? '(no detail)');
     const preview = detail.length > 400 ? `${detail.slice(0, 400)}…` : detail;
-    const body = note ? `${preview}\n\n${theme.fg('warning', note)}` : preview;
-    // 两个「总是允许」的作用域不一样，文案必须写出来：一个活到进程结束，一个写进
-    // ~/.sph/permissions.json 并且只对当前项目生效。
+    const bodyParts = [preview];
+    if (note) bodyParts.push(theme.fg('warning', note));
+    if (suggestedRule !== undefined) {
+      bodyParts.push(theme.fg('dim', `Rule to remember: ${suggestedRule}`));
+    }
+    const body = bodyParts.join('\n\n');
+    // 三个「总是允许」的记忆不同，文案必须写出来：一个活到进程结束，一个写进本项目的
+    // .sph/permissions.json（只对这一个动作），一个把它提升成项目规则（同类动作都免问）。
     const scope = this.approvalScopeLabel(request);
     // 正文必须逐字展示:命令过 Markdown 会被转义规则改写(\| 变 | 等),批准看到的
     // 和实际执行的就不是同一条命令了。
@@ -1280,22 +1321,21 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       // 审批是安全边界；普通帮助/设置弹窗不能覆盖它，也不能抢走它的键盘焦点。
       priority: APPROVAL_OVERLAY_PRIORITY,
       items: [
-        { value: 'allow', label: 'Allow once' },
+        { value: 'once', label: 'Allow once' },
         { value: 'session', label: `Allow ${scope} for this session` },
-        { value: 'always', label: `Always allow ${scope} for this project` },
+        { value: 'project', label: `Always allow ${scope} in this project` },
+        ...(suggestedRule === undefined
+          ? []
+          : [{ value: 'rule', label: `Always allow rules like this — ${suggestedRule}` }]),
         { value: 'deny', label: 'Deny' },
       ],
-      maxVisible: 4,
+      maxVisible: 5,
     });
-    if (choice === 'session') {
-      this.approver.allowForSession(request);
-      return true;
+    if (choice === 'once' || choice === 'session' || choice === 'project' || choice === 'rule') {
+      // 落盘由审批器做（它管三种记忆），界面只回答「选了哪一项」。
+      return choice;
     }
-    if (choice === 'always') {
-      this.approver.allowForProject(request);
-      return true;
-    }
-    return choice === 'allow';
+    return 'deny';
   }
 
   /**
@@ -1414,6 +1454,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         break;
       case 'permission':
         await commandPermission(this, argument);
+        break;
+      case 'permissions':
+        await commandPermissions(this);
         break;
       case 'export':
         await commandExport(this, argument);
@@ -1764,8 +1807,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         sandbox: this.deps.sandbox.status.mode,
         skills: scanSkills(this.deps.workspaceRoot).catalog,
         mcpTools: this.deps.mcp()?.listTools() ?? [],
-        lazyMcpServers: (this.deps.mcp()?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
-        allowedTools: new Set((this.deps.tools ?? defaultTools).list().map((tool) => tool.name)),
+        allowedTools: visibleTools(
+          this.deps.permission.layers(),
+          new Set((this.deps.tools ?? defaultTools).list().map((tool) => tool.name)),
+        ),
         child: this.sessionDepth > 0,
         toolPrompts: (this.deps.tools ?? defaultTools).list().flatMap((tool) => {
           const text = tool.prompt ?? tool.description;

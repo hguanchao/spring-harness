@@ -101,6 +101,9 @@ export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatc
 	};
 }
 
+/** 范围拖选的边界。用户消息、思考组、助手回复各自一块，选区不跨块。 */
+export const SELECTION_BLOCK = Symbol.for("sph.selectionBlock");
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width

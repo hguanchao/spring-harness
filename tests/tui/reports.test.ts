@@ -15,7 +15,6 @@ function server(overrides: Partial<McpServerStatus> & { name: string }): McpServ
     transport: 'stdio',
     supported: true,
     enabled: true,
-    lazy: false,
     connected: true,
     target: `npx -y ${overrides.name}-mcp`,
     origin: { label: '~/.sph/config.toml', path: '/home/u/.sph/config.toml', editable: true },

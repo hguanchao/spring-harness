@@ -177,16 +177,6 @@ describe('工具段的条件拼装', () => {
   });
 });
 
-describe('lazy MCP server 目录行', () => {
-  it('lazy server 在尾部上下文里，带首连方式；无 lazy 时不出现该段，系统提示里也不出现', () => {
-    const withLazy = tail({ lazyMcpServers: ['playwright'] });
-    assert.ok(withLazy.includes('Lazy MCP servers'));
-    assert.ok(withLazy.includes('- playwright: call mcp with action "list" and server "playwright"'));
-    assert.ok(!tail().includes('Lazy MCP servers'), '没有 lazy server 时不该出现空段');
-    assert.ok(!base({ lazyMcpServers: ['playwright'] }).includes('Lazy MCP servers'));
-  });
-});
-
 describe('跨轮次状态注入', () => {
   // goal / lastFailure / planMode 是随时可变的：放在 system prompt（前缀最头部）会让
   // 一次 /goal、一次失败重试、一次模式翻转毁掉全部消息历史的缓存。它们必须只出现在

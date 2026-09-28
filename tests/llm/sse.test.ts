@@ -158,6 +158,67 @@ describe('postSseStream without [DONE]', () => {
   });
 });
 
+describe('postSseStream peer close', () => {
+  it('已经收到 SSE 后对端关连接，不当成失败', async () => {
+    const original = globalThis.fetch;
+    const payloads: string[] = [];
+    const encoder = new TextEncoder();
+    let sent = false;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!sent) {
+              sent = true;
+              controller.enqueue(encoder.encode('data: {"delta":"ok"}\n\n'));
+              return;
+            }
+            controller.error(new Error('Response does not match the HTTP/1.1 protocol (Invalid EOF state)'));
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      await postSseStream({
+        url: 'http://example.invalid/v1/chat',
+        headers: {},
+        body: '{}',
+        onData: (payload) => payloads.push(payload),
+      });
+      assert.deepEqual(payloads, ['{"delta":"ok"}']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('一个字节都没有就 Invalid EOF，仍然可重试', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error('Response does not match the HTTP/1.1 protocol (Invalid EOF state)'));
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      await assert.rejects(
+        () =>
+          postSseStream({
+            url: 'http://example.invalid/v1/chat',
+            headers: {},
+            body: '{}',
+            onData: () => {},
+          }),
+        (error: unknown) => error instanceof RetryableError && /Invalid EOF/.test(error.message),
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
 describe('postSseStream idle timeout', () => {
   it('times out when the body never yields a chunk', async () => {
     const original = globalThis.fetch;

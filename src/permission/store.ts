@@ -5,18 +5,16 @@
  * 位置批准的动作都应该对整个仓库有效，按 cwd 分键会让子目录里启动的会话看不到仓库根上
  * 批准过的授权。按项目记，换一个仓库不会把授权带过去。
  *
- * 存储在 config.toml 的 `[grants]` 表（键是作用域根）。不叫 `[permissions]`：那是规则表
- * （allow/ask/deny）的名字，这里存的是已批准的**授权**。存的内容仍是 approvalScopeKey
- * 的产物——**具体动作**而不是工具名，存工具名会把「批准一条命令 = 放行整个工具」这个
- * 洞从会话内放大到跨会话。
+ * 落在 `<项目>/.sph/permissions.json`（见 grant-file.ts）。**不再是** config.toml 的
+ * `[grants]`：授权本来就是项目内的一次性决定，文件位置本身就是作用域，不必再维护一层
+ * scope 键，也不会和「人写的意图」挤在同一份文件里。
  */
 
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { sphConfigPath } from '../home.js';
 import { canonicalize, casefoldPath } from '../workspace/boundary.js';
-import { readState, addGrant } from '../config/state.js';
+import { addGrant, grantFilePath, readGrants } from './grant-file.js';
 
 /**
  * 从工作区根向上找第一个含 `.git` 的目录。
@@ -47,24 +45,36 @@ export function permissionScopeRoot(workspaceRoot: string, home = homedir()): st
   return root;
 }
 
-/** 授权读写口。TUI 按当前工作区建一个；测试注入临时文件即可。 */
+/** 授权读写口。TUI 按当前工作区建一个；测试注入临时目录即可。 */
 export interface GrantStore {
   /** 解析后的作用域根，供界面展示。 */
   readonly scope: string;
+  /** 授权文件路径，供界面展示「写进哪儿」。 */
+  readonly path: string;
   load(): readonly string[];
   add(key: string): void;
+  /** 文件存在但读不回来时的原因；没有就是 undefined。 */
+  warning(): string | undefined;
 }
 
-export function createGrantStore(workspaceRoot: string, filePath: string = sphConfigPath()): GrantStore {
+export function createGrantStore(workspaceRoot: string): GrantStore {
   const scope = permissionScopeRoot(workspaceRoot);
+  const path = grantFilePath(scope);
+  let lastWarning: string | undefined;
   return {
     scope,
+    path,
     load() {
-      return readState(filePath).grants[scope] ?? [];
+      const result = readGrants(scope);
+      lastWarning = result.warning;
+      return result.keys;
     },
     add(key: string) {
       // addGrant 内部写前重读：授权可能已被另一个 sph 进程批准过，整表覆盖会把那些抹掉。
-      addGrant(scope, key, filePath);
+      addGrant(scope, key);
+    },
+    warning() {
+      return lastWarning;
     },
   };
 }

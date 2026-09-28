@@ -22,8 +22,10 @@ export interface CliArgs {
   maxTokens?: number;
   approval?: ApprovalMode;
   resumeId?: string;
-  /** 位置子命令：sph sessions / sph export。 */
-  command?: 'sessions' | 'export';
+  /** 位置子命令：sph sessions / sph export / sph rules check。 */
+  command?: 'sessions' | 'export' | 'rules';
+  /** `sph rules check` 要判定的那条命令。 */
+  rulesCheck?: string;
   search?: string;
   format: 'md' | 'json' | 'html';
   sessionId?: string;
@@ -55,6 +57,7 @@ Usage:
   sph --yolo                Shortcut for --approval yolo
   sph --trust               Remember this workspace as trusted (required for untrusted -p)
   sph --sandbox MODE        off | workspace | read-only  (default: off)
+  sph rules check "<cmd>"   Show how the permission rules judge a command (read-only)
   sph -p "<prompt>" --output-format json        Emit one JSON event per line
                                                 (NDJSON) on stdout instead of text;
                                                 the last line is {"type":"result",...}
@@ -83,17 +86,27 @@ TUI commands: /help /new /resume /skills /mcps /plan /goal
 MCP sources: ~/.sph/config.toml, <repo>/.sph/config.toml (closest to cwd wins),
              ~/.claude.json, ~/.codex/config.toml (user and project), .mcp.json.
              Later tools in that list lose to earlier ones on a name clash.
-             External files are never written to: enable/disable is recorded in
-             [mcp] disabled_servers / enabled_servers in ~/.sph/config.toml.
+             External files are never written to: disable a server with a same-name
+             [mcp_servers.<name>] disabled = true in ~/.sph/config.toml (it replaces
+             the lower-priority definition whole). Enabled servers all connect in the
+             background at startup — there is no lazy mode.
              MCP transports: stdio, HTTP, and SSE. A url uses HTTP unless transport = "sse"
              or the path ends in /sse.
 
 OS sandbox: off by default. workspace | read-only use a same-host file policy
              (Linux bwrap, else Landlock; macOS Seatbelt; Windows restricted token + ACL).
              Reads and network stay on the host. Windows enforcement is partial.
+             sandbox_auto_allow = true in config.toml skips per-command approval while a
+             sandbox is active (same-host fence is weaker than process isolation — opt in).
 Enforcement is PARTIAL. Headless shell/web/mcp is denied unless --yolo is set.
 Untrusted workspaces: -p requires --trust; the TUI asks once interactively.
 --yolo does not imply --trust.
+Permissions: rules live in [permissions] of ~/.sph/config.toml and <repo>/.sph/config.toml
+             (a project config may also set [mcp_servers]; its allow needs a trusted workspace).
+             Syntax is Tool(specifier): bash(git log *), read(~/secrets/**), edit(/src/**),
+             web_fetch(domain:example.com), mcp(server). deny > ask > allow across layers;
+             any layer's deny wins. Approvals are recorded in <repo>/.sph/permissions.json.
+             Read-only shell commands never prompt. 'sph rules check "cmd"' previews a call.
 Exit codes: 0 ok, 1 error, 2 usage/config.
 `;
 
@@ -183,6 +196,14 @@ export function parseArgs(argv: string[]): CliArgs {
     const command = positional[0];
     if (command === 'sessions' || command === 'export') {
       out.command = command;
+    } else if (command === 'rules') {
+      // `sph rules check "<command>"`：离线看一条命令会不会被规则拦住。规则写下去能不能
+      // 生效只靠真跑一遍来验证，代价太高，所以给一条只读的检查路径。
+      if (positional[1] !== 'check') throw new Error('usage: sph rules check "<command>"');
+      const target = positional.slice(2).join(' ').trim();
+      if (target === '') throw new Error('usage: sph rules check "<command>"');
+      out.command = 'rules';
+      out.rulesCheck = target;
     } else {
       throw new Error(`unknown argument: ${command}`);
     }

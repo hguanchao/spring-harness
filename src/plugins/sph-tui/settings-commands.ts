@@ -16,7 +16,8 @@ import { errorMessage } from '../../util.js';
 import { primaryColumnWidthFor } from './commands.js';
 import type { TUI, SelectItem } from '../../tui/index.js';
 import type { TuiDeps } from './deps.js';
-import { showInputDialog, showLoadingDialog } from './dialogs.js';
+import { showInputDialog, showLoadingDialog, showMessageDialog } from './dialogs.js';
+import { theme } from './theme/theme.js';
 import { visibleWidth } from '../../tui/utils.js';
 import type { CustomEditor } from './components/custom-editor.js';
 
@@ -270,6 +271,65 @@ async function promptApi(host: SettingsCommandHost, current: ApiProtocol): Promi
  * 命令名是 `/permission`；写回的配置键仍是 `approval`——那是「审批策略」这个
  * 概念的名字，而且已经躺在用户既有的 config.toml 里，跟着改名会静默丢掉他们的设置。
  */
+/** 三种审批模式各自的一句话说明；文案只有这一处，`/permission` 与帮助都取它。 */
+const MODE_HINTS: Record<ApprovalMode, string> = {
+  ask: 'Ask before every reviewed tool call',
+  auto: 'Let a model reviewer decide, escalate to you when unsure',
+  yolo: 'Approve everything automatically',
+};
+
+/**
+ * `/permissions`：把生效中的权限状态一次说清——模式、沙箱、两层规则与授权落点。
+ *
+ * 规则是安全边界的输入，而「我写的那条到底生效没有」在只有配置文件的年代只能靠试。
+ * 这里把每一条规则的来源连文件名一起列出来，再说明项目级 allow 是否被信任门丢掉了。
+ */
+export async function commandPermissions(host: SettingsCommandHost): Promise<void> {
+  const { deps } = host;
+  const layers = deps.permission.layers();
+  const sandbox = deps.permission.sandbox();
+  const grants = deps.permission.grants();
+  const keys = grants.load();
+  const lines: string[] = [
+    `Approval mode: ${host.currentApproval()}`,
+    `Sandbox: ${sandbox.mode}${sandbox.autoAllow ? ' (shell commands inside the sandbox are not asked)' : ''}`,
+    '',
+  ];
+  const section = (title: string, rules: { allow: readonly string[]; ask: readonly string[]; deny: readonly string[] } | undefined, where: string): void => {
+    lines.push(`${title} — ${where}`);
+    if (rules === undefined) {
+      lines.push('  (none)');
+      return;
+    }
+    const rows = [
+      ['deny', rules.deny],
+      ['ask', rules.ask],
+      ['allow', rules.allow],
+    ] as const;
+    if (rows.every(([, list]) => list.length === 0)) {
+      lines.push('  (no rules)');
+      return;
+    }
+    for (const [action, list] of rows) {
+      for (const rule of list) lines.push(`  ${action}: ${rule}`);
+    }
+  };
+  section('User rules', layers.user?.rules, layers.user?.sourceDir ?? '(none)');
+  section('Project rules', layers.project?.rules, deps.permission.projectPath());
+  if (deps.permission.projectAllowDropped()) {
+    lines.push('', 'Project allow rules are ignored: this workspace is not trusted (deny / ask still apply).');
+  }
+  lines.push(
+    '',
+    `Approved actions: ${keys.length} (${grants.path})`,
+    ...(keys.length === 0 ? [] : keys.slice(0, 20).map((key) => `  ${key}`)),
+    ...(keys.length > 20 ? [`  … ${keys.length - 20} more`] : []),
+  );
+  const grantWarning = grants.warning();
+  if (grantWarning !== undefined) lines.push('', theme.fg('warning', grantWarning));
+  await showMessageDialog(host.ui, { title: 'Permissions', text: lines.join('\n'), hint: 'Esc close' });
+}
+
 export async function commandPermission(host: SettingsCommandHost, argument = ''): Promise<void> {
   if (argument !== '') {
     const match = APPROVAL_MODES.find((mode) => mode === argument);
@@ -283,19 +343,14 @@ export async function commandPermission(host: SettingsCommandHost, argument = ''
   const items: SelectItem[] = APPROVAL_MODES.map((mode) => ({
     value: mode,
     label: mode,
-    description:
-      mode === 'ask'
-        ? 'Ask before every reviewed tool call'
-        : mode === 'auto'
-          ? 'Let a model reviewer decide, escalate to you when unsure'
-          : 'Approve everything automatically',
+    description: MODE_HINTS[mode],
   }));
-  const selected = await host.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: 3, primaryColumnWidth: primaryColumnWidthFor(items) });
+  const selected = await host.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: APPROVAL_MODES.length, primaryColumnWidth: primaryColumnWidthFor(items) });
   if (!selected) return;
   host.applyApproval(selected.value as ApprovalMode);
 }
 
-/** Shift+Tab：在 ask → auto → yolo 间循环审批模式（复用 /permission 的应用逻辑）。 */
+/** Shift+Tab：按 APPROVAL_MODES 的顺序循环审批模式（复用 /permission 的应用逻辑）。 */
 export function cycleApprovalMode(host: SettingsCommandHost): void {
   const current = host.currentApproval();
   const index = APPROVAL_MODES.indexOf(current);

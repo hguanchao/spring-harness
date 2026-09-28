@@ -131,7 +131,7 @@ export function trailingComment(text: string): string {
  * 第一个顶层表头的行号；没有表头返回 -1。
  *
  * 追加**顶层标量**时要用它：TOML 里表头之后的键属于该表，直接追加到文件末尾会把
- * `approval = "ask"` 变成 `[mcp]` 的 `approval`——解析成功、值也写进去了，只是永远读不到。
+ * `approval = "ask"` 变成 `[permissions]` 的 `approval`——解析成功、值也写进去了，只是永远读不到。
  */
 export function firstTableHeaderLine(lines: readonly string[]): number {
   const headers = scanHeaders(lines);

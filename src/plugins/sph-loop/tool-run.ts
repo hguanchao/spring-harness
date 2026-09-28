@@ -21,6 +21,8 @@ export interface ToolBatchOptions {
   isParallel: (name: string) => boolean;
   execute: (call: ToolCallRequest) => Promise<ToolResult>;
   onStart: (call: ToolCallRequest) => void;
+  /** 执行结束就通知，不等前面的调用提交。界面用它离开进行中。 */
+  onSettled?: (call: ToolCallRequest, result: ToolResult) => void;
   onCommit: (call: ToolCallRequest, result: ToolResult) => void;
   signal?: AbortSignal;
 }
@@ -30,7 +32,7 @@ export interface ToolBatchOptions {
  * `onStart` 在启动（或跳过）时按模型序发出；`onCommit` 只在 `0..k` 连续完成时前进。
  */
 export async function runToolBatch(options: ToolBatchOptions): Promise<void> {
-  const { calls, isParallel, execute, onStart, onCommit, signal } = options;
+  const { calls, isParallel, execute, onStart, onSettled, onCommit, signal } = options;
   const n = calls.length;
   if (n === 0) return;
 
@@ -70,7 +72,9 @@ export async function runToolBatch(options: ToolBatchOptions): Promise<void> {
     }
     if (!isParallel(calls[i].name)) {
       onStart(calls[i]);
-      results[i] = await runSafe(calls[i]);
+      const result = await runSafe(calls[i]);
+      onSettled?.(calls[i], result);
+      results[i] = result;
       commitReady();
       i++;
       continue;
@@ -82,6 +86,7 @@ export async function runToolBatch(options: ToolBatchOptions): Promise<void> {
       onStart(calls[index]);
       started.push(
         runSafe(calls[index]).then((result) => {
+          onSettled?.(calls[index], result);
           results[index] = result;
           commitReady();
         }),

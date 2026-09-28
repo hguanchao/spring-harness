@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import type { TUI } from '../../../src/tui/index.js';
 import { stripTerminalSequences, visibleWidth } from '../../../src/tui/index.js';
 import { formatStatusElapsed, formatStatusTokens } from '../../../src/util.js';
-import { formatWorkingWarning, IdleStatus, WorkingLabel, WorkingStatusIndicator, workingWarningKey } from '../../../src/plugins/sph-tui/components/interaction.js';
+import { failureHeadline, formatWorkingWarning, IdleStatus, WorkingLabel, WorkingStatusIndicator, workingWarningKey } from '../../../src/plugins/sph-tui/components/interaction.js';
 
 const ui = {
   invalidateContent() {},
@@ -19,6 +19,19 @@ function statusLines(indicator: WorkingStatusIndicator, width: number): { raw: s
   const raw = lines[1] ?? '';
   return { raw, plain: stripTerminalSequences(raw) };
 }
+
+describe('failure headline', () => {
+  it('协议被掐断时标题是人话，不把解析器原文放在第一眼', () => {
+    assert.equal(
+      failureHeadline('network error: Response does not match the HTTP/1.1 protocol (Invalid EOF state)'),
+      'Upstream disconnected',
+    );
+  });
+
+  it('认不出的短错误原样留下', () => {
+    assert.equal(failureHeadline('file not found'), 'file not found');
+  });
+});
 
 describe('status elapsed / tokens', () => {
   it('10s 以内留一位小数，之上取整，小时走 h', () => {

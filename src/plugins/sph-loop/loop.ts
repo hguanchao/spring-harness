@@ -33,7 +33,10 @@ import type { ToolRegistry } from '../../tools/registry.js';
 import { FileObservation } from '../../tools/observe.js';
 import { toolDenied } from '../../tools/pipeline.js';
 import { SUBAGENT_CONCURRENCY, type ToolContext, type ToolResult } from '../../tools/types.js';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, resolve } from 'node:path';
+import { evaluateRules, isPathTool, PATH_ARG, visibleTools, type ApprovalRequest } from '../../permission/policy.js';
 
 /**
  * 步数上限之前留出的收束窗口，只用于配了 maxTurns 的子会话。
@@ -42,6 +45,24 @@ import { existsSync } from 'node:fs';
  * 窗口内仍可补工具调用；最后一步不再给工具。上限本身不足一窗时，从第一步就提醒。
  */
 const WIND_DOWN_STEPS = 4;
+/**
+ * 没写 max_turns 时子代理仍要收束。
+ *
+ * 根会话不套这个数：用户看着它的输出，中途打断没有收益。20 与配置模板里的示例一致，
+ * 够一轮探查，也给收束窗口留出步数。显式的 max_turns 覆盖它。
+ */
+const DEFAULT_SUBAGENT_TURNS = 20;
+
+function subagentTurnLimit(configured: number | undefined): number {
+  return configured !== undefined && configured > 0 ? Math.floor(configured) : DEFAULT_SUBAGENT_TURNS;
+}
+
+function budgetExhausted(used: number, limit: number): Error {
+  return new Error(
+    `session token budget exhausted: ${used} >= max_session_tokens ${limit}. `
+    + 'Raise max_session_tokens, or start a new session (`--new`).',
+  );
+}
 
 function windDownNote(limit: number): string {
   const left = Math.min(WIND_DOWN_STEPS, limit);
@@ -77,6 +98,41 @@ export function resolveChildTools(registry: ToolRegistry, declared: readonly str
 
 /** 预算用掉多少就打一条 warn：留出「收尾并交付已有成果」的余地。 */
 const BUDGET_WARN_RATIO = 0.8;
+
+/** 路径型工具这次调用的目标路径原文。 */
+function pathDetail(args: Record<string, unknown>): string {
+  return typeof args[PATH_ARG] === 'string' ? args[PATH_ARG] : '';
+}
+
+/**
+ * 文件类工具的规则判定。
+ *
+ * 这些工具默认不弹窗（写权限由沙箱管），所以规则必须先在这里过一遍：一条 `deny` 路径规则
+ * 若只写进配置文件而没有调用点，就成了「看起来拦住了、其实没拦」——那比没有规则更糟。
+ * 命中 ask 时返回 'ask'，由调用方决定要不要真的弹出审批。
+ *
+ * `realPath` 交给存在的文件算一次：软链既不能绕过 deny，也不能让 allow 误放行。
+ */
+function pathToolVerdict(
+  options: RunTurnOptions,
+  tool: string,
+  args: Record<string, unknown>,
+): 'deny' | 'ask' | undefined {
+  if (options.rules === undefined || !isPathTool(tool)) return undefined;
+  const detail = pathDetail(args);
+  if (detail === '') return undefined;
+  const env = options.ruleEnv ?? { workspaceRoot: options.workspaceRoot, home: homedir() };
+  const abs = isAbsolute(detail) ? detail : resolve(env.workspaceRoot, detail);
+  let realPath: string | undefined;
+  try {
+    realPath = realpathSync(abs);
+  } catch {
+    // 目标还不存在（新建文件）：没有真实路径可解析，按请求路径判定即可。
+  }
+  const request: ApprovalRequest = { tool, path: detail, ...(realPath === undefined ? {} : { realPath }) };
+  const verdict = evaluateRules(options.rules, request, env);
+  return verdict === 'deny' || verdict === 'ask' ? verdict : undefined;
+}
 
 /**
  * 根会话当前坐着的代理。
@@ -221,13 +277,13 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     sandbox: options.sandbox.status.mode,
     skills: skills.catalog,
     mcpTools: mcp?.listTools() ?? [],
-    // 清单只随配置变化、不随连接状态变化（见 prompt.ts 的 lazyMcpServers 注释）。
-    lazyMcpServers: (mcp?.listServers() ?? []).filter((server) => server.lazy).map((server) => server.name),
     // 只把本次真正可用的工具写进提示词：受限会话（如只读子代理）里，不可用工具的段落
     // 整段消失，而不是留下一句指向不存在工具的指令。`allowedTools` 为空时过去会放行
     // 全部段落——那会让被插件禁用/装载失败的工具（如 sph-mcp 没装时的 `mcp`）也留一段
     // 指令，所以这里按**工具表里真实存在的名字**收口。
-    allowedTools: sessionTools ?? new Set(registry.list().map((tool) => tool.name)),
+    allowedTools: options.rules === undefined
+      ? sessionTools ?? new Set(registry.list().map((tool) => tool.name))
+      : visibleTools(options.rules, sessionTools ?? new Set(registry.list().map((tool) => tool.name))),
     toolPrompts: registry.list().flatMap((tool) => {
       const text = tool.prompt ?? tool.description;
       return text ? [{ tool: tool.name, text }] : [];
@@ -266,12 +322,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   };
   /** 超预算就在发起下一次请求**之前**停：已经花掉的钱换不回，但下一笔可以不花。 */
   const assertBudget = (): void => {
-    if (budget > 0 && sessionTokens >= budget) {
-      throw new Error(
-        `session token budget exhausted: ${sessionTokens} >= max_session_tokens ${budget}. `
-        + 'Raise max_session_tokens, or start a new session (`--new`).',
-      );
-    }
+    if (budget > 0 && sessionTokens >= budget) throw budgetExhausted(sessionTokens, budget);
   };
 
   // 会话镜像：turn 内所有投影走内存，避免每个 step 重读 JSONL。压缩换会话时整表替换。
@@ -471,6 +522,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       if (event.type === 'usage') {
         childUsage.promptTokens += event.promptTokens;
         childUsage.completionTokens += event.completionTokens;
+        // 父会话的内存账本跟着扣。否则下一个子代理和父会话的下一步仍按开跑前的余量放行。
+        chargeTokens(event.promptTokens, event.completionTokens);
         options.listener?.(event);
         options.listener?.({
           type: 'subagent_event',
@@ -488,7 +541,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         options.listener?.(event);
         return;
       }
-      if (event.type === 'done') return;
+      if (event.type === 'done' || event.type === 'tool_settled') return;
       // 孙代理的 subagent_start/end 也从这里封进 subagent_event（消费端按类型自行取舍：
       // TUI 把孙活动并进子代理的聚合计数，不单开块）。
       options.listener?.({ type: 'subagent_event', id: subId, event: event as SubagentEvent });
@@ -496,7 +549,10 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
     const allowed = resolveChildTools(registry, input.tools);
     let outcome: { ok: boolean; summary: string } = { ok: true, summary: '' };
+    // 余量已经是 0 时不能再传 maxSessionTokens: 0——那会被读成「不限制」。
+    const tokenAllowance = budget > 0 ? budget - sessionTokens : undefined;
     try {
+      if (tokenAllowance !== undefined && tokenAllowance <= 0) throw budgetExhausted(sessionTokens, budget);
       await runTurn({
         prompt: input.prompt,
         workspaceRoot: childWorkspaceRoot,
@@ -507,6 +563,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         sessions,
         sandbox: options.sandbox,
         approver: options.subagentApprover ?? options.approver,
+        // 子会话自己再跑一轮：路径规则与工具摘除不随审批器走，必须原样带下去。
+        ...(options.rules === undefined ? {} : { rules: options.rules }),
+        ...(options.ruleEnv === undefined ? {} : { ruleEnv: options.ruleEnv }),
         contextWindow: options.contextWindow,
         listener: childListener,
         signal: input.signal ?? options.signal,
@@ -516,7 +575,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         memory,
         depth: depth + 1,
         maxSubagentDepth,
-        maxTurns: options.maxTurns,
+        maxTurns: subagentTurnLimit(options.maxTurns),
+        // 这一次还能花的量。子循环按它自己的计数停在下一次请求之前。
+        ...(tokenAllowance === undefined ? {} : { maxSessionTokens: tokenAllowance }),
         allowedTools: allowed,
         worktrees,
         subagentPrompt: input.systemPrompt,
@@ -540,7 +601,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       // 会话号放在发现前面，长报告被截断时续接入口还在。
       if (stoppedAtLimit) {
         const findings = written || '(no findings written)';
-        const limit = options.maxTurns;
+        const limit = subagentTurnLimit(options.maxTurns);
         throw new Error(
           `Stopped at the ${limit}-step limit before the task was finished.\n${footer}\n\nFindings so far:\n${findings}`,
         );
@@ -611,7 +672,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     },
     async approve(tool, detail) {
       options.listener?.({ type: 'ask', id: nextEventId('ask'), tool, detail });
-      return options.approver.decide({ tool, command: detail });
+      // 路径型工具的 detail 是路径，不是命令：规则按工具类别解释 specifier，两处不能混。
+      return options.approver.decide(isPathTool(tool) ? { tool, path: detail } : { tool, command: detail });
     },
     async askUser(prompt) {
       options.listener?.({ type: 'ask', id: nextEventId('ask'), tool: 'ask_user', detail: prompt });
@@ -694,10 +756,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     return '';
   };
 
-  // 省略不限制。父会话即使配了也不收束：用户已经看着它的输出，打断一轮改动没有收益。
-  const turnLimit = depth > 0 && options.maxTurns !== undefined && options.maxTurns > 0
-    ? Math.floor(options.maxTurns)
-    : undefined;
+  // 父会话即使配了也不收束：用户已经看着它的输出，打断一轮改动没有收益。
+  // 子会话没配时用默认步数，避免一轮探查一直跑到自己停。
+  const turnLimit = depth > 0 ? subagentTurnLimit(options.maxTurns) : undefined;
   let windDownSent = false;
   for (let step = 0; turnLimit === undefined || step < turnLimit; step++) {
     if (options.signal?.aborted) throw new Error('aborted');
@@ -1023,6 +1084,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         active.appendEvent('tool_intent', { id: call.id, name: call.name, args: call.arguments });
         options.listener?.({ type: 'tool_start', name: call.name, id: call.id, args: call.arguments });
       },
+      onSettled(call, result) {
+        options.listener?.({ type: 'tool_settled', name: call.name, id: call.id, ok: result.ok, content: result.content });
+      },
       async execute(call) {
         const parseError = parseErrors.get(call.id);
         if (parseError) return { ok: false, content: `invalid tool arguments: ${parseError}` };
@@ -1036,30 +1100,46 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         let result: ToolResult;
         if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${call.name}` };
         else {
-          let blocked: string | undefined;
-          for (const hook of hooks) {
-            if (!hook.beforeTool) continue;
-            try {
-              blocked = await hook.beforeTool({ name: call.name, args: call.arguments });
-            } catch (error) {
-              blocked = errorMessage(error);
+          // 文件类工具默认不问（写权限由沙箱管），所以规则对它们的 deny/ask 要在这里落实，
+          // 否则一条路径规则就是「写了不生效」。只有命中 ask 才走审批，免得不匹配的调用也弹窗。
+          const pathVerdict = pathToolVerdict(options, call.name, call.arguments);
+          if (pathVerdict === 'deny') {
+            result = {
+              ok: false,
+              content: `denied by a permission rule: ${call.name} ${pathDetail(call.arguments)} — do not retry it by another route`,
+            };
+          } else {
+            let blocked: string | undefined;
+            if (pathVerdict === 'ask') {
+              const allowed = await ctx.approve(call.name, pathDetail(call.arguments));
+              if (!allowed) {
+                blocked = `${call.name} denied by the approval policy — do not retry it by another route`;
+              }
             }
-            if (blocked) break;
-          }
-          result = blocked
-            ? { ok: false, content: blocked }
-            : await tool.execute(call.arguments, ctx, call.id);
-          if (!blocked) {
             for (const hook of hooks) {
-              if (!hook.afterTool) continue;
+              if (blocked !== undefined || !hook.beforeTool) continue;
               try {
-                const verdict = await hook.afterTool(
-                  { name: call.name, args: call.arguments },
-                  { ok: result.ok, content: result.content },
-                );
-                if (verdict?.deny) result = { ok: false, content: verdict.deny };
+                blocked = await hook.beforeTool({ name: call.name, args: call.arguments });
               } catch (error) {
-                result = { ok: false, content: errorMessage(error) };
+                blocked = errorMessage(error);
+              }
+              if (blocked) break;
+            }
+            result = blocked !== undefined
+              ? { ok: false, content: blocked }
+              : await tool.execute(call.arguments, ctx, call.id);
+            if (blocked === undefined) {
+              for (const hook of hooks) {
+                if (!hook.afterTool) continue;
+                try {
+                  const verdict = await hook.afterTool(
+                    { name: call.name, args: call.arguments },
+                    { ok: result.ok, content: result.content },
+                  );
+                  if (verdict?.deny) result = { ok: false, content: verdict.deny };
+                } catch (error) {
+                  result = { ok: false, content: errorMessage(error) };
+                }
               }
             }
           }

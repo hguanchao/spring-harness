@@ -185,7 +185,23 @@ function classifyRetryHeadline(raw: string): string | undefined {
   return undefined;
 }
 
+/**
+ * 失败行标题用的短句。认得出的传输/鉴权/限流换成一句话，认不出就截短。
+ * 原文仍由调用方放在展开详情里。
+ */
+export function failureHeadline(raw: string): string {
+  const text = flattenWhitespace(raw);
+  if (text === '') return 'Failed';
+  if (/does not match the HTTP\/1\.1 protocol|invalid eof/i.test(text)) return 'Upstream disconnected';
+  const retry = classifyRetryHeadline(text);
+  if (retry) return retry;
+  if (/network error|fetch failed|socket hang up|econnreset|und_err/i.test(text)) return 'Network error';
+  if (text.length <= 72) return text;
+  return `${[...text].slice(0, 71).join('')}…`;
+}
+
 function classifyWorkingWarning(text: string): string {
+  if (/does not match the HTTP\/1\.1 protocol|invalid eof/i.test(text)) return 'Upstream disconnected';
   if (/without a finish reason/i.test(text)) return 'No finish reason';
   if (/truncated \(hit max_tokens\)/i.test(text)) return 'Hit max_tokens';
   const budget = /Session token budget (\d+)%/i.exec(text);

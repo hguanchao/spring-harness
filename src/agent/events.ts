@@ -30,6 +30,11 @@ export type AgentEvent =
   /** 思考结束。content 是全文，消费端应整体替换而不是拼接。 */
   | { type: 'thinking_end'; id: string; content: string }
   | { type: 'tool_start'; name: string; id: string; args: Record<string, unknown> }
+  /**
+   * 这一次调用已经执行完，但结果还要等排在它前面的调用按顺序落盘。
+   * 界面据此离开进行中；会话文件仍以随后的 tool_end 为准。
+   */
+  | { type: 'tool_settled'; name: string; id: string; ok: boolean; content: string }
   | { type: 'tool_end'; name: string; id: string; ok: boolean; content: string }
   | { type: 'ask'; id: string; tool: string; detail: string }
   /** cachedTokens 仅在端点上报缓存用量时出现；costUsd 仅在模型声明了单价时出现。 */

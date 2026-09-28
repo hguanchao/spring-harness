@@ -5,7 +5,7 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。edit / write 成功后，组一展开就在行下给出短 diff，双击再放长。
  *
- * 前缀按状态：折叠 `▸`、展开 `▾`、失败 `×`，箭头与行文同色（muted）；进行中的标题带 shimmer。
+ * 前缀按状态：进行中 `▸`、完成 `·`、展开 `▾`、失败 `×`；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  * 展开后的详情块整块挂在一条竖轨（`│`）上：轨与标题前缀同列，内容对齐详情缩进，
  * 和 Claude Code / Codex 的工具输出同款——详情看一眼就知道属于上面的哪一行。
@@ -14,7 +14,7 @@
 import { Container, MouseRegion, Text, truncateToWidth, type TUI, visibleWidth, wrapTextWithAnsi } from '../../../tui/index.js';
 import { flattenWhitespace } from '../../../util.js';
 import { theme, type ThemeColor } from '../theme/theme.js';
-import { DoubleClickTracker } from './interaction.js';
+import { DoubleClickTracker, failureHeadline, WorkingLabel } from './interaction.js';
 import { armHoverHighlight } from './hover-highlight.js';
 import { handleSelectablePress, SELECTABLE_ROW } from './selectable-row.js';
 import { subagentTranscriptText, type SubagentHeadParts } from './subagent-task.js';
@@ -27,10 +27,14 @@ import {
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
-/** 组 / 成员 / 思考 共用的状态前缀：`▸` 折叠 / `▾` 展开（同区块同尺度的实心三角对），随行文同色；失败仍用 `×`。 */
+/**
+ * 组头仍用 `▸` / `▾`。成员行完成之后换成 `·`：和还在跑的 `▸` 分开，不再看起来像进行中。
+ * 失败仍用 `×`。
+ */
 export const TOOL_MARK = {
   running: '▸',
   done: '▸',
+  settled: '·',
   expanded: '▾',
   fail: '×',
 } as const;
@@ -39,7 +43,7 @@ export function toolMark(status: ToolStatus, expanded = false): string {
   if (status === 'error') return TOOL_MARK.fail;
   if (expanded) return TOOL_MARK.expanded;
   if (status === 'pending' || status === 'running') return TOOL_MARK.running;
-  return TOOL_MARK.done;
+  return TOOL_MARK.settled;
 }
 
 /** 汇总行左缘，与助手正文 paddingLeft=3 对齐。 */
@@ -329,6 +333,17 @@ export class ToolExecutionComponent extends Container {
     return toolDisplayName(this.toolName);
   }
 
+  /** 状态行在这条还在执行时显示的文案。子代理不叫 Task，避免和普通工具抢同一句。 */
+  runningLabel(): string {
+    if (this.subagentMeta) {
+      return WorkingLabel.running('Subagent', `${this.subagentMeta.index} ${this.subagentMeta.description}`);
+    }
+    if (this.toolName === 'task' || this.toolName === 'subagent') {
+      return WorkingLabel.running('Subagent', summarizeArgs(this.toolName, this.args));
+    }
+    return WorkingLabel.running(this.displayName(), summarizeArgs(this.toolName, this.args));
+  }
+
   /** 原始工具 ID（read_file / grep…）：汇总行按它归动词，显示名（Read / Grep）会丢信息。 */
   rawName(): string {
     return this.toolName;
@@ -466,9 +481,13 @@ export class ToolExecutionComponent extends Container {
     // subagent 行首用「序号 + 类型 + 简短描述」，与 dock 里的实时行同一文案；
     // 其余工具保持「显示名 + 参数摘要」；List 额外带 entry 计数。
     const name = this.displayName();
-    const title = this.subagentMeta
+    const base = this.subagentMeta
       ? subagentTranscriptText(this.subagentMeta)
       : `${name}${summary ? ` ${summary}` : ''}${this.listEntrySuffix()}`;
+    // 失败时第一眼是人话。原文留在展开后的详情里，不铺在标题上。
+    const title = status === 'error' && this.result
+      ? `${base} · ${failureHeadline(this.result.content)}`
+      : base;
     const change = this.fileChange();
     const activitySuffix = this.activity
       ? this.activity.error

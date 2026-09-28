@@ -7,9 +7,9 @@
  *
  * 三条设计约束：
  *
- * 1. **外部文件只读。** 别人的配置文件一概不写。启停状态存在 sph
- *    自己的配置里（`[mcp] disabled_servers`）——写别人的配置会带来意料之外的副作用，
- *    而「读了却不改」也让整个发现过程可随时撤销。
+ * 1. **外部文件只读。** 别人的配置文件一概不写。要关掉别人声明的 server，就在 sph 自己的
+ *    `[mcp_servers.<name>]` 里写一条 `disabled = true`——同名条目整条替换、sph 的优先级最高，
+ *    这条标记天然盖住任何来源；写别人的配置则会带来意料之外的副作用。
  * 2. **坏条目降级为警告，不炸启动。** 外部来源尤其如此：别人的配置文件格式演进不该让
  *    sph 起不来。只有 sph 自己的用户级配置仍走 `config/load.ts` 的严格校验。
  * 3. **发现 ≠ 已连上。** 坏 URL、未知 transport、被禁用的条目都会出现在结果里并被如实标注。把
@@ -70,12 +70,15 @@ export interface DiscoveredMcpServer {
   callTimeoutMs?: number;
   /** 表内 `name`。与表头 ID 相同时不记。 */
   title?: string;
-  /** **来源声明**的启用态（叠加本地偏好之前）。 */
-  sourceEnabled: boolean;
-  /** 叠加本地偏好之后最终生效的启用态。 */
+  /** 启用态。`disabled = true`（或 `enabled = false`）折算成 false，缺省为 true。 */
   enabled: boolean;
-  /** 来自 `[mcp] lazy_servers` 偏好：首次使用才连接。 */
-  lazy: boolean;
+  /**
+   * 这条定义本身只有启停、没有 command / url。
+   *
+   * 同名整条替换时它盖住低优先级来源；启用方向还要把被盖住的那份命令找回来，
+   * 否则「重新打开别人声明的 server」会变成一条没有命令的空定义。
+   */
+  marker?: boolean;
   kind: McpSourceKind;
   /** 项目级来源落地的工作区根；用户级为 undefined。 */
   projectRoot?: string;
@@ -102,14 +105,6 @@ export interface McpDiscovery {
   warnings: string[];
 }
 
-/** 本地启停偏好：写在 sph 用户级配置的 `[mcp]` 段里，叠加在来源的 enabled 之上。 */
-export interface McpPreferences {
-  disabledServers: string[];
-  enabledServers: string[];
-  /** 首次使用才连接的 server（如重型的 npx server）；对任意来源生效，默认全部立即连。 */
-  lazyServers: string[];
-}
-
 export interface DiscoverOptions {
   workspaceRoot: string;
   /** 宿主事实与策略。路径规范化、状态目录、信任判定都取自它，插件不自带一份。 */
@@ -122,8 +117,6 @@ export interface DiscoverOptions {
   env?: NodeJS.ProcessEnv;
   /** 工作区是否已信任。省略查 config.toml；false 时项目级来源一律丢弃。 */
   trusted?: boolean;
-  /** 本地启停偏好，取自 sph 用户级配置。 */
-  preferences?: McpPreferences;
 }
 
 export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
@@ -135,22 +128,35 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
   const home = options.home ?? homedir();
   const env = options.env ?? process.env;
   const trusted = options.trusted ?? options.host.isWorkspaceTrusted(options.workspaceRoot);
-  const preferences = options.preferences ?? { disabledServers: [], enabledServers: [], lazyServers: [] };
 
   const reports: McpSourceReport[] = [];
   const warnings: string[] = [];
   // 低优先级先进，高优先级覆盖：`set` 覆盖语义天然实现「同名高者胜」。
-  const merged = new Map<string, MergedServer>();
+  const merged = new Map<string, DiscoveredMcpServer>();
   /** 项目级来源声明过的**全部**名字，含输给高优先级的那些。信任门按它过滤。 */
   const projectDeclared = new Set<string>();
 
   const chain = chainDirs(workspaceRoot, fromDir, options.host);
   const projectBlocked = !trusted;
 
-  const put = (spec: MergedServer): void => {
+  const put = (spec: DiscoveredMcpServer): void => {
     if (PROJECT_SCOPED.has(spec.kind)) projectDeclared.add(spec.name);
     // 未信任的工作区：项目级来源整个不参与合并。
     if (projectBlocked && PROJECT_SCOPED.has(spec.kind)) return;
+    const previous = merged.get(spec.name);
+    // 关掉仍是整条替换（一条 disabled = true 盖住低优先级定义）。重新打开则相反：
+    // `disabled = false` 自己没有 command，得把被盖住的那份命令找回来，否则启用
+    // 写进去了也连不上。
+    if (spec.marker === true && spec.enabled && previous !== undefined && previous.marker !== true) {
+      merged.set(spec.name, {
+        ...previous,
+        enabled: spec.enabled,
+        kind: spec.kind,
+        origin: spec.origin,
+        ...(spec.projectRoot === undefined ? {} : { projectRoot: spec.projectRoot }),
+      });
+      return;
+    }
     merged.set(spec.name, spec);
   };
 
@@ -279,21 +285,11 @@ export function discoverMcpServers(options: DiscoverOptions): McpDiscovery {
     );
   }
 
-  // ── 6. 本地启停偏好：最后叠加，能覆盖任何来源的 enabled ─────────────────
+  // ── 6. 生效态 ─────────────────────────────────────────────────────────
   //
-  // 两个字段都要留下：`sourceEnabled` 是来源自己声明的，`enabled` 是最终生效的。
-  // 弹窗里切换开关时要知道「关掉它」是写进 disabled_servers 还是 enabled_servers——
-  // 只留一个最终值就只能猜，猜错就会在另一个列表里留下一条过期的强制项。
-  // lazy 同理来自本地偏好：外部来源没有这个概念，只能由 sph 自己记。
-  const disabled = new Set(preferences.disabledServers);
-  const enabled = new Set(preferences.enabledServers);
-  const lazy = new Set(preferences.lazyServers);
-  const servers = Array.from(merged.values(), (spec) => ({
-    ...spec,
-    lazy: lazy.has(spec.name),
-    sourceEnabled: spec.enabled,
-    enabled: enabled.has(spec.name) ? true : disabled.has(spec.name) ? false : spec.enabled,
-  }));
+  // 启用态就是各来源自己声明的那一份，没有叠加层：sph 想把别人声明的 server 关掉，写一条
+  // 同名的 `[mcp_servers.<name>] disabled = true` 即可——同名整条替换，覆盖在合并里已经发生。
+  const servers = Array.from(merged.values());
 
   return { servers, reports, warnings };
 }
@@ -344,9 +340,6 @@ function originOf(label: string, path: string, editable: boolean): McpOrigin {
   return { label, path, editable };
 }
 
-/** 合并过程中的形态：`sourceEnabled` / `enabled` 分化与 `lazy` 要等偏好叠加后才补上。 */
-type MergedServer = Omit<DiscoveredMcpServer, 'sourceEnabled' | 'lazy'>;
-
 /** 一条从某个文件读条目的通道。同一份文件可能被读两次（如 `.claude.json` 的两节）。 */
 function readLayer(input: {
   label: string;
@@ -355,8 +348,8 @@ function readLayer(input: {
   warnings: string[];
   skipped?: string;
   read: (path: string, text: string) => Map<string, RawEntry>;
-  toSpec: (name: string, entry: RawEntry, path: string) => MergedServer;
-  put: (spec: MergedServer) => void;
+  toSpec: (name: string, entry: RawEntry, path: string) => DiscoveredMcpServer;
+  put: (spec: DiscoveredMcpServer) => void;
 }): void {
   if (input.skipped !== undefined) {
     for (const path of input.paths) {
@@ -403,10 +396,7 @@ function readLayer(input: {
   }
 }
 
-type RawEntry = Omit<
-  DiscoveredMcpServer,
-  'name' | 'kind' | 'origin' | 'projectRoot' | 'sourceEnabled' | 'lazy'
->;
+type RawEntry = Omit<DiscoveredMcpServer, 'name' | 'kind' | 'origin' | 'projectRoot'>;
 
 /**
  * `[mcp_servers.<name>]`。名字在表头上，不在 `name` 字段里。表内 `name` 只是显示名。
@@ -435,7 +425,10 @@ function tomlMcpTable(
     }
     const command = nonEmptyString(value.command);
     const url = nonEmptyString(value.url);
-    if (command === undefined && url === undefined) {
+    const enabled = enabledOf(value);
+    // 没有命令也没有 url 时，只有明确写了启停的条目有意义：`disabled = true` 盖住低优先级，
+    // `disabled = false` 则是把别人关掉的 server 重新打开。两者都没写就是漏了字段。
+    if (command === undefined && url === undefined && !hasEnableToggle(value)) {
       warnings.push(`${path}: mcp_servers.${name} needs a command or a url`);
       continue;
     }
@@ -452,7 +445,8 @@ function tomlMcpTable(
       ...remoteFields(value, `${path}: mcp_servers.${name}`, warnings),
       ...callTimeoutField(value.call_timeout_ms, `${path}: mcp_servers.${name}`, warnings),
       ...displayTitle(value.name, name),
-      enabled: value.enabled === undefined ? true : value.enabled === true,
+      enabled,
+      ...(command === undefined && url === undefined ? { marker: true } : {}),
     });
   }
   return out;
@@ -506,7 +500,9 @@ function normalizeJsonServers(value: unknown, where: string, warnings: string[])
     }
     const command = nonEmptyString(raw.command);
     const url = nonEmptyString(raw.url);
-    if (command === undefined && url === undefined) {
+    const enabled = enabledOf(raw);
+    // 与 TOML 同一条：没有命令时只有明确的启停标记有意义，其余是写漏了字段。
+    if (command === undefined && url === undefined && !hasEnableToggle(raw)) {
       warnings.push(`${where}: mcpServers.${name} needs a command or a url`);
       continue;
     }
@@ -519,11 +515,25 @@ function normalizeJsonServers(value: unknown, where: string, warnings: string[])
       ...remoteFields(raw, `${where}: mcpServers.${name}`, warnings),
       ...callTimeoutField(raw.call_timeout_ms, `${where}: mcpServers.${name}`, warnings),
       ...displayTitle(raw.name, name),
-      // 两种外部字段都认：`disabled: true` 与 `enabled: false`。
-      enabled: raw.disabled === true ? false : raw.enabled === undefined ? true : raw.enabled === true,
+      enabled,
+      // 只有启停、没有命令：高优先级的启用标记才能把这份 command 找回来。
+      ...(command === undefined && url === undefined ? { marker: true } : {}),
     });
   }
   return out;
+}
+
+/**
+ * 启用态：`disabled = true` 是主写法，`enabled = false` 是等价别名（外部工具两种都有人写）。
+ * 缺省启用——一条命令声明出来就是要用的，要关掉得明说。
+ */
+function enabledOf(row: Record<string, unknown>): boolean {
+  return row.disabled !== true && row.enabled !== false;
+}
+
+/** 这条空定义是不是在声明启停，而不是漏写了 command。 */
+function hasEnableToggle(row: Record<string, unknown>): boolean {
+  return typeof row.disabled === 'boolean' || typeof row.enabled === 'boolean';
 }
 
 function asRecord(value: unknown, path: string): Record<string, unknown> {

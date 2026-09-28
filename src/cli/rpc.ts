@@ -6,13 +6,14 @@ import { createInterface } from 'node:readline';
 import { HeadlessApprover } from '../permission/policy.js';
 import { createJsonOutput } from './output.js';
 import type { Runtime } from './bootstrap.js';
+import type { ApprovalMode } from '../permission/policy.js';
 import { isRecord } from '../util.js';
 
 export async function runRpcLoop(runtime: Runtime, options: {
   model: string;
   api: Runtime['config']['api'];
   effort?: Runtime['config']['reasoningEffort'];
-  approval: 'ask' | 'auto' | 'yolo';
+  approval: ApprovalMode;
 }): Promise<void> {
   const { session, sandbox, todos, jobs, config } = runtime;
   const client = runtime.makeClient({
@@ -57,7 +58,14 @@ export async function runRpcLoop(runtime: Runtime, options: {
         tools: runtime.tools,
         sessions: runtime.sessions,
         sandbox,
-        approver: new HeadlessApprover(options.approval, undefined, config.permissions),
+        approver: new HeadlessApprover(options.approval, undefined, {
+          layers: runtime.permission.layers(),
+          ruleEnv: runtime.permission.ruleEnv,
+          sandboxMode: () => config.sandbox,
+          sandboxAutoAllow: () => config.sandboxAutoAllow,
+        }),
+        rules: runtime.permission.layers(),
+        ruleEnv: runtime.permission.ruleEnv,
         contextWindow: config.contextWindow,
         listener: output.listener,
         signal: abort.signal,

@@ -44,6 +44,9 @@ export function subagentTranscriptText(parts: SubagentHeadParts): string {
 
 function formatTokens(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens <= 0) return '';
+  // 100 万以上进 M。只除以 1000 时，1_000_000 会显示成 1000.0K。
+  if (tokens >= 10_000_000) return `${Math.round(tokens / 1_000_000)}M`;
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : `${Math.round(tokens)}`;
 }
 

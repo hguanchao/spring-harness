@@ -1,20 +1,27 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { InteractiveApprover, type ApprovalUi } from '../../src/plugins/sph-tui/permission.js';
+import { InteractiveApprover, type ApprovalChoice, type ApprovalUi } from '../../src/plugins/sph-tui/permission.js';
 import type { ApprovalMode, ApprovalRequest } from '../../src/permission/policy.js';
 import type { GrantStore } from '../../src/permission/store.js';
 
 /** 记录每次弹窗；answers 依次决定用户的选择，用尽后一律拒绝。 */
-function fakeUi(mode: ApprovalMode, answers: boolean[] = []): ApprovalUi & { asked: ApprovalRequest[] } {
+function fakeUi(
+  mode: ApprovalMode,
+  answers: ApprovalChoice[] = [],
+): ApprovalUi & { asked: ApprovalRequest[]; rules: (string | undefined)[] } {
   const asked: ApprovalRequest[] = [];
+  const rules: (string | undefined)[] = [];
   return {
     asked,
+    rules,
     approvalMode: () => mode,
-    requestApproval: async (request) => {
+    requestApproval: async (request, _note, suggestedRule) => {
       asked.push(request);
-      return answers.shift() ?? false;
+      rules.push(suggestedRule);
+      return answers.shift() ?? 'deny';
     },
     requestAnswer: async () => '',
+    sandbox: () => ({ mode: 'off', autoAllow: false }),
   };
 }
 
@@ -23,16 +30,18 @@ function fakeStore(initial: string[] = []): GrantStore {
   const keys = new Set(initial);
   return {
     scope: '/ws',
+    path: '/ws/.sph/permissions.json',
     load: () => [...keys],
     add: (key: string) => {
       keys.add(key);
     },
+    warning: () => undefined,
   };
 }
 
 describe('InteractiveApprover 的会话内授权粒度', () => {
   it('对一条命令选「总是允许」，不连带放行同一工具的其他命令', async () => {
-    const ui = fakeUi('ask', [true]);
+    const ui = fakeUi('ask', ['project']);
     const approver = new InteractiveApprover(ui);
 
     // 用户批准了 npm test 并选了「总是允许」。
@@ -50,7 +59,7 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
   });
 
   it('escalate 的「总是允许」真的生效（此前记了却从不查询）', async () => {
-    const ui = fakeUi('ask', [true]);
+    const ui = fakeUi('ask', ['project']);
     const approver = new InteractiveApprover(ui);
 
     assert.equal(await approver.decide({ tool: 'escalate', path: '/ws/a.txt' }), true);
@@ -63,7 +72,7 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
   });
 
   it('auto 档审查器否决时升级到人审，不静默放行也不静默拒绝', async () => {
-    const ui = fakeUi('auto', [true]);
+    const ui = fakeUi('auto', ['once']);
     const approver = new InteractiveApprover(ui, async () => ({ allowed: false, reason: 'looks destructive' }));
 
     assert.equal(await approver.decide({ tool: 'bash', command: 'rm -rf /' }), true);
@@ -76,6 +85,16 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
 
     assert.equal(await approver.decide({ tool: 'bash', command: 'rm -rf /' }), true);
     assert.equal(await approver.decide({ tool: 'read', path: '/ws/a.txt' }), true);
+    assert.equal(ui.asked.length, 0);
+  });
+
+  it('只读 shell 命令在所有模式下免问；要拦就写 deny 规则', async () => {
+    const ui = fakeUi('ask');
+    const approver = new InteractiveApprover(ui, undefined, undefined, {
+      layers: { user: { rules: { allow: [], ask: [], deny: ['bash(git status)'] }, sourceDir: '/home/u/.sph' } },
+    });
+    assert.equal(await approver.decide({ tool: 'bash', command: 'git status' }), false);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'ls -la' }), true);
     assert.equal(ui.asked.length, 0);
   });
 
@@ -115,14 +134,12 @@ describe('InteractiveApprover 的会话内授权粒度', () => {
   });
 });
 
-describe('InteractiveApprover 与 [permissions] 规则', () => {
+describe('InteractiveApprover 与分层规则', () => {
   it('deny 是硬边界：压过 yolo，也压过已批准的授权，且不弹窗', async () => {
     const ui = fakeUi('yolo');
     const grants = fakeStore();
     const approver = new InteractiveApprover(ui, undefined, grants, {
-      allow: [],
-      ask: [],
-      deny: ['bash:rm -rf*'],
+      layers: { user: { rules: { allow: [], ask: [], deny: ['bash(rm -rf*)'] }, sourceDir: '/home/u/.sph' } },
     });
     approver.allowForProject({ tool: 'bash', command: 'rm -rf /' });
 
@@ -130,12 +147,22 @@ describe('InteractiveApprover 与 [permissions] 规则', () => {
     assert.equal(ui.asked.length, 0, '硬边界不该弹窗征求同意——没有「再问一次」这个选项');
   });
 
-  it('ask 规则在 yolo 下仍然强制弹窗', async () => {
-    const ui = fakeUi('yolo', [true]);
+  it('项目级 deny 压得住用户级 allow', async () => {
+    const ui = fakeUi('ask');
     const approver = new InteractiveApprover(ui, undefined, undefined, {
-      allow: [],
-      ask: ['bash:git push*'],
-      deny: [],
+      layers: {
+        user: { rules: { allow: ['bash(npm *)'], ask: [], deny: [] }, sourceDir: '/home/u/.sph' },
+        project: { rules: { allow: [], ask: [], deny: ['bash(npm publish *)'] }, sourceDir: '/ws' },
+      },
+    });
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm publish --tag next' }), false);
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm test' }), true);
+  });
+
+  it('ask 规则在 yolo 下仍然强制弹窗', async () => {
+    const ui = fakeUi('yolo', ['once']);
+    const approver = new InteractiveApprover(ui, undefined, undefined, {
+      layers: { user: { rules: { allow: [], ask: ['bash(git push *)'], deny: [] }, sourceDir: '/home/u/.sph' } },
     });
     assert.equal(await approver.decide({ tool: 'bash', command: 'git push origin main' }), true);
     assert.equal(ui.asked.length, 1, '用户明确写了「这个必须先问我」，比一次模式切换更具体');
@@ -144,11 +171,61 @@ describe('InteractiveApprover 与 [permissions] 规则', () => {
   it('allow 规则直接放行，不问也不看模式', async () => {
     const ui = fakeUi('ask');
     const approver = new InteractiveApprover(ui, undefined, undefined, {
-      allow: ['bash:npm test'],
-      ask: [],
-      deny: [],
+      layers: { user: { rules: { allow: ['bash(npm test)'], ask: [], deny: [] }, sourceDir: '/home/u/.sph' } },
     });
     assert.equal(await approver.decide({ tool: 'bash', command: 'npm test' }), true);
     assert.equal(ui.asked.length, 0);
+  });
+
+});
+
+describe('「提升为规则」的三级授权', () => {
+  it('选 rule 时把建议规则写进项目级配置，同类动作下次免问', async () => {
+    const ui = fakeUi('ask', ['rule']);
+    const written: string[] = [];
+    // 与真实装配一致：写回器落盘的同时要更新内存里的分层（见 createPermissionRuntime）。
+    const project = { rules: { allow: [] as string[], ask: [] as string[], deny: [] as string[] }, sourceDir: '/ws' };
+    const approver = new InteractiveApprover(
+      ui,
+      undefined,
+      undefined,
+      {
+        layers: {
+          user: { rules: { allow: [], ask: [], deny: [] }, sourceDir: '/home/u/.sph' },
+          project,
+        },
+      },
+      (rule) => {
+        written.push(rule);
+        project.rules.allow.push(rule);
+        return { path: '/ws/.sph/config.toml', added: true };
+      },
+    );
+
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm run build' }), true);
+    assert.deepEqual(written, ['bash(npm run *)'], '写的是提议的规则，不是这条命令');
+    assert.equal(await approver.decide({ tool: 'bash', command: 'npm run lint' }), true, '同类动作被规则罩住');
+    assert.equal(ui.asked.length, 1, '第二次不该再问');
+  });
+
+  it('弹窗会带上建议规则；破坏性命令不给建议', async () => {
+    const ui = fakeUi('ask', ['once', 'once']);
+    const written: string[] = [];
+    const approver = new InteractiveApprover(ui, undefined, undefined, {}, (rule) => {
+      written.push(rule);
+      return { path: '/ws/.sph/config.toml', added: true };
+    });
+    await approver.decide({ tool: 'bash', command: 'npm run build' });
+    assert.equal(ui.rules[0], 'bash(npm run *)');
+    await approver.decide({ tool: 'bash', command: 'rm -rf build' });
+    assert.equal(ui.rules[1], undefined, 'rm 不提议规则');
+    assert.deepEqual(written, [], '选 once 不写规则');
+  });
+
+  it('没接规则写回器时（headless / 单测）不给这一项', async () => {
+    const ui = fakeUi('ask', ['once']);
+    const approver = new InteractiveApprover(ui);
+    await approver.decide({ tool: 'bash', command: 'npm run build' });
+    assert.equal(ui.rules[0], undefined);
   });
 });

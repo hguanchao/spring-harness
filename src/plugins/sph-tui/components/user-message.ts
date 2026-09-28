@@ -4,6 +4,7 @@
 
 import {
   BLOCK_GAP,
+  SELECTION_BLOCK,
   Box,
   Container,
   Markdown,
@@ -16,6 +17,13 @@ import {
 import { truncateToWidth, visibleWidth, wrapOsc133Zones } from '../../../tui/utils.js';
 import { getMarkdownTheme, theme } from '../theme/theme.js';
 import { STICKY_USER_MESSAGE } from './sticky-user-message.js';
+
+/** 吸顶行铺满宽度并带上气泡底色，盖住下面还露着的消息尾巴。 */
+function padStickyLine(line: string, width: number): string {
+  const missing = width - visibleWidth(line);
+  if (missing <= 0) return line;
+  return line + theme.bg('userMessageBg', ' '.repeat(missing));
+}
 
 /** 左边框占用 1 列，把宽度和鼠标 x 交给内层时扣掉。 */
 class LeftRuleBox implements Component {
@@ -43,6 +51,7 @@ class LeftRuleBox implements Component {
 }
 
 export class UserMessageComponent extends Container {
+  readonly [SELECTION_BLOCK] = true;
   readonly [STICKY_USER_MESSAGE] = true as const;
   private readonly markdown: Markdown;
 
@@ -54,7 +63,7 @@ export class UserMessageComponent extends Container {
     const contentBox = new Box(outputPad, 1, (content: string) => theme.bg('userMessageBg', content));
     contentBox.addChild(this.markdown);
     this.addChild(new Spacer(BLOCK_GAP));
-    this.addChild(new LeftRuleBox(contentBox, (ch) => theme.fg('primary', ch)));
+    this.addChild(new LeftRuleBox(contentBox, (ch) => theme.bg('userMessageBg', theme.fg('primary', ch))));
   }
 
   setText(text: string): void {
@@ -65,13 +74,15 @@ export class UserMessageComponent extends Container {
    * 吸顶只钉气泡，不带块前的 BLOCK_GAP。
    * `maxHeight` 小于全文时按 Box 的上下 pad 截正文，末行加省略号——钉的是提示开头。
    */
-  renderSticky(width: number, maxHeight?: number): string[] {
+  renderSticky(width: number, maxHeight?: number, ellipsis = true): string[] {
     const bubble = this.children[this.children.length - 1];
     if (!bubble) return [];
-    const lines = bubble.render(width);
+    const lines = bubble.render(width).map((line) => padStickyLine(line, width));
     if (maxHeight === undefined || lines.length <= maxHeight) return lines;
     const height = Math.max(0, Math.floor(maxHeight));
     if (height === 0) return [];
+    // 收缩途中按行切掉底部。每矮一行都重写省略号，字会跳而不是滑走。
+    if (!ellipsis) return lines.slice(0, height);
 
     // LeftRuleBox > Box(paddingY=1)：首/末行是灰底 pad，中间才是正文。
     const pad = 1;

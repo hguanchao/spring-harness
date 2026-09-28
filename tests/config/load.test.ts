@@ -3,7 +3,7 @@ import { after, describe, it } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConfigError, loadConfig } from '../../src/config/load.js';
+import { loadConfig } from '../../src/config/load.js';
 
 const dirs: string[] = [];
 
@@ -62,15 +62,14 @@ describe('沙箱默认', () => {
 });
 
 describe('启动校验', () => {
-  it('缺 provider 拒绝启动', () => {
+  it('缺 provider 时改用 models.json 里的第一份声明，并记下警告', () => {
     const dir = tempDir();
     writeFileSync(join(dir, 'models.json'), JSON.stringify(MINIMAL_REGISTRY), 'utf8');
-    // 文件存在但没写 provider 指针：字段级校验的报错。
     writeFileSync(join(dir, 'config.toml'), '', 'utf8');
-    assert.throws(
-      () => loadConfig({ configPath: join(dir, 'config.toml'), registryPath: join(dir, 'models.json'), env: {} }),
-      /provider must be a non-empty string/,
-    );
+    const config = loadConfig({ configPath: join(dir, 'config.toml'), registryPath: join(dir, 'models.json'), env: {} });
+    assert.equal(config.provider, 'main');
+    assert.equal(config.model, 'm');
+    assert.ok(config.startupWarnings.some((line) => /provider is not set/.test(line)));
   });
 
   it('config.toml 缺失时报错带路径与指路', () => {
@@ -83,20 +82,19 @@ describe('启动校验', () => {
     );
   });
 
-  it('指向不存在的 provider 时列出可选名字', () => {
-    const { registryPath, configPath } = setup({}, 'provider = "nope"');
-    assert.throws(
-      () => loadConfig({ configPath, registryPath, env: {} }),
-      /unknown provider "nope"[\s\S]*models.json has: main/,
-    );
+  it('指向不存在的 provider 时改用已声明的那份，警告里列出可选名字', () => {
+    const { registryPath, configPath } = setup({}, 'provider = "nope"\nmodel = "gpt-x"');
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.provider, 'main');
+    assert.equal(config.model, 'm', '换了 provider 之后，原来的模型 id 也不再沿用');
+    assert.ok(config.startupWarnings.some((line) => /unknown provider "nope"/.test(line) && /models.json has: main/.test(line)));
   });
 
-  it('provider 既没有 apiKey 也没有 headers 时拒绝启动', () => {
+  it('provider 既没有 apiKey 也没有 headers 时仍然启动，并警告', () => {
     const { registryPath, configPath } = setup({ apiKey: '' });
-    assert.throws(
-      () => loadConfig({ configPath, registryPath, env: {} }),
-      /no apiKey and no headers/,
-    );
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.provider, 'main');
+    assert.ok(config.startupWarnings.some((line) => /no apiKey and no headers/.test(line)));
   });
 
   it('显式空 apiKey 配上 headers 可以启动（免鉴权网关）', () => {
@@ -133,7 +131,7 @@ describe('启动校验', () => {
     assert.equal(server?.title, 'Tavily');
   });
 
-  it('call_timeout_ms 收进 server 配置；非法值拒绝启动', () => {
+  it('call_timeout_ms 收进 server 配置；非法值忽略这一项，server 仍在', () => {
     const { registryPath, configPath } = setup(
       {},
       '[mcp_servers.browser]\ntype = "stdio"\ncommand = "npx"\ncall_timeout_ms = 120_000',
@@ -142,18 +140,17 @@ describe('启动校验', () => {
     assert.equal(server?.callTimeoutMs, 120_000);
 
     const bad = setup({}, '[mcp_servers.browser]\ntype = "stdio"\ncommand = "npx"\ncall_timeout_ms = -1');
-    assert.throws(
-      () => loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} }),
-      /call_timeout_ms must be a positive number/,
-    );
+    const config = loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} });
+    assert.equal(config.mcpServers[0]?.name, 'browser');
+    assert.equal(config.mcpServers[0]?.callTimeoutMs, undefined);
+    assert.ok(config.startupWarnings.some((line) => /call_timeout_ms/.test(line)));
   });
 
-  it('数组形态的 mcp_servers 拒绝启动', () => {
+  it('数组形态的 mcp_servers 整段丢掉，其余配置照常生效', () => {
     const { registryPath, configPath } = setup({}, '[[mcp_servers]]\nname = "remote"\nurl = "https://example.com/mcp"');
-    assert.throws(
-      () => loadConfig({ configPath, registryPath, env: {} }),
-      /mcp_servers must be a table of tables/,
-    );
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.deepEqual(config.mcpServers, []);
+    assert.ok(config.startupWarnings.some((line) => /mcp_servers/.test(line)));
   });
 
   it('端点字段来自 provider 声明，而不是 config.toml', () => {
@@ -195,17 +192,25 @@ describe('[permissions] 规则与 subagent_approval', () => {
     const config = loadConfig({ configPath, registryPath, env: {} });
     assert.deepEqual(config.permissions, { allow: [], ask: [], deny: [] });
     assert.equal(config.subagentApproval, 'inherit');
+    assert.deepEqual(config.startupWarnings, []);
   });
 
-  it('三张表原样读入，条目去掉首尾空白', () => {
+  it('三张表原样读入，条目去掉首尾空白，语法非法拒绝启动', () => {
     const { registryPath, configPath } = setup(
       {},
-      '[permissions]\nallow = [" bash:npm test "]\nask = ["bash:git push*"]\ndeny = ["bash:rm -rf*"]',
+      '[permissions]\nallow = [" bash(npm test) "]\nask = ["bash(git push*)"]\ndeny = ["bash(rm -rf*)"]',
     );
     const config = loadConfig({ configPath, registryPath, env: {} });
-    assert.deepEqual(config.permissions.allow, ['bash:npm test']);
-    assert.deepEqual(config.permissions.ask, ['bash:git push*']);
-    assert.deepEqual(config.permissions.deny, ['bash:rm -rf*']);
+    assert.deepEqual(config.permissions.allow, ['bash(npm test)']);
+    assert.deepEqual(config.permissions.ask, ['bash(git push*)']);
+    assert.deepEqual(config.permissions.deny, ['bash(rm -rf*)']);
+
+    // 旧写法 `tool:pattern` 已移除：写错语法必须启动就报错，不留静默失效的规则。
+    const old = setup({}, '[permissions]\nallow = ["bash:npm test"]');
+    assert.throws(
+      () => loadConfig({ configPath: old.configPath, registryPath: old.registryPath, env: {} }),
+      /removed "tool:pattern" syntax/,
+    );
   });
 
   it('未知键、非数组、空条目都拒绝启动', () => {
@@ -217,11 +222,13 @@ describe('[permissions] 规则与 subagent_approval', () => {
     assert.throws(() => loadConfig({ configPath: empty.configPath, registryPath: empty.registryPath, env: {} }), /non-empty string/);
   });
 
-  it('subagent_approval 只认 inherit / strict', () => {
+  it('subagent_approval 只认 inherit / strict，写错回退 inherit', () => {
     const { registryPath, configPath } = setup({}, 'subagent_approval = "strict"');
     assert.equal(loadConfig({ configPath, registryPath, env: {} }).subagentApproval, 'strict');
     const bad = setup({}, 'subagent_approval = "never"');
-    assert.throws(() => loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} }), /subagent_approval must be one of/);
+    const config = loadConfig({ configPath: bad.configPath, registryPath: bad.registryPath, env: {} });
+    assert.equal(config.subagentApproval, 'inherit');
+    assert.ok(config.startupWarnings.some((line) => /subagent_approval/.test(line)));
   });
 });
 
@@ -250,9 +257,16 @@ describe('[aux] 辅助端点', () => {
     assert.equal(config.aux?.provider, 'cheap');
   });
 
-  it('aux 不是表时报错', () => {
-    const { registryPath, configPath } = setup({}, 'aux = "x"');
-    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
+  it('aux 不是表、或指向未声明的 provider 时当没写', () => {
+    const malformed = setup({}, 'aux = "x"');
+    const dropped = loadConfig({ configPath: malformed.configPath, registryPath: malformed.registryPath, env: {} });
+    assert.equal(dropped.aux, undefined);
+    assert.ok(dropped.startupWarnings.some((line) => /aux /.test(line)));
+
+    const unknown = setup({}, '[aux]\nprovider = "missing"');
+    const config = loadConfig({ configPath: unknown.configPath, registryPath: unknown.registryPath, env: {} });
+    assert.equal(config.aux, undefined);
+    assert.ok(config.startupWarnings.some((line) => /aux\.provider/.test(line)));
   });
 });
 
@@ -267,9 +281,11 @@ describe('prompt_cache', () => {
     assert.equal(loadConfig({ configPath, registryPath, env: {} }).promptCache, false);
   });
 
-  it('非布尔值拒绝启动，而不是静默当成 true', () => {
+  it('非布尔值回退到默认开，并警告', () => {
     const { registryPath, configPath } = setup({}, 'prompt_cache = "yes"');
-    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.promptCache, true);
+    assert.ok(config.startupWarnings.some((line) => /prompt_cache/.test(line)));
   });
 });
 
@@ -284,9 +300,11 @@ describe('max_session_tokens', () => {
     assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxSessionTokens, 500_000);
   });
 
-  it('负数拒绝启动', () => {
+  it('负数回退到不限制', () => {
     const { registryPath, configPath } = setup({}, 'max_session_tokens = -1');
-    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.maxSessionTokens, 0);
+    assert.ok(config.startupWarnings.some((line) => /max_session_tokens/.test(line)));
   });
 });
 
@@ -301,10 +319,12 @@ describe('max_turns', () => {
     assert.equal(loadConfig({ configPath, registryPath, env: {} }).maxTurns, 32);
   });
 
-  it('0 与负数拒绝启动', () => {
+  it('0 与负数回退到不限制', () => {
     for (const line of ['max_turns = 0', 'max_turns = -1']) {
       const { registryPath, configPath } = setup({}, line);
-      assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
+      const config = loadConfig({ configPath, registryPath, env: {} });
+      assert.equal(config.maxTurns, undefined);
+      assert.ok(config.startupWarnings.some((warning) => /max_turns/.test(warning)));
     }
   });
 });
@@ -322,8 +342,10 @@ describe('max_retries', () => {
     assert.equal(loadConfig({ configPath: b.configPath, registryPath: b.registryPath, env: {} }).maxRetries, 0);
   });
 
-  it('负数拒绝启动', () => {
+  it('负数回退到默认 10', () => {
     const { registryPath, configPath } = setup({}, 'max_retries = -1');
-    assert.throws(() => loadConfig({ configPath, registryPath, env: {} }), ConfigError);
+    const config = loadConfig({ configPath, registryPath, env: {} });
+    assert.equal(config.maxRetries, 10);
+    assert.ok(config.startupWarnings.some((line) => /max_retries/.test(line)));
   });
 });

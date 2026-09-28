@@ -42,30 +42,30 @@ describe('computeStickyLayout', () => {
 
   it('gradual collapse just scrolled past', () => {
     const layout = computeStickyLayout(1, 24, makePrompts([[0, 8]]));
-    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 7, clipTop: 0 });
+    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 7, clipTop: 0, ellipsis: false });
     assert.equal(layout.pushed, undefined);
   });
 
   it('gradual collapse more scrolled', () => {
     const layout = computeStickyLayout(3, 24, makePrompts([[0, 8]]));
-    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 5, clipTop: 0 });
+    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 5, clipTop: 0, ellipsis: false });
   });
 
   it('gradual collapse reaches minimum', () => {
     const layout = computeStickyLayout(6, 24, makePrompts([[0, 8]]));
-    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 4, clipTop: 0 });
+    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 4, clipTop: 0, ellipsis: true });
   });
 
   it('gradual collapse stays at minimum', () => {
     const layout = computeStickyLayout(10, 24, makePrompts([[0, 8]]));
-    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 4, clipTop: 0 });
+    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 4, clipTop: 0, ellipsis: true });
   });
 
   it('min height clamped to full height', () => {
     const layout = computeStickyLayout(10, 24, [
       { index: 0, yVirtual: 0, fullHeight: 1, minHeight: 6, sticky: true },
     ]);
-    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 1, clipTop: 0 });
+    assert.deepEqual(layout.pinned, { index: 0, renderHeight: 1, clipTop: 0, ellipsis: true });
   });
 
   it('push effect', () => {
@@ -84,18 +84,16 @@ describe('computeStickyLayout', () => {
 
   it('next prompt becomes pinned', () => {
     const layout = computeStickyLayout(13, 24, makePrompts([[0, 8], [12, 8]]));
-    assert.deepEqual(layout.pinned, { index: 1, renderHeight: 7, clipTop: 0 });
+    assert.deepEqual(layout.pinned, { index: 1, renderHeight: 7, clipTop: 0, ellipsis: false });
   });
 
-  it('second prompt at viewport top clears the first sticky header', () => {
-    // 第二条刚好停在视口顶：nextNaiveRow=0，overlay 撤掉，内联气泡就是最新一条。
+  it('第二条刚好贴住视口顶时改钉它，中间不空一行', () => {
     const atTop = computeStickyLayout(40, 24, makePrompts([[0, 6], [40, 6]]));
-    assert.equal(atTop.pinned, undefined);
+    assert.deepEqual(atTop.pinned, { index: 1, renderHeight: 6, clipTop: 0, ellipsis: false });
     assert.equal(atTop.pushed, undefined);
 
-    // 再滚过 1 行，第二条才自己吸顶。
     const past = computeStickyLayout(41, 24, makePrompts([[0, 6], [40, 6]]));
-    assert.deepEqual(past.pinned, { index: 1, renderHeight: 5, clipTop: 0 });
+    assert.deepEqual(past.pinned, { index: 1, renderHeight: 5, clipTop: 0, ellipsis: false });
   });
 
   it('push uses header gap of 1', () => {

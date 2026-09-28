@@ -1,5 +1,5 @@
 import type { ScrollView } from "./scroll-view.js";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.js";
+import { type Component, CURSOR_MARKER, compositeTuiLine, SELECTION_BLOCK } from "./tui.js";
 import {
 	extractAnsiCode,
 	getActiveBackgroundAnsi,
@@ -506,56 +506,18 @@ export function contentPaintRight(box: LayoutBox): number {
 	return column === undefined ? clipRight : Math.min(clipRight, column);
 }
 
-function layoutRoot(box: LayoutBox): LayoutBox {
-	let current = box;
-	while (current.parent) current = current.parent;
-	return current;
-}
-
-function findLayoutBox(box: LayoutBox, component: Component): LayoutBox | undefined {
-	if (box.component === component) return box;
-	for (const child of box.children) {
-		const found = findLayoutBox(child, component);
-		if (found) return found;
-	}
-	return undefined;
-}
-
 function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
 
-	// 只画滑块、不画轨道：整格 █ 贴在右缘，比半块 ▐ 宽一截。颜色始终中性灰，不跟滚动状态变。
+	// 滑块只占 ScrollView 自己的最右一列。颜色由 scrollbarThumbStyle 决定，不改变列宽。
 	const glyph = "█";
 	const thumb = box.scrollView.scrollbarThumbStyle(glyph);
-	const viewBottom = geometry.trackTop + geometry.trackHeight;
+	const rowEnd = Math.min(geometry.trackTop + geometry.trackHeight, box.clip.y + box.clip.height, screen.length);
 
-	const paintRow = (row: number): void => {
-		if (row < 0 || row >= screen.length) return;
+	for (let row = Math.max(geometry.thumbTop, box.clip.y, 0); row < geometry.thumbTop + geometry.thumbHeight && row < rowEnd; row++) {
 		screen[row] = replaceScrollbarCell(screen[row] ?? "", geometry.column, totalWidth, thumb, true);
-	};
-
-	for (let offset = 0; offset < geometry.trackHeight; offset++) {
-		const row = geometry.trackTop + offset;
-		if (row < box.clip.y || row >= box.clip.y + box.clip.height) continue;
-		const isThumb = row >= geometry.thumbTop && row < geometry.thumbTop + geometry.thumbHeight;
-		if (isThumb) paintRow(row);
 	}
-
-	// scrollbarUntil：滑块在转录区底时，把 █ 接到 until 组件顶（对话框上沿）。
-	// 吸顶（pin-reserve）同样置底：跟底时滑块本来就在轨道底，空隙行接到输入框。
-	const until = box.scrollView.scrollbarUntil;
-	if (!until) return;
-	const untilBox = findLayoutBox(layoutRoot(box), until);
-	if (!untilBox || untilBox.rect.y <= viewBottom) return;
-	// 续接的前提是滑块「肉眼可见地」贴到了轨道底。若 clip 把轨道截短,可见滑块的
-	// 下缘够不到轨道底,这时续接会画出一截和滑块脱开的悬空段,看起来像第二条
-	// 滑块——此时宁可不断接。
-	const clipBottom = box.clip.y + box.clip.height;
-	const visibleTrackBottom = Math.min(viewBottom, clipBottom);
-	const visibleThumbBottom = Math.min(geometry.thumbTop + geometry.thumbHeight, clipBottom);
-	if (visibleThumbBottom < visibleTrackBottom) return;
-	for (let row = viewBottom; row < untilBox.rect.y; row++) paintRow(row);
 }
 
 function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
@@ -643,6 +605,34 @@ export function getLayoutBoxesAt(frame: LayoutFrame, x: number, y: number): Layo
 	visit(frame.root, 0);
 	result.sort((a, b) => b.box.layer - a.box.layer || b.depth - a.depth);
 	return result.map(({ box }) => box);
+}
+
+/**
+ * 指针所在的滚动内容块（用户消息、思考、助手回复各是一块）的内容行范围。
+ * 范围拖选停在这一块里，不把上一段和下一段一起划进去。
+ */
+export function selectionBlockRows(
+	frame: LayoutFrame,
+	scrollView: ScrollView,
+	y: number,
+): { start: number; end: number } | undefined {
+	const scrollBox = getScrollViewBox(frame, scrollView);
+	if (!scrollBox) return undefined;
+	const child = findSelectionBlock(scrollBox, y);
+	if (!child || child.rect.height <= 0) return undefined;
+	const start = scrollView.scrollTop + (child.rect.y - scrollBox.rect.y);
+	const end = start + child.rect.height - 1;
+	return { start: Math.max(0, start), end: Math.max(start, end) };
+}
+
+function findSelectionBlock(box: LayoutBox, y: number, best?: LayoutBox): LayoutBox | undefined {
+	let current = best;
+	const marked = (box.component as { [SELECTION_BLOCK]?: boolean })[SELECTION_BLOCK] === true;
+	if (marked && y >= box.rect.y && y < box.rect.y + box.rect.height) {
+		if (!current || box.rect.height <= current.rect.height) current = box;
+	}
+	for (const child of box.children) current = findSelectionBlock(child, y, current);
+	return current;
 }
 
 export function getScrollViewBox(frame: LayoutFrame, scrollView: ScrollView): LayoutBox | undefined {

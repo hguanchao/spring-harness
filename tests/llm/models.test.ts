@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { displayNameForModel, modelIdsFromCatalog } from '../../src/plugins/sph-llm/models.js';
+import { displayNameForModel, modelHeaderLabel, modelIdsFromCatalog } from '../../src/plugins/sph-llm/models.js';
+
+describe('modelHeaderLabel', () => {
+  it('声明了 name 时用名称，不用 id', () => {
+    assert.equal(
+      modelHeaderLabel([{ id: 'glm-5.3-flash', name: 'GLM 5.3 Flash' }], 'glm-5.3-flash'),
+      'GLM 5.3 Flash',
+    );
+  });
+
+  it('没声明 name 时从 id 推导展示名', () => {
+    assert.equal(modelHeaderLabel([{ id: 'glm-5.3-flash' }], 'glm-5.3-flash'), 'GLM 5.3 Flash');
+  });
+});
 
 describe('displayNameForModel', () => {
   it('连字符版本号收成点号', () => {

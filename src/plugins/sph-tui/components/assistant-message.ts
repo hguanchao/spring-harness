@@ -10,7 +10,7 @@
  * 多次增量在 render(width) 里合并成一次重建。
  */
 
-import { BLOCK_GAP, Container, Markdown, type MarkdownTheme, Spacer } from '../../../tui/index.js';
+import { BLOCK_GAP, Container, Markdown, type MarkdownTheme, SELECTION_BLOCK, Spacer } from '../../../tui/index.js';
 import { wrapOsc133Zones } from '../../../tui/utils.js';
 import { getMarkdownTheme, theme } from '../theme/theme.js';
 
@@ -18,6 +18,7 @@ import { getMarkdownTheme, theme } from '../theme/theme.js';
 const DEFAULT_OUTPUT_PAD = 3;
 
 export class AssistantMessageComponent extends Container {
+  readonly [SELECTION_BLOCK] = true;
   private readonly contentContainer: Container;
   private readonly markdownTheme: MarkdownTheme;
   private readonly outputPad: number;
