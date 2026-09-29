@@ -58,7 +58,7 @@ export function renderSkillsReport(input: {
   const lines: string[] = [];
 
   const total = catalog.length;
-  const listHeading = `### Skills (${total})`;
+  const listHeading = `### Skills ${total}`;
   if (total === 0) {
     lines.push(
       'No skills found. A skill is a directory holding `SKILL.md` with `name` and',

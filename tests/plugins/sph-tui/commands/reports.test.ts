@@ -35,8 +35,8 @@ describe('renderSkillsReport', () => {
       roots: ['/home/u/.agents/skills', '/ws/.sph/skills'],
     });
     assert.equal(/^## Skills/m.test(text), false);
-    assert.match(text, /### Skills \(2\)/);
-    assert.ok(text.indexOf('### Skills (2)') > text.indexOf('The model sees only the name and description'));
+    assert.match(text, /### Skills 2/);
+    assert.ok(text.indexOf('### Skills 2') > text.indexOf('The model sees only the name and description'));
     assert.ok(text.indexOf('### Loaded from') > text.indexOf('- `sheet`'));
     assert.match(text, /- `pdf` — Fill PDF forms/);
     assert.match(text, /\{\{\/ws\/skills\/pdf\/SKILL\.md\}\}/);
@@ -47,7 +47,7 @@ describe('renderSkillsReport', () => {
   it('空目录时不说「0 个」就完，而是讲清技能长什么样、该放哪', () => {
     const text = renderSkillsReport({ catalog: [], warnings: [], roots: ['/ws/.sph/skills'] });
     assert.equal(/^## Skills/m.test(text), false);
-    assert.match(text, /### Skills \(0\)/);
+    assert.match(text, /### Skills 0/);
     assert.match(text, /No skills found/);
     assert.match(text, /`SKILL\.md`/);
     assert.match(text, /\{\{\/ws\/\.sph\/skills\}\}/, '空列表时根目录清单反而最有用');

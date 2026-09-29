@@ -33,6 +33,21 @@ function applyTextWithNewlines(text: string, applyText: (segment: string) => str
 		.join("\n");
 }
 
+/**
+ * h3 及以上画成「—— 标题 ———」横线，破折号铺满内容宽。
+ * 源码仍写 `### Skills 5`；井号前缀不进画面。
+ */
+function ruleHeadingLine(label: string, width: number, style: (text: string) => string): string {
+	const head = `—— ${label} `;
+	const used = visibleWidth(head);
+	const fill = Math.max(0, width - used);
+	const dash = "—";
+	const dashWidth = visibleWidth(dash) || 1;
+	const count = Math.floor(fill / dashWidth);
+	const leftover = fill - count * dashWidth;
+	return style(head + dash.repeat(count) + " ".repeat(leftover));
+}
+
 function trimPartialClosingFences(tokens: readonly Token[]): void {
 	const token = tokens[tokens.length - 1];
 	if (token?.type === "list") {
@@ -360,21 +375,19 @@ export class Markdown implements Component {
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
-
-				// Build a heading-specific style context so inline tokens (codespan, bold, etc.)
-				// restore heading styling after their own ANSI resets instead of falling back to
-				// the default text style.
 				const headingStyleFn = (text: string) => this.theme.heading(text, headingLevel);
 
-				const headingStyleContext: InlineStyleContext = {
-					applyText: headingStyleFn,
-					stylePrefix: this.getStylePrefix(headingStyleFn),
-				};
-
-				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
-				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
-				lines.push(styledHeading);
+				if (headingLevel >= 3) {
+					const label = token.text.replace(/\s+/g, " ").trim();
+					lines.push(ruleHeadingLine(label, width, headingStyleFn));
+				} else {
+					// h1/h2 保留行内样式；内联码在标题色里复原，不落到默认正文色。
+					const headingStyleContext: InlineStyleContext = {
+						applyText: headingStyleFn,
+						stylePrefix: this.getStylePrefix(headingStyleFn),
+					};
+					lines.push(this.renderInlineTokens(token.tokens || [], headingStyleContext));
+				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
 				}
