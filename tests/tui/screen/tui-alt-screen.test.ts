@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { applySelectionHighlight, paintScreenDiff, selectionAutoScrollDirection } from '@/tui/screen/tui-alt-screen.js';
-import { compositeTuiLine } from '@/tui/screen/tui.js';
+import { compositeTuiLine, compositeTuiLinePunchingSpaces } from '@/tui/screen/tui.js';
 
 describe('拖选自动滚动', () => {
   it('指针还在视口首行或末行时不扩选', () => {
@@ -228,5 +228,23 @@ describe('compositeTuiLine', () => {
     assert.equal(out.slice(startCol, startCol + overlayWidth), overlay);
     assert.equal(out.slice(30, 40), 'RIGHT-TAIL', '浮层右侧的底稿必须原样留着');
     assert.equal(out.slice(startCol + overlayWidth, 30).trim(), '');
+  });
+
+  it('透空时浮层里的空格露出底稿，文字和边框仍盖住', () => {
+    const base = 'abcdefghijklmnopqrstuvwxyz0123456789ABCD';
+    const overlay = '│ hi │  ';
+    const out = paintRow(compositeTuiLinePunchingSpaces(base, overlay, startCol, overlayWidth, width), width);
+    assert.equal(out.slice(startCol, startCol + 6), '│ hi │');
+    assert.equal(out.slice(startCol + 6, startCol + overlayWidth), base.slice(startCol + 6, startCol + overlayWidth));
+    assert.equal(out.slice(0, startCol), base.slice(0, startCol));
+  });
+
+  it('透空时被空格切开的着色文字后半截仍带着色', () => {
+    const base = '........................................';
+    const overlay = '\x1b[94mA B\x1b[39m';
+    const out = compositeTuiLinePunchingSpaces(base, overlay, 0, 3, width);
+    const painted = paintRow(out, width);
+    assert.equal(painted.slice(0, 3), 'A.B');
+    assert.ok(out.includes('\x1b[94mB'), '空格之后的字形必须重新带上之前的色码');
   });
 });

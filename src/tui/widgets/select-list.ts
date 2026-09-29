@@ -13,6 +13,14 @@ export interface SelectItem {
 	value: string;
 	label: string;
 	description?: string;
+	/** 右对齐尾列：快捷键、别名这类次级信息，dim 色画在行最右端，放不下整个舍弃。 */
+	trailing?: string;
+	/**
+	 * 非可选行：`header` 渲染成内嵌标签的分隔线（`─ Session ───`），`doc` 是与可选行
+	 * 同列对齐的 dim 说明行，`spacer` 是空行。三者都不参与 ↑/↓ 高亮、Enter 确认与点选，
+	 * 也不计入 `(n/m)`。缺省 = 可选项。
+	 */
+	kind?: "header" | "doc" | "spacer";
 }
 
 export interface SelectListTheme {
@@ -60,12 +68,14 @@ export class SelectList implements Component {
 		this.maxVisible = maxVisible;
 		this.theme = theme;
 		this.layout = layout;
+		this.normalizeSelection();
 	}
 
 	setFilter(filter: string): void {
 		this.filteredItems = this.items.filter((item) => item.value.toLowerCase().startsWith(filter.toLowerCase()));
 		// Reset selection when filter changes
 		this.selectedIndex = 0;
+		this.normalizeSelection();
 	}
 
 	/** 可见行数上限；宿主按可用高度收紧它（见 dialogs 的 SelectBody）。 */
@@ -87,12 +97,9 @@ export class SelectList implements Component {
 		this.selectedIndex = Math.max(0, Math.min(index, this.filteredItems.length - 1));
 	}
 
-	/** 环形移动高亮；正文占用方向键滚动时，Tab 用它切选项。 */
+	/** 环形移动高亮；正文占用方向键滚动时，Tab 用它切选项。自动跳过非可选行。 */
 	cycle(delta: 1 | -1): void {
-		const n = this.filteredItems.length;
-		if (n === 0) return;
-		this.selectedIndex = (this.selectedIndex + delta + n) % n;
-		this.notifySelectionChange();
+		this.moveSelection(delta, true);
 	}
 
 	invalidate(): void {
@@ -119,13 +126,27 @@ export class SelectList implements Component {
 			if (!item) continue;
 
 			const isSelected = i === this.selectedIndex;
+			if (item.kind === "header") {
+				lines.push(this.renderHeader(item, width));
+				continue;
+			}
+			if (item.kind === "spacer") {
+				lines.push("");
+				continue;
+			}
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
+			if (item.kind === "doc") {
+				// 说明行与可选行同列对齐，但整行 dim、无标记、永不选中。
+				const plain = this.renderItem({ ...item, trailing: undefined }, false, width, descriptionSingleLine, primaryColumnWidth);
+				lines.push(this.theme.description(plain));
+				continue;
+			}
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
 		}
 
 		// Add scroll indicators if needed
 		if ((startIndex > 0 || endIndex < this.filteredItems.length) && this.renderScrollInfoLine) {
-			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`;
+			const scrollText = `  (${this.selectableOrdinal()}/${this.selectableCount()})`;
 			// Truncate if too long for terminal
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
@@ -133,11 +154,11 @@ export class SelectList implements Component {
 		return lines;
 	}
 
-	/** 滚动状态文本（`(3/15)`）：仅当列表溢出可视区时非空，供宿主嵌入边框。 */
+	/** 滚动状态文本（`(3/15)`）：仅当列表溢出可视区时非空，供宿主嵌入边框。分母只数可选行。 */
 	getScrollInfo(): string {
 		const { startIndex, endIndex } = this.getVisibleRange();
 		return startIndex > 0 || endIndex < this.filteredItems.length
-			? `(${this.selectedIndex + 1}/${this.filteredItems.length})`
+			? `(${this.selectableOrdinal()}/${this.selectableCount()})`
 			: "";
 	}
 
@@ -147,8 +168,7 @@ export class SelectList implements Component {
 		if (event.type === "wheel" && event.wheelDelta) {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
-			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
-			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
+			this.moveSelection(delta, false);
 			return { handled: true, render: this.selectedIndex !== previousIndex };
 		}
 		// Hover must not change selection: the visible range is centered on it.
@@ -156,6 +176,8 @@ export class SelectList implements Component {
 		const { startIndex, endIndex } = this.getVisibleRange();
 		const itemIndex = startIndex + event.y;
 		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+		// 分隔线、说明行不可点选。
+		if (!this.isSelectable(this.filteredItems[itemIndex])) return undefined;
 
 		if (event.type === "press") {
 			this.mousePressedIndex = itemIndex;
@@ -180,18 +202,16 @@ export class SelectList implements Component {
 		const kb = getKeybindings();
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
-			this.notifySelectionChange();
+			this.moveSelection(-1, true);
 		}
 		// Down arrow - wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
-			this.notifySelectionChange();
+			this.moveSelection(1, true);
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedItem = this.filteredItems[this.selectedIndex];
-			if (selectedItem && this.onSelect) {
+			if (selectedItem && this.isSelectable(selectedItem) && this.onSelect) {
 				this.onSelect(selectedItem);
 			}
 		}
@@ -214,6 +234,74 @@ export class SelectList implements Component {
 		};
 	}
 
+	/** 可选行才参与高亮、确认与点选（见 SelectItem.kind）。 */
+	private isSelectable(item: SelectItem | undefined): boolean {
+		return item !== undefined && item.kind === undefined;
+	}
+
+	/** 从 from 起按 direction 环形找最近的可选行；全表都不可选时返回 undefined。 */
+	private nearestSelectable(from: number, direction: 1 | -1): number | undefined {
+		const n = this.filteredItems.length;
+		let index = from;
+		for (let step = 0; step < n; step++) {
+			index = (index + direction + n) % n;
+			if (this.isSelectable(this.filteredItems[index])) return index;
+		}
+		return undefined;
+	}
+
+	/**
+	 * 移动高亮到相邻的可选行。键盘导航回卷（到底再往下就回到开头）；
+	 * 滚轮不回卷——滚到边界就停，滚过头会带着可视区一起翻页，很晕。
+	 */
+	private moveSelection(delta: 1 | -1, wrap: boolean): void {
+		const n = this.filteredItems.length;
+		if (n === 0) return;
+		if (wrap) {
+			const next = this.nearestSelectable(this.selectedIndex, delta);
+			if (next === undefined || next === this.selectedIndex) return;
+			this.selectedIndex = next;
+			this.notifySelectionChange();
+			return;
+		}
+		let index = this.selectedIndex;
+		while (true) {
+			const next = index + delta;
+			if (next < 0 || next >= n) return; // 边界：停在原地
+			index = next;
+			if (this.isSelectable(this.filteredItems[index])) break;
+		}
+		this.selectedIndex = index;
+		this.notifySelectionChange();
+	}
+
+	/** 当前选中行落在非可选行上（构造/过滤后）时，挪到其后最近的可选行。 */
+	private normalizeSelection(): void {
+		if (this.isSelectable(this.filteredItems[this.selectedIndex])) return;
+		this.selectedIndex = this.nearestSelectable(this.selectedIndex, 1) ?? Math.max(0, this.filteredItems.length - 1);
+	}
+
+	/** `(n/m)` 的分子：选中行在可选行里的序次（1 起）。 */
+	private selectableOrdinal(): number {
+		let ordinal = 0;
+		for (let i = 0; i <= this.selectedIndex && i < this.filteredItems.length; i++) {
+			if (this.isSelectable(this.filteredItems[i])) ordinal++;
+		}
+		return ordinal;
+	}
+
+	/** `(n/m)` 的分母：可选行总数。 */
+	private selectableCount(): number {
+		return this.filteredItems.reduce((count, item) => (this.isSelectable(item) ? count + 1 : count), 0);
+	}
+
+	/** 分组分隔线：`─ Session ─────…`，标签嵌在横线里，dim 色，整行铺满。 */
+	private renderHeader(item: SelectItem, width: number): string {
+		const text = `─ ${item.label} `;
+		const line = text + "─".repeat(Math.max(0, width - visibleWidth(text)));
+		return this.theme.description(truncateToWidth(line, width, ""));
+	}
+
 	private renderItem(
 		item: SelectItem,
 		isSelected: boolean,
@@ -223,38 +311,57 @@ export class SelectList implements Component {
 	): string {
 		const prefix = isSelected ? `${this.theme.selectedMark('❙')} ` : '  ';
 		const prefixWidth = 2;
+		// 尾列（快捷键/别名）贴行最右端；空间不够时整列舍弃，不挤占正文。
+		const trailingText = item.trailing ? normalizeToSingleLine(item.trailing) : undefined;
+		const trailingWidth = trailingText ? visibleWidth(trailingText) : 0;
+		const trailingReserve = trailingText ? trailingWidth + 1 : 0;
 
 		if (descriptionSingleLine && width > 40) {
-			const effectivePrimaryColumnWidth = Math.max(1, Math.min(primaryColumnWidth, width - prefixWidth - 4));
+			const effectivePrimaryColumnWidth = Math.max(
+				1,
+				Math.min(primaryColumnWidth, width - prefixWidth - 4 - trailingReserve),
+			);
 			const maxPrimaryWidth = Math.max(1, effectivePrimaryColumnWidth - PRIMARY_COLUMN_GAP);
 			const truncatedValue = this.truncatePrimary(item, isSelected, maxPrimaryWidth, effectivePrimaryColumnWidth);
 			const truncatedValueWidth = visibleWidth(truncatedValue);
 			const spacing = " ".repeat(Math.max(1, effectivePrimaryColumnWidth - truncatedValueWidth));
 			const descriptionStart = prefixWidth + truncatedValueWidth + spacing.length;
-			const remainingWidth = width - descriptionStart - 2; // -2 for safety
+			const remainingWidth = width - descriptionStart - trailingReserve - 2; // -2 for safety
 
+			// 截断必须带省略号：空省略号会让 `200k` 变成 `200`——一个看着像真值的假信息。
 			if (remainingWidth > MIN_DESCRIPTION_WIDTH) {
-				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "");
+				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "…");
 				const descText = this.theme.description(spacing + truncatedDesc);
-				if (isSelected) {
-					return `${prefix}${this.theme.selectedRow(truncatedValue)}${descText}`;
+				let line = isSelected
+					? `${prefix}${this.theme.selectedRow(truncatedValue)}${descText}`
+					: prefix + truncatedValue + descText;
+				if (trailingText) {
+					const leftEnd = descriptionStart + visibleWidth(truncatedDesc);
+					const pad = " ".repeat(Math.max(1, width - 1 - trailingWidth - leftEnd));
+					line += pad + this.theme.description(trailingText);
 				}
-				return prefix + truncatedValue + descText;
+				return line;
 			}
 		}
 
-		const maxWidth = width - prefixWidth - 2;
+		const maxWidth = width - prefixWidth - 2 - trailingReserve;
 		const truncatedValue = this.truncatePrimary(item, isSelected, maxWidth, maxWidth);
-		if (isSelected) {
-			return `${prefix}${this.theme.selectedRow(truncatedValue)}`;
+		let line = isSelected
+			? `${prefix}${this.theme.selectedRow(truncatedValue)}`
+			: prefix + truncatedValue;
+		if (trailingText) {
+			const leftEnd = prefixWidth + visibleWidth(truncatedValue);
+			const pad = " ".repeat(Math.max(1, width - 1 - trailingWidth - leftEnd));
+			line += pad + this.theme.description(trailingText);
 		}
-
-		return prefix + truncatedValue;
+		return line;
 	}
 
 	private getPrimaryColumnWidth(): number {
 		const { min, max } = this.getPrimaryColumnBounds();
+		// 列宽只看可选行：分隔线整行铺满、说明行多为长句，不该把主列撑宽。
 		const widestPrimary = this.filteredItems.reduce((widest, item) => {
+			if (!this.isSelectable(item)) return widest;
 			return Math.max(widest, visibleWidth(this.getDisplayValue(item)) + PRIMARY_COLUMN_GAP);
 		}, 0);
 
@@ -283,9 +390,9 @@ export class SelectList implements Component {
 					item,
 					isSelected,
 				})
-			: truncateToWidth(displayValue, maxWidth, "");
+			: truncateToWidth(displayValue, maxWidth, "…");
 
-		return truncateToWidth(truncatedValue, maxWidth, "");
+		return truncateToWidth(truncatedValue, maxWidth, "…");
 	}
 
 	private getDisplayValue(item: SelectItem): string {

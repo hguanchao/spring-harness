@@ -1346,6 +1346,10 @@ export interface RoundedBoxOptions {
 	title: string;
 	lines: readonly string[];
 	bottomInfo?: string;
+	/** 底边框左侧的操作提示（如 `Esc close`），两侧空格由本函数补。空间不够时截断（带 …），不会整段消失。 */
+	leftInfo?: string;
+	/** 只给左侧提示上色；省略则跟边框同一套 frame。 */
+	leftInfoPaint?: (text: string) => string;
 	frame: (text: string) => string;
 	/** 只给标题上色；省略则跟边框同一套 frame。 */
 	titlePaint?: (text: string) => string;
@@ -1372,12 +1376,31 @@ export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 	}
 	const info = options.bottomInfo ?? "";
 	const infoWidth = info === "" ? 0 : (options.infoWidth ?? visibleWidth(info));
-	const dashes = width - 3 - infoWidth;
-	result.push(
-		infoWidth > 0 && dashes >= 1
-			? frame(`╰${"─".repeat(dashes)}${info}─╯`)
-			: frame(`╰${"─".repeat(inner)}╯`),
-	);
+	// 左侧提示照顶边标题的写法嵌进边框：╰─ 提示 ────(状态)─╯。空间不够先截提示（带 …），
+	// 右侧状态位保留；连一个字符都放不下才退化成单侧底边框——提示不能无声无息地整段消失。
+	const left = options.leftInfo ?? "";
+	const leftPaint = options.leftInfoPaint ?? frame;
+	let bottom: string | undefined;
+	if (left !== "") {
+		const budget = width - 8 - infoWidth; // 框件(╰─/─╯=4) + 两侧空格(2) + 至少2条横线 + 右侧状态
+		const shown = visibleWidth(left) <= budget ? left : budget >= 1 ? truncateToWidth(left, budget, "…") : "";
+		const shownWidth = shown === "" ? 0 : visibleWidth(shown) + 2;
+		const dashes = width - 4 - shownWidth - infoWidth;
+		if (shownWidth > 0 && dashes >= 2) {
+			bottom =
+				infoWidth > 0
+					? frame(`╰─`) + leftPaint(` ${shown} `) + frame(`${"─".repeat(dashes)}${info}─╯`)
+					: frame(`╰─`) + leftPaint(` ${shown} `) + frame(`${"─".repeat(dashes)}╯`);
+		}
+	}
+	if (bottom === undefined) {
+		const dashes = width - 3 - infoWidth;
+		bottom =
+			infoWidth > 0 && dashes >= 1
+				? frame(`╰${"─".repeat(dashes)}${info}─╯`)
+				: frame(`╰${"─".repeat(inner)}╯`);
+	}
+	result.push(bottom);
 	return result;
 }
 

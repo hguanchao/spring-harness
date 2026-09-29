@@ -16,12 +16,11 @@ import {
 	matchesKey,
 	type SelectItem,
 	SelectList,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	type OverlayHandle,
 	type SizeValue,
 	type TUI,
-	type TuiMouseEvent,
-	type TuiMouseEventResult,
-	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from '@/tui/index.js';
@@ -70,6 +69,9 @@ function rowBudget(tui: TUI, maxHeight: SizeValue): number {
 	return Math.max(1, Math.min(Number.isFinite(wanted) ? wanted : available, available));
 }
 
+/** 弹窗内容与边框之间留的白（列）。贴着边框排正文是「文字要溢出盒子」观感的主要来源。 */
+const PAD_X = 2;
+
 /**
  * 弹窗的圆角边框盒:顶部边框嵌标题,内部竖排子组件,每行包上侧边框。
  * 边框仍是 borderMuted 灰；标题单独用主色加粗，避免标题和装饰混成一块灰。
@@ -78,14 +80,24 @@ class RoundedDialogBox extends Container {
 	private readonly label: string;
 	/** 底边框右侧的状态文本（如滚动位置）。子组件渲染完才取值，所以拿到的是本帧状态。 */
 	private readonly bottomInfo: () => string;
+	/** 底边框左侧的操作提示（如 ↑/↓ scroll · Esc close）。 */
+	private leftInfo: () => string = () => '';
 	/** 高度预算的硬封顶（与浮层 maxHeight 同源）。 */
 	private readonly maxRows?: () => number;
+	/** 为 true 时不铺 dialogBg，框内露出画布底。 */
+	private readonly transparent: boolean;
 
-	constructor(title: string, bottomInfo: () => string = () => '', maxRows?: () => number) {
+	constructor(title: string, bottomInfo: () => string = () => '', maxRows?: () => number, transparent = false) {
 		super();
 		this.label = ` ${title} `;
 		this.bottomInfo = bottomInfo;
 		this.maxRows = maxRows;
+		this.transparent = transparent;
+	}
+
+	/** 设置底边框左侧的操作提示；在子组件渲染之后取值。 */
+	setLeftInfo(provider: () => string): void {
+		this.leftInfo = provider;
 	}
 
 	override render(width: number): string[] {
@@ -93,7 +105,7 @@ class RoundedDialogBox extends Container {
 		// 浮层对超限内容只会整块从底部裁掉——底边框、页脚和最后几条选项会一起消失
 		// （见 compositeOverlays 的 slice）。所以内部行数在这里按同一份预算封顶：
 		// 宁可挤掉中间的行，标题、页脚和底边框必须保住。
-		let lines = super.render(inner);
+		let lines = super.render(Math.max(1, inner - PAD_X * 2));
 		const cap = this.maxRows?.();
 		const maxInterior = cap === undefined ? Number.POSITIVE_INFINITY : Math.max(1, cap - 2);
 		if (lines.length > maxInterior) {
@@ -102,28 +114,39 @@ class RoundedDialogBox extends Container {
 					? [...lines.slice(0, maxInterior - 1), lines[lines.length - 1]!]
 					: [lines[lines.length - 1]!];
 		}
+		// 内边距在这里统一施加一次：正文、列表、输入框都不必各自缩进。
+		lines = lines.map((line) => `${' '.repeat(PAD_X)}${line}`);
 		// 底边框在子组件渲染之后才拼,滚动位置之类的信息才是本帧的(与补全菜单盒同款)。
-		const surface = theme.bgSeq('dialogBg');
-		return renderRoundedBox({
+		const boxed = renderRoundedBox({
 			width,
 			title: this.label,
 			lines,
 			bottomInfo: this.bottomInfo(),
+			leftInfo: this.leftInfo(),
+			leftInfoPaint: (text) => theme.fg('dim', text),
 			frame: (text) => theme.fg('borderMuted', text),
 			titlePaint: (text) => theme.bold(theme.fg('primary', text)),
-		}).map((row) => fillDialogSurface(row, width, surface));
+		});
+		if (this.transparent) return boxed;
+		const surface = theme.bgSeq('dialogBg');
+		return boxed.map((row) => fillDialogSurface(row, width, surface));
 	}
 
 	override handleMouse(event: TuiMouseEvent) {
-		// 子组件从第 2 行开始（第 1 行是上边框），鼠标坐标要跟着下移一行。
-		return super.handleMouse({ ...event, y: event.y - 1 });
+		// 子组件从第 2 行开始（第 1 行是上边框），鼠标坐标要跟着下移一行；
+		// 内容又因内边距右移了 PAD_X 列，x 也要把边框和留白一起扣掉。
+		return super.handleMouse({ ...event, x: event.x - 1 - PAD_X, y: event.y - 1 });
 	}
 }
 
 /**
- * 弹窗正文：把内容排进行预算，必要时补上页脚与留白。
+ * 弹窗正文：把内容排进行预算。
  *
- * 子类给出「最少要几行内容」和「按分到的行数渲染内容」——前者决定留白与页脚的取舍，
+ * 操作提示不占内容行——它由外壳挪到底边框左侧（footerText），内容行数可以全用在
+ * 正文上。顶部与底部各留一行空白，与盒子左右各 2 列的 PAD_X 合成四边内边距；
+ * 底边框上不再贴着最后一行内容。
+ *
+ * 子类给出「最少要几行内容」和「按分到的行数渲染内容」——前者决定留白的取舍，
  * 后者让滚动视口、列表这类需要提前知道行数的内容自己分配。
  */
 abstract class DialogBody implements Component {
@@ -132,20 +155,18 @@ abstract class DialogBody implements Component {
 	/** 内容至少要占的行数。 */
 	protected abstract minContentRows(width: number): number;
 
-	/** 按分到的行数渲染内容；`leadingRows` 是内容之前已占用的行数（留白），鼠标坐标要加回来。 */
+	/** 按分到的行数渲染内容；`leadingRows` 是内容之前已占用的行数（顶部留白），鼠标坐标要加回来。 */
 	protected abstract renderContent(width: number, rows: number, leadingRows: number): string[];
 
-	/** 页脚文本。 */
-	protected abstract footerText(): string;
+	/** 底边框左侧的操作提示；空串表示不显示。 */
+	abstract footerText(): string;
 
 	invalidate(): void {}
 
 	render(width: number): string[] {
 		// 预算是上限不是目标高度。短内容按行数收，避免 /help 这类弹窗被撑成一块固定窗口。
 		const maxBody = Math.max(1, this.budget() - 2);
-		const lines = this.renderContent(width, Math.max(1, maxBody - 1), 0);
-		const footer = this.footerText();
-		if (footer !== '') lines.push(truncateToWidth(theme.fg('dim', ` ${footer}`), width, ''));
+		const lines = ['', ...this.renderContent(width, Math.max(1, maxBody - 2), 1), ''];
 		return lines.length > maxBody ? lines.slice(0, maxBody) : lines;
 	}
 }
@@ -164,7 +185,8 @@ class ScrollableTextBody extends DialogBody {
 
 	constructor(text: string, budget: () => number, hint: string) {
 		super(budget);
-		this.markdown = new Markdown(text, 1, 0, getMarkdownTheme(), {
+		// 内边距由 RoundedDialogBox 统一施加，这里不再自带缩进。
+		this.markdown = new Markdown(text, 0, 0, getMarkdownTheme(), {
 			color: (content: string) => theme.fg('mdText', content),
 		});
 		this.hint = hint;
@@ -201,7 +223,7 @@ class ScrollableTextBody extends DialogBody {
 		return 1;
 	}
 
-	protected override footerText(): string {
+	override footerText(): string {
 		return this.scrollable ? `${SCROLL_HINT} · ${this.hint}` : this.hint;
 	}
 
@@ -245,13 +267,19 @@ class SelectBody extends DialogBody {
 		this.plainText = format === 'plain' ? bodyText : undefined;
 		this.markdown =
 			bodyText && format === 'markdown'
-				? new Markdown(bodyText, 1, 0, getMarkdownTheme(), {
+				? new Markdown(bodyText, 0, 0, getMarkdownTheme(), {
 						color: (content: string) => theme.fg('mdText', content),
 					})
 				: undefined;
 	}
 
+	/**
+	 * 列表优先于正文：光标在列表上，「第几项 / 共几项」才是用户当下要的信息；
+	 * 正文区间只在正文真的溢出、且列表不溢出时才报。
+	 */
 	getScrollInfo(): string {
+		const listInfo = this.list.getScrollInfo();
+		if (listInfo !== '') return listInfo;
 		if (this.textHeight <= this.textViewport) return '';
 		return `(${this.offset + 1}-${this.offset + this.textViewport}/${this.textHeight})`;
 	}
@@ -320,7 +348,7 @@ class SelectBody extends DialogBody {
 		return Math.min(this.list.itemCount, LIST_RESERVE_ROWS);
 	}
 
-	protected override footerText(): string {
+	override footerText(): string {
 		return this.scrollable ? SELECT_SCROLL_HINT : this.hint;
 	}
 
@@ -340,21 +368,28 @@ class SelectBody extends DialogBody {
 		this.textViewport = Math.min(maxTextRows, Math.max(0, textLines.length));
 		this.offset = Math.max(0, Math.min(this.offset, Math.max(0, textLines.length - this.textViewport)));
 		const visibleText = textLines.slice(this.offset, this.offset + this.textViewport);
-		const available = Math.max(1, rows - visibleText.length);
-		const overflow = this.list.itemCount > available;
-		this.list.setMaxVisible(overflow ? Math.max(1, available - 1) : available);
+		// 正文与选项之间加一条淡分隔：不然「说明」和「可选项」糊成一片，用户分不清哪几行能选。
+		// 分隔行也要占预算（下面把它从列表可用行里扣掉），否则总行数会顶穿 DialogBody 的裁剪，
+		// 最后一条选项被切掉。
+		const dividerRows = visibleText.length > 0 && this.list.itemCount > 0 ? 1 : 0;
+		const available = Math.max(1, rows - visibleText.length - dividerRows);
+		// 列表不再自带 `(n/m)` 行（见 SelectDialog 里 renderScrollInfoLine=false），
+		// 所以这里不用给它留一行，底边框的状态位负责报位置。
+		this.list.setMaxVisible(available);
 		const listLines = this.list.render(width);
-		this.listTop = leadingRows + visibleText.length;
+		const divider = dividerRows === 1 && listLines.length > 0
+			? [theme.fg('borderMuted', '─'.repeat(Math.max(1, width)))]
+			: [];
+		this.listTop = leadingRows + visibleText.length + divider.length;
 		this.listRows = listLines.length;
-		return [...visibleText, ...listLines];
+		return [...visibleText, ...divider, ...listLines];
 	}
 
-	/** 正文行：plain 逐字保留（只做按宽换行），markdown 走渲染器。 */
+	/** 正文行：plain 逐字保留（只做按宽换行），markdown 走渲染器。内边距由外壳统一施加。 */
 	private renderBodyLines(width: number): string[] {
 		if (this.markdown) return this.markdown.render(width);
 		if (this.plainText === undefined) return [];
-		const wrapped = wrapTextWithAnsi(this.plainText, Math.max(1, width - 1));
-		return wrapped.map((line) => theme.fg('mdText', ` ${line}`));
+		return wrapTextWithAnsi(this.plainText, Math.max(1, width)).map((line) => theme.fg('mdText', line));
 	}
 }
 
@@ -372,7 +407,7 @@ class InputBody extends DialogBody {
 		return 1;
 	}
 
-	protected override footerText(): string {
+	override footerText(): string {
 		return this.hint;
 	}
 
@@ -385,16 +420,21 @@ class InputBody extends DialogBody {
 class DialogShell extends Container {
 	protected readonly box: RoundedDialogBox;
 	private bottomInfo: () => string = () => '';
+	/** 正文（若已挂载）；底边框左侧的操作提示从它取。 */
+	private mainBody: DialogBody | undefined;
 	private closeHandler: () => void = () => {};
 
-	protected constructor(title: string, maxRows?: () => number) {
+	protected constructor(title: string, maxRows?: () => number, transparent = false) {
 		super();
-		this.box = new RoundedDialogBox(title, () => this.bottomInfo(), maxRows);
+		this.box = new RoundedDialogBox(title, () => this.bottomInfo(), maxRows, transparent);
+		// 操作提示放底边框左侧：同一行既说明怎么操作、又报当前位置，不再各占一行。
+		this.box.setLeftInfo(() => this.mainBody?.footerText() ?? '');
 		this.addChild(this.box);
 	}
 
 	protected addBody(component: Component): void {
 		this.box.addChild(component);
+		if (component instanceof DialogBody) this.mainBody = component;
 	}
 
 	/** 设置底边框右侧的状态文本（在子组件渲染之后取值）。 */
@@ -426,6 +466,9 @@ class SelectDialog extends DialogShell {
 	) {
 		super(title, budget);
 		this.list = new SelectList(items, maxVisible, getSelectListTheme());
+		// 列表内部的 `(n/m)` 行关掉，改用底边框右侧的状态位——与文档弹窗、内联菜单同一处，
+		// 顺带把那一行还给选项（弹窗里的行预算本来就紧）。
+		this.list.renderScrollInfoLine = false;
 		this.body = new SelectBody(this.list, bodyText, budget, hint, format);
 		this.setBottomInfo(() => this.body.getScrollInfo());
 		this.addBody(this.body);
@@ -471,8 +514,8 @@ class InputDialog extends DialogShell {
 class MessageDialog extends DialogShell {
 	private readonly body: ScrollableTextBody;
 
-	constructor(title: string, text: string, hint: string, budget: () => number) {
-		super(title, budget);
+	constructor(title: string, text: string, hint: string, budget: () => number, transparent = false) {
+		super(title, budget, transparent);
 		this.body = new ScrollableTextBody(text, budget, hint);
 		this.setBottomInfo(() => this.body.getScrollInfo());
 		this.addBody(this.body);
@@ -507,19 +550,41 @@ function settleOnce<T>(handle: OverlayHandle, resolve: (value: T) => void): (val
 }
 
 /**
- * 弹窗宽度上限（列）。
+ * 弹窗版式档位。一处定义，所有弹窗按用途取——调用方仍可显式覆盖 maxHeight。
  *
- * 弹窗按终端百分比取宽，但百分比在宽终端上会算出接近整屏的模态：正文行长失控、
- * 标题与选项左右拉散，排版反而难看。上限按内容类型给——窄终端上百分比仍然胜出，
- * 只有宽终端才会被夹住（终端 147 列时，72% 的 105 列收到 84 列）。
+ * 分档之前所有弹窗共用 72% / 上限 84 / 60% 高：宽度对两三项的确认框太宽（右侧一大片
+ * 空白），高度对 60+ 行的 `/help` 太矮（要翻四屏）。两头毛病是同一刀切出来的。
+ *
+ * 宽度分百分比与上限两部分：百分比让窄终端胜出，上限让宽终端不至于把弹窗拉成整屏
+ * （终端 147 列时 72% 的 105 列收到 84 列），否则正文行长失控、标题与选项左右拉散。
  */
-/** 所有模态共用这一档尺寸。百分比只是上限，正文短就收矮，不再各弹窗各占一屏。 */
-const DIALOG_WIDTH = '72%';
-const DIALOG_MAX_HEIGHT = '60%';
-const DIALOG_MAX_WIDTH = 84;
+export type DialogKind = 'confirm' | 'select' | 'input' | 'document';
+
+const DIALOG_LAYOUTS: Record<DialogKind, { width: SizeValue; maxWidth: number; maxHeight: SizeValue }> = {
+	/** 是/否这类两三项：窄一点，别让一句话占满整屏。 */
+	confirm: { width: '52%', maxWidth: 56, maxHeight: '40%' },
+	/** 带正文的选项框：正文要读，选项要够宽。 */
+	select: { width: '72%', maxWidth: 84, maxHeight: '60%' },
+	/** 单行输入：最窄的一档。 */
+	input: { width: '64%', maxWidth: 72, maxHeight: '30%' },
+	/** 只读长文本（/help、上报、diff）：高度优先，翻屏次数直接决定好不好用。 */
+	document: { width: '88%', maxWidth: 100, maxHeight: '88%' },
+};
+
 export const APPROVAL_OVERLAY_PRIORITY = 100;
 
-function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT, priority = 0): {
+/** 解析实际高度：显式覆盖优先。行预算与浮层选项必须用同一个值，否则互相打架。 */
+function maxHeightFor(kind: DialogKind, override?: SizeValue): SizeValue {
+	return override ?? DIALOG_LAYOUTS[kind].maxHeight;
+}
+
+function overlayOptions(
+	kind: DialogKind,
+	maxHeight: SizeValue,
+	priority = 0,
+	width?: SizeValue,
+	maxWidth?: number,
+): {
 	width: SizeValue;
 	maxHeight: SizeValue;
 	maxWidth: number;
@@ -527,11 +592,15 @@ function overlayOptions(maxHeight: SizeValue = DIALOG_MAX_HEIGHT, priority = 0):
 	anchor: 'center';
 	margin: number;
 	padX: number;
+	row?: SizeValue;
+	punchSpaces?: boolean;
 } {
+	const layout = DIALOG_LAYOUTS[kind];
 	return {
-		width: DIALOG_WIDTH,
+		// width 原先是个死选项：签名里有、没往下传，调用方传了也不生效。
+		width: width ?? layout.width,
 		maxHeight,
-		maxWidth: DIALOG_MAX_WIDTH,
+		maxWidth: maxWidth ?? layout.maxWidth,
 		priority,
 		anchor: 'center',
 		margin: 1,
@@ -554,12 +623,15 @@ export function showSelectDialog(
 		bodyFormat?: DialogBodyFormat;
 		/** 更高优先级的弹窗会压过普通面板并保留键盘焦点。 */
 		priority?: number;
+		/** 版式档位；确认这类两三项的窄框传 confirm。 */
+		kind?: DialogKind;
 		width?: SizeValue;
 		maxHeight?: SizeValue;
 	},
 ): Promise<string | undefined> {
 	return new Promise((resolve) => {
-		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
+		const kind = options.kind ?? 'select';
+		const maxHeight = maxHeightFor(kind, options.maxHeight);
 		const dialog = new SelectDialog(
 			options.title,
 			options.items,
@@ -569,7 +641,7 @@ export function showSelectDialog(
 			() => rowBudget(tui, maxHeight),
 			options.bodyFormat ?? 'markdown',
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight, options.priority));
+		const handle = tui.showOverlay(dialog, overlayOptions(kind, maxHeight, options.priority, options.width));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSelect((item) => finish(item.value));
 		dialog.onCancel(() => finish(undefined));
@@ -582,14 +654,14 @@ export function showInputDialog(
 	options: { title: string; initialValue?: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue; priority?: number },
 ): Promise<string | undefined> {
 	return new Promise((resolve) => {
-		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
+		const maxHeight = maxHeightFor('input', options.maxHeight);
 		const dialog = new InputDialog(
 			options.title,
 			options.initialValue ?? '',
 			options.hint ?? 'Enter confirm · Esc cancel',
 			() => rowBudget(tui, maxHeight),
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight, options.priority));
+		const handle = tui.showOverlay(dialog, overlayOptions('input', maxHeight, options.priority, options.width));
 		const finish = settleOnce(handle, resolve);
 		dialog.onSubmit((value) => finish(value));
 		dialog.setCloseHandler(() => finish(undefined));
@@ -610,6 +682,7 @@ export async function showConfirmDialog(
 		bodyText: options.message,
 		items,
 		maxVisible: 2,
+		kind: 'confirm',
 		priority: options.priority,
 	});
 	return selected === 'confirm';
@@ -625,24 +698,41 @@ export function showLoadingDialog(
 	tui: TUI,
 	options: { title: string; text: string; width?: SizeValue; priority?: number },
 ): OverlayHandle {
-	const dialog = new MessageDialog(options.title, options.text, '', () => rowBudget(tui, DIALOG_MAX_HEIGHT));
-	return tui.showOverlay(dialog, overlayOptions(DIALOG_MAX_HEIGHT, options.priority));
+	const maxHeight = maxHeightFor('select');
+	const dialog = new MessageDialog(options.title, options.text, '', () => rowBudget(tui, maxHeight));
+	return tui.showOverlay(dialog, overlayOptions('select', maxHeight, options.priority, options.width));
 }
 
 /** 只读长文本对话框（帮助、状态、待办、任务等）。 */
 export function showMessageDialog(
 	tui: TUI,
-	options: { title: string; text: string; hint?: string; width?: SizeValue; maxHeight?: SizeValue; priority?: number },
+	options: {
+		title: string;
+		text: string;
+		hint?: string;
+		width?: SizeValue;
+		maxHeight?: SizeValue;
+		/** 覆盖本档列上限。百分比宽度在宽终端上会被 maxWidth 夹住，不传则仍用 document 档。 */
+		maxWidth?: number;
+		priority?: number;
+		row?: SizeValue;
+		transparent?: boolean;
+	},
 ): Promise<void> {
 	return new Promise((resolve) => {
-		const maxHeight = options.maxHeight ?? DIALOG_MAX_HEIGHT;
+		const maxHeight = maxHeightFor('document', options.maxHeight);
 		const dialog = new MessageDialog(
 			options.title,
 			options.text,
 			options.hint ?? 'Esc close',
 			() => rowBudget(tui, maxHeight),
+			options.transparent === true,
 		);
-		const handle = tui.showOverlay(dialog, overlayOptions(maxHeight, options.priority));
+		const overlay = overlayOptions('document', maxHeight, options.priority, options.width, options.maxWidth);
+		if (options.row !== undefined) overlay.row = options.row;
+		// 不铺面色之后，空格仍会盖成一块纯色。透空才是「只留边框和文字」。
+		if (options.transparent === true) overlay.punchSpaces = true;
+		const handle = tui.showOverlay(dialog, overlay);
 		const finish = settleOnce<void>(handle, resolve);
 		dialog.setCloseHandler(() => finish());
 	});

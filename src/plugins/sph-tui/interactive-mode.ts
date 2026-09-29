@@ -100,7 +100,7 @@ import { productScreenOptions } from '@/plugins/sph-tui/transcript-chrome.js';
 import { getEditorTheme, getMarkdownTheme, theme } from '@/plugins/sph-tui/theme/theme.js';
 import { errorMessage, flattenWhitespace } from '@/util.js';
 import { readVersion } from '@/version.js';
-import { COMMANDS, COMMAND_ALIASES, COMMAND_NAMES, primaryColumnWidthFor } from '@/plugins/sph-tui/commands/index.js';
+import { COMMANDS, COMMAND_ALIASES, COMMAND_NAMES, primaryColumnWidthFor, type CommandItem } from '@/plugins/sph-tui/commands/index.js';
 import { SteerBar, type SteerBarHost } from '@/plugins/sph-tui/input/steer-bar.js';
 import { TranscriptProjection, type TranscriptHost } from '@/plugins/sph-tui/transcript/index.js';
 import { restoreSessionInto, type ReplayHost } from '@/plugins/sph-tui/transcript/session-replay.js';
@@ -115,6 +115,86 @@ export type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 function message(error: unknown): string {
   return errorMessage(error);
+}
+
+/**
+ * /help 面板的行清单。命令按 group 分组（可选，Enter 直接执行），别名放行尾右对齐；
+ * 键位、队列与编辑器说明是不可选的 doc 行（↑/↓ 与点选自动跳过，也不计入 (n/m)）。
+ */
+function buildHelpPanelItems(commands: readonly CommandItem[]): SelectItem[] {
+  const items: SelectItem[] = [];
+  const groups = new Map<string, CommandItem[]>();
+  for (const command of commands) {
+    const group = command.group ?? 'Plugins & Skills';
+    const bucket = groups.get(group) ?? [];
+    bucket.push(command);
+    groups.set(group, bucket);
+  }
+  for (const [group, groupCommands] of groups) {
+    items.push({ value: `group:${group}`, label: group, kind: 'header' });
+    for (const command of groupCommands) {
+      // 别名不进清单（菜单只列正名），但必须能看见，否则靠旧名字找命令的人会以为它没了。
+      const alias = Object.entries(COMMAND_ALIASES).find(([, canonical]) => canonical === command.id)?.[0];
+      items.push({
+        value: command.id,
+        label: command.label,
+        description: command.hint,
+        trailing: alias ? `/${alias}` : undefined,
+      });
+    }
+  }
+
+  const keyGroups = new Map<string, AppKeybindingDefinition[]>();
+  for (const definition of Object.values(APP_KEYBINDINGS) as AppKeybindingDefinition[]) {
+    const bucket = keyGroups.get(definition.when) ?? [];
+    bucket.push(definition);
+    keyGroups.set(definition.when, bucket);
+  }
+  for (const [when, definitions] of keyGroups) {
+    items.push({
+      value: `keys:${when}`,
+      label: `Keys · ${when === 'always' ? 'Available anytime' : when}`,
+      kind: 'header',
+    });
+    definitions.forEach((definition, index) => {
+      items.push({
+        value: `key:${when}:${index}`,
+        label: formatKeyText(definition.keys.join('/')),
+        description: definition.description,
+        kind: 'doc',
+      });
+    });
+  }
+
+  items.push({ value: 'spacer:queue', label: '', kind: 'spacer' });
+  items.push({ value: 'queue:header', label: 'Queue (mouse)', kind: 'header' });
+  items.push({
+    value: 'queue:1',
+    label: 'Hover a queued row for [↑] [↓] [Send now] [edit] [cancel] buttons',
+    kind: 'doc',
+  });
+  items.push({
+    value: 'queue:2',
+    label: 'Click a row to select it; [edit] takes it back to the input (queued order preserved)',
+    kind: 'doc',
+  });
+
+  items.push({ value: 'spacer:editor', label: '', kind: 'spacer' });
+  items.push({ value: 'editor:header', label: 'Editor', kind: 'header' });
+  items.push({ value: 'editor:1', label: '/', description: 'slash-command autocomplete in the editor', kind: 'doc' });
+  items.push({
+    value: 'editor:2',
+    label: 'Enter (turn running)',
+    description: 'queue the message (delivered after the turn ends)',
+    kind: 'doc',
+  });
+  items.push({
+    value: 'editor:3',
+    label: 'Alt+Enter',
+    description: 'queue a follow-up that starts after this turn',
+    kind: 'doc',
+  });
+  return items;
 }
 
 /** 交互模式入口。 */
@@ -1487,41 +1567,23 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
-   * `/help`：命令与键位清单。命令表从注册表取数；键位清单由注册表驱动（app-keybindings
-   * 的 when 字段分组）：新增键位只需改注册表，帮助自动跟上——手写清单必然漂移，
-   * 这次收编就是为了消灭它。
+   * `/help`：命令面板。命令按注册表的 group 分组、可直接选中执行（Enter 等价于敲命令）；
+   * 键位与鼠标说明作为不可选的说明行排在后面，↑/↓ 与点选自动跳过。命令表从注册表取数，
+   * 键位清单由注册表驱动（app-keybindings 的 when 字段分组）：新增键位只需改注册表，
+   * 帮助自动跟上——手写清单必然漂移，这次收编就是为了消灭它。
    */
   private async commandHelp(): Promise<void> {
-    const lines: string[] = [];
-    lines.push('## Commands');
-    for (const command of this.commandItems()) lines.push(`- \`${command.label}\` — ${command.hint}`);
-    // 别名不进上面的清单（菜单只列正名），但必须写出来，
-    // 否则靠旧名字找到这里的人会以为命令被删了。
-    const aliases = Object.entries(COMMAND_ALIASES).map(([alias, canonical]) => `\`/${alias}\` → \`/${canonical}\``);
-    if (aliases.length > 0) lines.push(`- Aliases: ${aliases.join(' · ')}`);
-    lines.push('');
-    lines.push('## Key bindings');
-    const grouped = new Map<string, string[]>();
-    for (const definition of Object.values(APP_KEYBINDINGS) as AppKeybindingDefinition[]) {
-      const entry = `- \`${formatKeyText(definition.keys.join('/'))}\` — ${definition.description}`;
-      const group = grouped.get(definition.when) ?? [];
-      group.push(entry);
-      grouped.set(definition.when, group);
-    }
-    for (const [when, entries] of grouped) {
-      lines.push(`### ${when === 'always' ? 'Available anytime' : when}`);
-      lines.push(...entries);
-    }
-    lines.push('');
-    lines.push('## Queue (mouse)');
-    lines.push('- Hover a queued row for [↑] [↓] [Send now] [edit] [cancel] buttons');
-    lines.push('- Click a row to select it; `[edit]` takes it back to the input (queued order preserved)');
-    lines.push('');
-    lines.push('## Editor');
-    lines.push('- `/` — slash-command autocomplete in the editor');
-    lines.push('- `Enter` while a turn is running — queue the message (delivered after the turn ends)');
-    lines.push('- `Alt+Enter` — queue a follow-up that starts after this turn');
-    await showMessageDialog(this.ui, { title: 'Help', text: lines.join('\n') });
+    const selected = await showSelectDialog(this.ui, {
+      title: 'Help',
+      items: buildHelpPanelItems(this.commandItems()),
+      maxVisible: 24,
+      kind: 'document',
+      // 内容反正要滚动，88% 高的整屏面板压得太满；收到七成上下，四周留点呼吸感。
+      maxHeight: '72%',
+      hint: '↑/↓ select · Enter run · Esc close',
+    });
+    // Enter 选中即执行：与敲命令同一条路（含别名展开与未知命令兜底）。
+    if (selected) await this.handleCommand(`/${selected}`);
   }
 
   /**
@@ -1551,6 +1613,13 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       title: 'Skills',
       text: renderSkillsReport({ catalog, warnings, roots: skillRoots(this.deps.workspaceRoot) }),
       hint: 'Esc close · re-scanned on every open',
+      // 报告框单独一档：半宽、占屏高四分之三、顶边距屏幕 10%，框内不铺面色。
+      width: '50%',
+      maxWidth: 10_000,
+      maxHeight: '75%',
+      // OverlayOptions.row 的百分比是剩余空白里的比例，不是距顶部。这里按终端行数取 10%。
+      row: Math.max(0, Math.floor(this.ui.terminal.rows * 0.1)),
+      transparent: true,
     });
   }
 
@@ -1864,14 +1933,14 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /** 内置命令在前。插件命令同名时不覆盖内置。 */
-  private commandItems(): { id: string; label: string; hint: string }[] {
+  private commandItems(): CommandItem[] {
     const builtin = new Set(COMMANDS.map((command) => command.id));
     const extra = (this.deps.pluginCommands ?? [])
       .filter((command) => !builtin.has(command.name))
-      .map((command) => ({ id: command.name, label: `/${command.name}`, hint: command.description }));
+      .map((command) => ({ id: command.name, label: `/${command.name}`, hint: command.description, group: 'Plugins' }));
     const skills = scanSkills(this.deps.workspaceRoot).catalog
       .filter((entry) => entry.userInvocable && !builtin.has(entry.name))
-      .map((entry) => ({ id: entry.name, label: `/${entry.name}`, hint: entry.description }));
+      .map((entry) => ({ id: entry.name, label: `/${entry.name}`, hint: entry.description, group: 'Skills' }));
     return [...COMMANDS, ...extra, ...skills];
   }
 

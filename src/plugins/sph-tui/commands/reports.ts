@@ -37,6 +37,13 @@ function plain(text: string): string {
   return oneLine(text).replaceAll('`', "'");
 }
 
+/**
+ * 次要信息（路径、来源这类）：`{{…}}` 由 markdown 主题画成蓝色。
+ */
+function secondary(text: string): string {
+  return `{{${oneLine(text)}}}`;
+}
+
 function warningsSection(warnings: readonly string[], title: string): string[] {
   if (warnings.length === 0) return [];
   return ['', `### ${title}`, ...warnings.map((warning) => `- ${plain(warning)}`)];
@@ -48,29 +55,34 @@ export function renderSkillsReport(input: {
   roots: readonly string[];
 }): string {
   const { catalog, warnings, roots } = input;
-  const lines: string[] = [`## Skills (${catalog.length})`, ''];
+  const lines: string[] = [];
 
-  if (catalog.length === 0) {
+  const total = catalog.length;
+  const countLine = `## Skills (${total} found)`;
+  if (total === 0) {
     lines.push(
+      countLine,
       'No skills found. A skill is a directory holding `SKILL.md` with `name` and',
       '`description` frontmatter — drop one in any root below and it is picked up on the',
       'next turn.',
     );
   } else {
+    lines.push(countLine);
     lines.push(
       'The model sees only the name and description; the `skill` tool reads the full',
       '`SKILL.md` when one matches the task.',
       '',
     );
     for (const skill of catalog) {
-      lines.push(`- **${plain(skill.name)}** — ${plain(skill.description)}`);
-      lines.push(`  ${code(skill.path)}`);
+      // 技能名用行内码（蓝、加粗）当小标题；路径走次要标记，同一档蓝但不加粗。
+      lines.push(`- ${code(skill.name)} — ${plain(skill.description)}`);
+      lines.push(`  ${secondary(skill.path)}`);
     }
   }
 
   lines.push('', '### Loaded from', '', 'Later roots override earlier ones when two skills share a name.', '');
   roots.forEach((root, index) => {
-    lines.push(`${index + 1}. ${code(root)}`);
+    lines.push(`${index + 1}. ${secondary(root)}`);
   });
 
   lines.push(...warningsSection(warnings, 'Warnings'));

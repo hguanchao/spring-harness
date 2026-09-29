@@ -64,6 +64,31 @@ markdownParser.setOptions({
 });
 
 /**
+ * `{{次要信息}}` 内联标记：路径、来源这类需要弱化的内容，主题画成中性灰，
+ * 与蓝色行内码区分（报告里「工具名要亮眼、路径要退后」就是这对组合）。
+ * 生成器负责不把 `}{` 放进内容；内容里真有 `}}` 时不匹配，原样输出花括号，无害降级。
+ */
+const SECONDARY_REGEX = /^\{\{([^{}\n]+)\}\}/;
+
+markdownParser.use({
+	extensions: [
+		{
+			name: "secondary",
+			level: "inline",
+			start(src: string): number | undefined {
+				const index = src.indexOf("{{");
+				return index === -1 ? undefined : index;
+			},
+			tokenizer(src: string): Tokens.Generic | undefined {
+				const match = SECONDARY_REGEX.exec(src);
+				if (!match) return undefined;
+				return { type: "secondary", raw: match[0], text: match[1] };
+			},
+		},
+	],
+});
+
+/**
  * Default text styling for markdown content.
  * Applied to all text unless overridden by markdown formatting.
  */
@@ -104,6 +129,8 @@ export interface MarkdownTheme {
 	strong?: (text: string) => string;
 	/** 斜体着色；缺省回落到 italic。 */
 	emphasis?: (text: string) => string;
+	/** `{{次要信息}}`：路径、来源这类要弱化成中性灰的内容；缺省原样输出（含花括号）。 */
+	secondary?: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
 	/** 代码块每行的缩进，缺省两个空格。代码一律走 codeBlock，不再按语言上色。 */
@@ -516,6 +543,12 @@ export class Markdown implements Component {
 				case "codespan":
 					result += (resolvedStyleContext.codeStyle ?? this.theme.code)(token.text) + stylePrefix;
 					break;
+
+				case "secondary": {
+					// `{{…}}`：次要信息。主题没定义时原样输出（含花括号），不让内容凭空消失。
+					result += (this.theme.secondary ?? (() => token.raw))(token.text) + stylePrefix;
+					break;
+				}
 
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);

@@ -335,6 +335,8 @@ export function getMarkdownTheme(): MarkdownTheme {
     },
     link: (text: string) => theme.underline(theme.fg('mdLink', text)),
     linkUrl: (text: string) => theme.fg('mdLinkUrl', text),
+    // 次要信息（`{{…}}`，报告里的路径、来源）：与行内码同一档蓝。
+    secondary: (text: string) => theme.fg('mdCode', text),
     // 行内码整段蓝、加粗，不做词法猜测。
     code: (text: string) => theme.bold(theme.fg('mdCode', text)),
     codeBlock: (text: string) => theme.fg('mdCodeBlock', text),

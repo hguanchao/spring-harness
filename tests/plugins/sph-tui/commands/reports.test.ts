@@ -34,19 +34,20 @@ describe('renderSkillsReport', () => {
       warnings: [],
       roots: ['/home/u/.agents/skills', '/ws/.sph/skills'],
     });
-    assert.match(text, /## Skills \(2\)/);
-    assert.match(text, /\*\*pdf\*\* — Fill PDF forms/);
-    assert.match(text, /`\/ws\/skills\/pdf\/SKILL.md`/);
-    assert.ok(text.indexOf('1. `/home/u/.agents/skills`') < text.indexOf('2. `/ws/.sph/skills`'));
+    assert.match(text, /^## Skills \(2 found\)/);
+    assert.ok(text.indexOf('### Loaded from') > text.indexOf('- `sheet`'));
+    assert.match(text, /- `pdf` — Fill PDF forms/);
+    assert.match(text, /\{\{\/ws\/skills\/pdf\/SKILL\.md\}\}/);
+    assert.ok(text.indexOf('1. {{/home/u/.agents/skills}}') < text.indexOf('2. {{/ws/.sph/skills}}'));
     assert.match(text, /Later roots override earlier ones/);
   });
 
   it('空目录时不说「0 个」就完，而是讲清技能长什么样、该放哪', () => {
     const text = renderSkillsReport({ catalog: [], warnings: [], roots: ['/ws/.sph/skills'] });
-    assert.match(text, /## Skills \(0\)/);
+    assert.match(text, /^## Skills \(0 found\)/);
     assert.match(text, /No skills found/);
     assert.match(text, /`SKILL\.md`/);
-    assert.match(text, /`\/ws\/\.sph\/skills`/, '空列表时根目录清单反而最有用');
+    assert.match(text, /\{\{\/ws\/\.sph\/skills\}\}/, '空列表时根目录清单反而最有用');
   });
 
   it('描述里的反引号被替换，不会提前闭合内联代码段', () => {
@@ -65,7 +66,7 @@ describe('renderSkillsReport', () => {
       warnings: [],
       roots: [],
     });
-    assert.ok(text.includes('- **pdf** — Fill forms and merge files'));
+    assert.ok(text.includes('- `pdf` — Fill forms and merge files'));
   });
 
   it('没有警告时不出现 Warnings 段', () => {

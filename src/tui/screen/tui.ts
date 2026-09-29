@@ -6,7 +6,15 @@
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "@/tui/terminal/keys.js";
 import type { Terminal } from "@/tui/terminal/terminal.js";
-import { clipLineToWidth, extractSegments, normalizeTerminalOutput, sliceWithWidth, visibleWidth } from "@/tui/text/utils.js";
+import {
+	clipLineToWidth,
+	extractAnsiCode,
+	extractSegments,
+	getGraphemeSegmenter,
+	normalizeTerminalOutput,
+	sliceWithWidth,
+	visibleWidth,
+} from "@/tui/text/utils.js";
 
 /**
  * Component interface - all components must implement this
@@ -273,6 +281,11 @@ export interface OverlayOptions {
 	visible?: (termWidth: number, termHeight: number) => boolean;
 	/** If true, don't capture keyboard focus when shown */
 	nonCapturing?: boolean;
+	/**
+	 * 空白格不盖写底稿。关掉面色之后，空格仍会铺成一块纯色背板；
+	 * 打开后只留下边框和文字，中间露出原来的内容。
+	 */
+	punchSpaces?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -480,6 +493,70 @@ export function compositeTuiLine(
 		tail;
 
 	return clipLineToWidth(result, totalWidth);
+}
+
+/** 底稿里对应列的可见内容。只留 SGR，列跳转放进来会把后面的字甩出弹窗。 */
+function baseCells(line: string, startCol: number, length: number): string {
+	const { text } = sliceWithWidth(line, startCol, length, true);
+	let out = "";
+	let index = 0;
+	while (index < text.length) {
+		const ansi = extractAnsiCode(text, index);
+		if (ansi) {
+			if (ansi.code.endsWith("m")) out += ansi.code;
+			index += ansi.length;
+			continue;
+		}
+		out += text[index];
+		index += 1;
+	}
+	return out;
+}
+
+/**
+ * 同 compositeTuiLine，但空白格不盖写。
+ *
+ * 普通合成会把浮层里的空格也画上去，终端里那就是一块实心底。报告框要「只留边框和文字」时，
+ * 空格必须留底稿，否则关掉面色也还是一块纯色背板。整行只合成一次：分段盖写会让后一段
+ * 的复位把前一段的字冲掉。
+ */
+export function compositeTuiLinePunchingSpaces(
+	baseLine: string,
+	overlayLine: string,
+	startCol: number,
+	overlayWidth: number,
+	totalWidth: number,
+): string {
+	let built = "";
+	let column = 0;
+	let index = 0;
+	let pending = "";
+
+	while (index < overlayLine.length && column < overlayWidth) {
+		const ansi = extractAnsiCode(overlayLine, index);
+		if (ansi) {
+			pending += ansi.code;
+			index += ansi.length;
+			continue;
+		}
+		let textEnd = index;
+		while (textEnd < overlayLine.length && !extractAnsiCode(overlayLine, textEnd)) textEnd += 1;
+		for (const { segment } of getGraphemeSegmenter().segment(overlayLine.slice(index, textEnd))) {
+			if (column >= overlayWidth) break;
+			const width = Math.max(1, visibleWidth(segment));
+			const room = Math.min(width, overlayWidth - column);
+			if (segment === " ") {
+				const hole = baseCells(baseLine, startCol + column, room);
+				built += hole + " ".repeat(Math.max(0, room - visibleWidth(hole)));
+			} else {
+				built += pending + segment;
+				pending = "";
+			}
+			column += room;
+		}
+		index = textEnd;
+	}
+	return compositeTuiLine(baseLine, built, startCol, overlayWidth, totalWidth);
 }
 
 export type TuiMode = "regular" | "fullscreen";
@@ -1287,7 +1364,15 @@ export abstract class TuiBase extends Container implements TUI {
 		for (const entry of this.overlayStack) entry.bounds = undefined;
 
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { entry: OverlayStackEntry; overlayLines: string[]; row: number; col: number; w: number; pad: number }[] = [];
+		const rendered: {
+			entry: OverlayStackEntry;
+			overlayLines: string[];
+			row: number;
+			col: number;
+			w: number;
+			pad: number;
+			punch: boolean;
+		}[] = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1315,7 +1400,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 			// 留白列数夹进左边界内,避免负列起步。
 			const pad = Math.max(0, Math.min(options?.padX ?? 0, col));
-			rendered.push({ entry, overlayLines, row, col, w: width, pad });
+			rendered.push({ entry, overlayLines, row, col, w: width, pad, punch: options?.punchSpaces === true });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
 		this.renderedOverlayLayouts = rendered.map(({ entry, row, col, w, overlayLines }) => ({
@@ -1339,7 +1424,7 @@ export abstract class TuiBase extends Container implements TUI {
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
 		// Composite each overlay
-		for (const { overlayLines, row, col, w, pad } of rendered) {
+		for (const { overlayLines, row, col, w, pad, punch } of rendered) {
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
 				if (idx >= 0 && idx < result.length) {
@@ -1351,10 +1436,10 @@ export abstract class TuiBase extends Container implements TUI {
 						// 弹窗与背后的转录之间有一条干净的空白带。
 						const startCol = col - pad;
 						const padded = `${' '.repeat(pad)}${truncatedOverlayLine}`;
-						result[idx] = this.compositeLineAt(result[idx] ?? '', padded, startCol, w + pad * 2, termWidth);
+						result[idx] = this.compositeLineAt(result[idx] ?? '', padded, startCol, w + pad * 2, termWidth, punch);
 					} else {
 						// 只盖住对话框自己的列。整行换成空白会把左右的转录擦掉，弹窗看起来像把屏幕换掉。
-						result[idx] = this.compositeLineAt(result[idx] ?? '', truncatedOverlayLine, col, w, termWidth);
+						result[idx] = this.compositeLineAt(result[idx] ?? '', truncatedOverlayLine, col, w, termWidth, punch);
 					}
 				}
 			}
@@ -1377,8 +1462,10 @@ export abstract class TuiBase extends Container implements TUI {
 		startCol: number,
 		overlayWidth: number,
 		totalWidth: number,
+		punchSpaces = false,
 	): string {
-		return compositeTuiLine(baseLine, overlayLine, startCol, overlayWidth, totalWidth);
+		const compose = punchSpaces ? compositeTuiLinePunchingSpaces : compositeTuiLine;
+		return compose(baseLine, overlayLine, startCol, overlayWidth, totalWidth);
 	}
 
 	/**

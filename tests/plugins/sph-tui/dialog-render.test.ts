@@ -291,9 +291,10 @@ describe('审批弹窗的完整性', () => {
     assert.match(screen, /╰/);
   });
 
-  it('矮终端下选项交给列表滚动消化，页脚与底边框仍然完整', async () => {
+  it('矮终端下选项交给列表滚动消化，提示与底边框仍然完整', async () => {
     const screen = await renderApprovalDialog(80, 12);
-    assert.match(screen, /Esc cancel/, '快捷键提示行不许被裁掉');
+    // 提示已挪进底边框左侧；窄盒装不下整串时截断（带 …），但不能整段消失。
+    assert.match(screen, /↑\/↓ scroll/, '操作提示要留在底边框上');
     assert.match(screen, /╰/, '底边框不许被裁掉');
     assert.match(screen, /\(1\/4\)/, '放不下的选项要作为可滚列表呈现');
   });
@@ -423,7 +424,14 @@ describe('斜杠命令打通到弹窗', () => {
       writeFileSync(join(dir, 'SKILL.md'), '---\nname: 000-widget\ndescription: Widget builder\n---\n', 'utf8');
 
       const screen = await driveCommand(terminal, root, mcp, {}, '/skills');
-      assert.match(screen, /Skills \(\d+\)/, '弹窗里应当渲染出上报标题');
+      // 标题两侧隔着上色用的转义序列，断言前先剥掉 ANSI。
+      const bare = screen.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+      assert.match(bare, /╭─ Skills ─/, '弹窗标题栏渲染出来');
+      assert.match(bare, /Skills \(1 found\)/, '正文标题带上扫到的数量');
+      const surface = theme.bgSeq('dialogBg');
+      const boxRows = screen.split(/\x1b\[\d+;\d+H/).filter((row) => row.includes('╭'));
+      assert.ok(boxRows.length > 0, '应渲染出对话框顶边');
+      assert.equal(boxRows.some((row) => row.includes(surface)), false, '技能报告框不铺面色');
       assert.match(screen, /The model sees only the name and description/, '渲染的是有内容的分支而不是空分支');
       assert.match(screen, /Widget builder/, '工作区里的技能被扫到了');
       assert.equal(screen.includes('Unknown command'), false);

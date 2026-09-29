@@ -23,6 +23,7 @@ export {
 	SUPPRESS_MULTI_CLICK_SELECTION,
 	CURSOR_MARKER,
 	compositeTuiLine,
+	compositeTuiLinePunchingSpaces,
 	type Focusable,
 	isFocusable,
 	isViewportTUI,

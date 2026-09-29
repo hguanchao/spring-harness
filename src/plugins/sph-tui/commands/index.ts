@@ -15,25 +15,33 @@ export interface CommandItem {
   hint: string;
 }
 
+export interface CommandItem {
+  id: string;
+  label: string;
+  hint: string;
+  /** /help 面板的分组标题（Session / Context / …）；同一组的命令在面板里连续排列。 */
+  group: string;
+}
+
 export const COMMANDS: readonly CommandItem[] = [
-  { id: 'help', label: '/help', hint: 'List commands and key bindings' },
-  { id: 'history', label: '/history', hint: 'Search and reuse prompt history' },
-  { id: 'new', label: '/new', hint: 'Start a new session' },
-  { id: 'resume', label: '/resume', hint: 'Resume a previous session, or switch by id' },
-  { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises' },
-  { id: 'plugins', label: '/plugins', hint: 'List loaded plugins, what they provide, and what failed' },
-  { id: 'mcps', label: '/mcps', hint: 'Manage MCP servers: status, enable/disable, add, remove, reload' },
-  { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal' },
-  { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions' },
-  { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml' },
-  { id: 'provider', label: '/provider', hint: 'Switch provider, then model, reasoning effort, and API protocol' },
-  { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)' },
-  { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo' },
-  { id: 'permissions', label: '/permissions', hint: 'Show effective rules, their sources, sandbox, and approved actions' },
-  { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html' },
-  { id: 'prompts', label: '/prompts', hint: 'Insert a saved prompt template' },
-  { id: 'diff', label: '/diff', hint: 'Show the workspace git diff, read only' },
-  { id: 'fork', label: '/fork', hint: 'Continue this conversation in a new session' },
+  { id: 'help', label: '/help', hint: 'List commands and key bindings', group: 'Tools' },
+  { id: 'history', label: '/history', hint: 'Search and reuse prompt history', group: 'Session' },
+  { id: 'new', label: '/new', hint: 'Start a new session', group: 'Session' },
+  { id: 'resume', label: '/resume', hint: 'Resume a previous session, or switch by id', group: 'Session' },
+  { id: 'skills', label: '/skills', hint: 'List the skills this workspace advertises', group: 'Tools' },
+  { id: 'plugins', label: '/plugins', hint: 'List loaded plugins, what they provide, and what failed', group: 'Tools' },
+  { id: 'mcps', label: '/mcps', hint: 'Manage MCP servers: status, enable/disable, add, remove, reload', group: 'Tools' },
+  { id: 'goal', label: '/goal', hint: 'Set, view, or clear the goal', group: 'Context' },
+  { id: 'compact', label: '/compact', hint: 'Compact older history into a checkpoint, optionally with focus instructions', group: 'Context' },
+  { id: 'model', label: '/model', hint: 'Choose a model and write it to config.toml', group: 'Model & Input' },
+  { id: 'provider', label: '/provider', hint: 'Switch provider, then model, reasoning effort, and API protocol', group: 'Model & Input' },
+  { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)', group: 'Model & Input' },
+  { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo', group: 'Model & Input' },
+  { id: 'permissions', label: '/permissions', hint: 'Show effective rules, their sources, sandbox, and approved actions', group: 'Model & Input' },
+  { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html', group: 'Session' },
+  { id: 'prompts', label: '/prompts', hint: 'Insert a saved prompt template', group: 'Tools' },
+  { id: 'diff', label: '/diff', hint: 'Show the workspace git diff, read only', group: 'Tools' },
+  { id: 'fork', label: '/fork', hint: 'Continue this conversation in a new session', group: 'Session' },
 ];
 
 /**

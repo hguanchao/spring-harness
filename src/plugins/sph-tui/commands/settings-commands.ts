@@ -54,31 +54,29 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
     host.addNotice('No models declared in models.json.', 'warn');
     return;
   }
-  // description 列内排三段：模型 ID / 提供商 / 状态。各段按最宽值 pad（间隙 2），
-  // 加上 label 列就是四列；中文名混排时字符数不等于显示宽，按 visibleWidth 对齐才不会锯齿。
+  // 分组头即提供商：行里不再重复提供商列；current 状态放行尾右对齐。
+  // 候选只来自 models.json 的声明：模型目录是显式维护的清单，不再从上游拉取缓存——
+  // 上游会新增模型，而拉一次就存住的缓存只会静默地给出旧列表。
   const widthOf = (text: string): number => visibleWidth(text);
-  const idColumnWidth = Math.max(...providers.flatMap((provider) => provider.models.map((row) => widthOf(row.id))));
-  const providerColumnWidth = Math.max(...providers.map((provider) => widthOf(provider.name)));
   const labelColumnWidth = Math.max(
     ...providers.flatMap((provider) =>
       provider.models.map((row) => widthOf(row.name ?? displayNameForModel(row.id))),
     ),
   );
-  const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
-  const items: SelectItem[] = providers.flatMap((provider) =>
-    provider.models.map((declared) => {
+  const items: SelectItem[] = providers.flatMap((provider) => [
+    { value: `provider:${provider.name}`, label: provider.name, kind: 'header' as const },
+    ...provider.models.map((declared) => {
       // 模型 id 可以含 `/`，菜单值不能再靠斜杠把 provider 和 id 粘在一起。
       const value = `${provider.name}\u001f${declared.id}`;
       const isCurrent = provider.name === host.currentProvider() && declared.id === host.currentModel();
       return {
         value,
         label: declared.name ?? displayNameForModel(declared.id),
-        description: `${padTo(declared.id, idColumnWidth)}${padTo(provider.name, providerColumnWidth)}${
-          isCurrent ? 'current' : ''
-        }`.trimEnd(),
+        description: declared.id,
+        trailing: isCurrent ? 'current' : undefined,
       };
     }),
-  );
+  ]);
   if (items.length === 0) {
     host.addNotice('No models declared in models.json.', 'warn');
     return;
