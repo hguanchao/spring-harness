@@ -21,18 +21,18 @@
  */
 
 import { basename, join } from 'node:path';
-import type { AgentListener } from '../sph-loop/events.js';
-import { collectFileMentions } from '../sph-loop/attachments.js';
-import { loadCompaction, openCompactedSession, projectContext } from '../sph-loop/compact.js';
-import { loadUserTheme } from './theme/theme.js';
-import { sphModelsPath, sphThemePath } from '../../home.js';
-import { modelHeaderLabel } from '../sph-llm/models.js';
+import type { AgentListener } from '@/plugins/sph-loop/events.js';
+import { collectFileMentions } from '@/plugins/sph-loop/attachments.js';
+import { loadCompaction, openCompactedSession, projectContext } from '@/plugins/sph-loop/compact.js';
+import { loadUserTheme } from '@/plugins/sph-tui/theme/theme.js';
+import { sphModelsPath, sphThemePath } from '@/home.js';
+import { modelHeaderLabel } from '@/plugins/sph-llm/models.js';
 
-import { createSteeringInbox, STEERING_QUEUE_LIMIT, type SteeringInbox } from '../sph-schedule/jobs.js';
+import { createSteeringInbox, STEERING_QUEUE_LIMIT, type SteeringInbox } from '@/plugins/sph-schedule/jobs.js';
 
-import { runTurn } from '../sph-loop/loop.js';
-import { TouchMemory } from '../sph-loop/memory.js';
-import { buildSystemPrompt } from '../sph-loop/prompt.js';
+import { runTurn } from '@/plugins/sph-loop/loop.js';
+import { TouchMemory } from '@/plugins/sph-loop/memory.js';
+import { buildSystemPrompt } from '@/plugins/sph-loop/prompt.js';
 import {
   AUTO_RECAP_RETRY_MS,
   RECAP_IDLE_MS,
@@ -42,26 +42,26 @@ import {
   recapGate,
   shouldSuppressAutoRecapDisplay,
   type RecapContext,
-} from '../sph-loop/recap.js';
-import { scanSkills, skillRoots } from '../sph-skills/scan.js';
-import { builtinAgents } from '../sph-subagent/agents.js';
-import { createLlmClassifier } from '../../permission/auto.js';
-import { HeadlessApprover, visibleTools, type ApprovalMode, type ApprovalRequest, type Approver } from '../../permission/policy.js';
-import type { SandboxMode } from '../../sandbox/types.js';
-import { updateConfigFile } from '../../config/save.js';
-import { upsertModelApi, type ProviderDeclaration } from '../../config/registry.js';
-import type { ApiProtocol } from '../../config/load.js';
-import type { LlmClient, ReasoningEffort, TokenUsage } from '../sph-llm/openai.js';
-import { SpillStore } from '../sph-storage/spill.js';
-import { combineListeners } from '../../agent/events.js';
-import { sessionEventData, type SessionFailure } from '../../session/fold.js';
-import { jobNotificationText } from '../../runtime/scheduler.js';
-import { jsonlSessionFactory } from '../sph-session/store.js';
-import { EMPTY_PLUGIN_SERVICES } from '../types.js';
-import { SCHEDULER_SERVICE, SESSION_SERVICE, STORAGE_SERVICE, type SchedulerService, type SessionService, type SpillStorePort, type StorageService } from '../services.js';
-import { sessionService } from '../sph-session/index.js';
-import type { SessionFactory, SessionPort } from '../../session/types.js';
-import { defaultTools } from '../sph-tools/index.js';
+} from '@/plugins/sph-loop/recap.js';
+import { scanSkills, skillRoots } from '@/plugins/sph-skills/scan.js';
+import { builtinAgents } from '@/plugins/sph-subagent/agents.js';
+import { createLlmClassifier } from '@/permission/auto.js';
+import { HeadlessApprover, visibleTools, type ApprovalMode, type ApprovalRequest, type Approver } from '@/permission/policy.js';
+import type { SandboxMode } from '@/sandbox/types.js';
+import { updateConfigFile } from '@/config/save.js';
+import { upsertModelApi, type ProviderDeclaration } from '@/config/registry.js';
+import type { ApiProtocol } from '@/config/load.js';
+import type { LlmClient, ReasoningEffort, TokenUsage } from '@/plugins/sph-llm/openai.js';
+import { SpillStore } from '@/plugins/sph-storage/spill.js';
+import { combineListeners } from '@/agent/events.js';
+import { sessionEventData, type SessionFailure } from '@/session/fold.js';
+import { jobNotificationText } from '@/runtime/scheduler.js';
+import { jsonlSessionFactory } from '@/plugins/sph-session/store.js';
+import { EMPTY_PLUGIN_SERVICES } from '@/plugins/types.js';
+import { SCHEDULER_SERVICE, SESSION_SERVICE, STORAGE_SERVICE, type SchedulerService, type SessionService, type SpillStorePort, type StorageService } from '@/plugins/services.js';
+import { sessionService } from '@/plugins/sph-session/index.js';
+import type { SessionFactory, SessionPort } from '@/session/types.js';
+import { defaultTools } from '@/plugins/sph-tools/index.js';
 import {
   BLOCK_GAP,
   CombinedAutocompleteProvider,
@@ -79,39 +79,39 @@ import {
   VStack,
   ScrollView,
   formatKeyText,
-} from '../../tui/index.js';
-import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from './app-keybindings.js';
-import { InteractiveApprover, type ApprovalChoice, type ApprovalUi } from './permission.js';
-import { APPROVAL_OVERLAY_PRIORITY, showInputDialog, showMessageDialog, showSelectDialog } from './dialogs.js';
-import { renderPluginsReport, renderSkillsReport } from './reports.js';
-import { readGitBranch } from './git.js';
-import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from './components/interaction.js';
-import { clearedHoverNeedsRepaint, clearHoverHighlight } from './components/hover-highlight.js';
-import { beginTranscriptClick, finishTranscriptClick } from './components/row-selection.js';
+} from '@/tui/index.js';
+import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from '@/plugins/sph-tui/input/app-keybindings.js';
+import { InteractiveApprover, type ApprovalChoice, type ApprovalUi } from '@/plugins/sph-tui/trust/permission.js';
+import { APPROVAL_OVERLAY_PRIORITY, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
+import { renderPluginsReport, renderSkillsReport } from '@/plugins/sph-tui/commands/reports.js';
+import { readGitBranch } from '@/plugins/sph-tui/footer/git.js';
+import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from '@/plugins/sph-tui/interaction/index.js';
+import { clearedHoverNeedsRepaint, clearHoverHighlight } from '@/plugins/sph-tui/interaction/hover-highlight.js';
+import { beginTranscriptClick, finishTranscriptClick } from '@/plugins/sph-tui/interaction/row-selection.js';
 
-import { CustomEditor } from './components/custom-editor.js';
-import { FooterComponent, type FooterData } from './components/footer.js';
-import { HeaderComponent } from './components/header.js';
-import { UserMessageComponent } from './components/user-message.js';
-import { userMessageBubbleY } from './components/sticky-user-message.js';
-import { RecapMessageComponent } from './components/recap.js';
-import { generateSessionTitle, TITLE_SOURCE_SAMPLE_CHARS } from './session-title.js';
-import { productScreenOptions } from './chrome.js';
-import { getEditorTheme, getMarkdownTheme, theme } from './theme/theme.js';
-import { errorMessage, flattenWhitespace } from '../../util.js';
-import { readVersion } from '../../version.js';
-import { COMMANDS, COMMAND_ALIASES, COMMAND_NAMES, primaryColumnWidthFor } from './commands.js';
-import { SteerBar, type SteerBarHost } from './steer-bar.js';
-import { TranscriptProjection, type TranscriptHost } from './transcript.js';
-import { restoreSessionInto, type ReplayHost } from './session-replay.js';
-import { commandMcps } from './mcp-commands.js';
-import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from './session-commands.js';
-import { commandDiff, commandFork, commandPrompts, invocableSkillPrompt } from './workspace-commands.js';
-import { commandModel, commandProvider, commandEffort, commandPermission, commandPermissions, cycleApprovalMode, type SettingsCommandHost } from './settings-commands.js';
-import type { TuiDeps } from './deps.js';
+import { CustomEditor } from '@/plugins/sph-tui/input/custom-editor.js';
+import { FooterComponent, type FooterData } from '@/plugins/sph-tui/footer/index.js';
+import { HeaderComponent } from '@/plugins/sph-tui/header/index.js';
+import { UserMessageComponent } from '@/plugins/sph-tui/messages/user-message.js';
+import { userMessageBubbleY } from '@/plugins/sph-tui/messages/sticky-user-message.js';
+import { RecapMessageComponent } from '@/plugins/sph-tui/messages/recap.js';
+import { generateSessionTitle, TITLE_SOURCE_SAMPLE_CHARS } from '@/plugins/sph-tui/transcript/session-title.js';
+import { productScreenOptions } from '@/plugins/sph-tui/transcript-chrome.js';
+import { getEditorTheme, getMarkdownTheme, theme } from '@/plugins/sph-tui/theme/theme.js';
+import { errorMessage, flattenWhitespace } from '@/util.js';
+import { readVersion } from '@/version.js';
+import { COMMANDS, COMMAND_ALIASES, COMMAND_NAMES, primaryColumnWidthFor } from '@/plugins/sph-tui/commands/index.js';
+import { SteerBar, type SteerBarHost } from '@/plugins/sph-tui/input/steer-bar.js';
+import { TranscriptProjection, type TranscriptHost } from '@/plugins/sph-tui/transcript/index.js';
+import { restoreSessionInto, type ReplayHost } from '@/plugins/sph-tui/transcript/session-replay.js';
+import { commandMcps } from '@/plugins/sph-tui/commands/mcp-commands.js';
+import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
+import { commandDiff, commandFork, commandPrompts, invocableSkillPrompt } from '@/plugins/sph-tui/commands/workspace-commands.js';
+import { commandModel, commandProvider, commandEffort, commandPermission, commandPermissions, cycleApprovalMode, type SettingsCommandHost } from '@/plugins/sph-tui/commands/settings-commands.js';
+import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 /** 命令模块和测试从这里拿 TuiDeps。进程入口不再把屏幕类型一起导出。 */
-export type { TuiDeps } from './deps.js';
+export type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 function message(error: unknown): string {
   return errorMessage(error);
@@ -1223,7 +1223,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
   // ------------------------------------------------------------------ 数据提供者
 
-  private headerData(): import('./components/header.js').HeaderData {
+  private headerData(): import('@/plugins/sph-tui/header/index.js').HeaderData {
     return {
       version: readVersion(),
       workspaceRoot: this.deps.workspaceRoot,

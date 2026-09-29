@@ -6,24 +6,24 @@
  * 放在装配文件里会制造循环 import。
  */
 
-import type { AgentDriver } from '../../agent/driver.js';
-import type { ApiProtocol } from '../../config/load.js';
-import type { ProviderDeclaration, ResolvedModel } from '../../config/registry.js';
-import type { LlmClient, ReasoningEffort } from '../sph-llm/openai.js';
-import type { McpReloadResult, McpService } from '../services.js';
-import type { LoadedPlugin } from '../host.js';
-import type { PluginLoadFailure } from '../loader.js';
-import type { AgentListener } from '../../agent/events.js';
-import type { PluginCommand, PluginServices } from '../types.js';
-import type { ApprovalMode, SubagentApprovalPolicy } from '../../permission/policy.js';
-import type { PermissionRuntime } from '../../permission/runtime.js';
-import type { JobBoardPort } from '../services.js';
-import type { TodoService } from '../services.js';
-import type { WorktreePort } from '../services.js';
-import type { SandboxHandle } from '../../sandbox/types.js';
-import type { SessionFactory, SessionPort } from '../../session/types.js';
-import type { ToolRegistry } from '../sph-tools/index.js';
-import type { Terminal, TUI } from '../../tui/index.js';
+import type { AgentDriver } from '@/agent/driver.js';
+import type { ApiProtocol } from '@/config/load.js';
+import type { ProviderDeclaration, ResolvedModel } from '@/config/registry.js';
+import type { LlmClient, ReasoningEffort } from '@/plugins/sph-llm/openai.js';
+import type { McpReloadResult, McpService } from '@/plugins/services.js';
+import type { LoadedPlugin } from '@/plugins/host.js';
+import type { PluginLoadFailure } from '@/plugins/loader.js';
+import type { AgentListener } from '@/agent/events.js';
+import type { PluginCommand, PluginServices } from '@/plugins/types.js';
+import type { ApprovalMode, SubagentApprovalPolicy } from '@/permission/policy.js';
+import type { PermissionRuntime } from '@/permission/runtime.js';
+import type { JobBoardPort } from '@/plugins/services.js';
+import type { TodoService } from '@/plugins/services.js';
+import type { WorktreePort } from '@/plugins/services.js';
+import type { SandboxHandle } from '@/sandbox/types.js';
+import type { SessionFactory, SessionPort } from '@/session/types.js';
+import type { ToolRegistry } from '@/plugins/sph-tools/index.js';
+import type { Terminal, TUI } from '@/tui/index.js';
 
 export interface TuiDeps {
   workspaceRoot: string;

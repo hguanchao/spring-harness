@@ -24,9 +24,9 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from '../../tui/index.js';
-import { extractAnsiCode, renderRoundedBox } from '../../tui/utils.js';
-import { getMarkdownTheme, getSelectListTheme, theme } from './theme/theme.js';
+} from '@/tui/index.js';
+import { extractAnsiCode, renderRoundedBox } from '@/tui/text/utils.js';
+import { getMarkdownTheme, getSelectListTheme, theme } from '@/plugins/sph-tui/theme/theme.js';
 
 /**
  * 给对话框整行铺上浮层面色。

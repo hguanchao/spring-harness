@@ -1,0 +1,251 @@
+import { LAYOUT_NODE, type ScrollLayoutNode } from "@/tui/screen/layout.js";
+import { type Component, Container } from "@/tui/screen/tui.js";
+
+export type ScrollViewScrollbar = "hidden" | "auto" | "always";
+
+export interface ScrollViewOptions {
+	axis?: "vertical";
+	follow?: "none" | "end";
+	primary?: boolean;
+	overscroll?: "chain" | "contain";
+	scrollbar?: ScrollViewScrollbar;
+	scrollbarTrackStyle?: (text: string) => string;
+	scrollbarThumbStyle?: (text: string) => string;
+	scrollbarHideDelayMs?: number;
+}
+
+export interface ScrollViewScrollToOptions {
+	/** Keep follow-end disabled even when the target is the current content end. */
+	disableFollow?: boolean;
+}
+
+/**
+ * 回复还不满一屏时，在底部留白，让最新用户消息能停在视口顶。
+ * 回复一旦超出一屏，留白归零，跟真实内容底。
+ */
+export function pinReservePad(
+	contentHeight: number,
+	viewportHeight: number,
+	pinY: number | undefined,
+): number {
+	if (pinY === undefined || viewportHeight <= 0) return 0;
+	if (contentHeight - pinY > viewportHeight) return 0;
+	return Math.max(0, pinY + viewportHeight - contentHeight);
+}
+
+export class ScrollView extends Container {
+	private readonly child: Component;
+	readonly followEnd: boolean;
+	readonly primary: boolean;
+	readonly overscroll: "chain" | "contain";
+	readonly scrollbarTrackStyle: (text: string) => string;
+	readonly scrollbarThumbStyle: (text: string) => string;
+	private currentScrollbar: ScrollViewScrollbar;
+	private currentScrollTop = 0;
+	private realContentHeight = 0;
+	private currentViewportHeight = 0;
+	private followingEnd: boolean;
+	private followSuppressedAtEnd = false;
+	private requestRenderCallback: (() => void) | undefined;
+	private scrollbarActive = false;
+	/** 最新用户消息在内容中的 y；follow-end 时优先把它留在视口顶，答过长再贴底。 */
+	private pinY: number | undefined;
+	/** 为把 pinY 滚到视口顶而加在内容底的空行。 */
+	private reservedPad = 0;
+	/** 滑块出现过就一直留着这一列，避免正文宽度在临界高度上来回跳。 */
+	private gutterLatched = false;
+
+	constructor(component: Component, options: ScrollViewOptions = {}) {
+		super();
+		if (options.axis !== undefined && options.axis !== "vertical") {
+			throw new Error(`Unsupported ScrollView axis: ${options.axis}`);
+		}
+		this.child = component;
+		this.children.push(component);
+		this.followEnd = (options.follow ?? "none") === "end";
+		this.followingEnd = this.followEnd;
+		this.primary = options.primary ?? false;
+		this.overscroll = options.overscroll ?? "chain";
+		this.currentScrollbar = options.scrollbar ?? "hidden";
+		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
+		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
+	}
+
+	get scrollTop(): number {
+		return this.currentScrollTop;
+	}
+
+	get isFollowingEnd(): boolean {
+		return this.followingEnd;
+	}
+
+	get viewportHeight(): number {
+		return this.currentViewportHeight;
+	}
+
+	get scrollbar(): ScrollViewScrollbar {
+		return this.currentScrollbar;
+	}
+
+	get isScrollbarVisible(): boolean {
+		if (this.scrollbar === "hidden" || this.currentViewportHeight <= 0) return false;
+		if (this.scrollbar === "always") return true;
+		// 欢迎页内容装得下、也没有可滚留白时不画。短对话只要 pin 留白让它真的能滚，滑块仍在。
+		return this.scrollHeight > this.currentViewportHeight;
+	}
+
+	/** 真实内容高度，不含 pin-reserve 留白。 */
+	get contentHeight(): number {
+		return this.realContentHeight;
+	}
+
+	/** follow-end 为把用户消息钉在视口顶而加的空行。 */
+	get pinPad(): number {
+		return this.reservedPad;
+	}
+
+	/** 含 pin-reserve 留白的可滚高度。 */
+	get scrollHeight(): number {
+		return this.realContentHeight + this.reservedPad;
+	}
+
+	private maxScrollTop(): number {
+		return Math.max(0, this.scrollHeight - this.currentViewportHeight);
+	}
+
+	get isScrollbarActive(): boolean {
+		return this.scrollbarActive;
+	}
+
+	setScrollbar(scrollbar: ScrollViewScrollbar): void {
+		if (scrollbar === this.currentScrollbar) return;
+		this.currentScrollbar = scrollbar;
+		this.requestRenderCallback?.();
+	}
+
+	getContentWidth(width: number): number {
+		// 滑块出现时独占最右一列。这一列是布局宽度，和滑块颜色无关。
+		// 一旦留过列就不再还回去，否则临界高度会让整屏重排，滑块跟着闪。
+		if (width <= 1 || this.scrollbar === "hidden") return width;
+		if (this.scrollbar === "always" || this.gutterLatched || this.isScrollbarVisible) {
+			if (this.isScrollbarVisible) this.gutterLatched = true;
+			return width - 1;
+		}
+		return width;
+	}
+
+	setScrollbarActive(active: boolean): void {
+		if (active === this.scrollbarActive) return;
+		this.scrollbarActive = active;
+		this.requestRenderCallback?.();
+	}
+
+	scrollTo(scrollTop: number, options: ScrollViewScrollToOptions = {}): void {
+		const requested = Number.isFinite(scrollTop) ? Math.trunc(scrollTop) : this.currentScrollTop;
+		const maxScrollTop = this.maxScrollTop();
+		const next = Math.max(0, Math.min(maxScrollTop, requested));
+		const nextFollowSuppressedAtEnd = options.disableFollow === true && next === maxScrollTop;
+		const nextFollowingEnd = !nextFollowSuppressedAtEnd && this.followEnd && next === maxScrollTop;
+		if (
+			next === this.currentScrollTop &&
+			nextFollowingEnd === this.followingEnd &&
+			nextFollowSuppressedAtEnd === this.followSuppressedAtEnd
+		) {
+			return;
+		}
+		this.currentScrollTop = next;
+		this.followingEnd = nextFollowingEnd;
+		this.followSuppressedAtEnd = nextFollowSuppressedAtEnd;
+		this.requestRenderCallback?.();
+	}
+
+	scrollBy(lines: number): number {
+		const requested = Number.isFinite(lines) ? Math.trunc(lines) : 0;
+		if (requested === 0) return 0;
+		const maxScrollTop = this.maxScrollTop();
+		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
+		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
+		const moved = next - start;
+		const wasFollowingEnd = this.followingEnd;
+		this.currentScrollTop = next;
+		this.followingEnd = this.followEnd && next === maxScrollTop;
+		this.followSuppressedAtEnd = false;
+		if (moved !== 0 || this.followingEnd !== wasFollowingEnd) this.requestRenderCallback?.();
+		return requested - moved;
+	}
+
+	scrollToStart(): void {
+		const atStartFollow = this.followEnd && this.scrollHeight <= this.currentViewportHeight;
+		const changed = this.currentScrollTop !== 0 || this.followingEnd !== atStartFollow;
+		this.currentScrollTop = 0;
+		this.followingEnd = atStartFollow;
+		this.followSuppressedAtEnd = false;
+		if (changed) this.requestRenderCallback?.();
+	}
+
+	scrollToEnd(): void {
+		this.followingEnd = this.followEnd;
+		this.followSuppressedAtEnd = false;
+		const pin = this.pinY;
+		const next =
+			this.followEnd && pin !== undefined && this.contentHeight - pin <= this.currentViewportHeight
+				? Math.max(0, Math.min(pin, this.maxScrollTop()))
+				: this.maxScrollTop();
+		const changed = this.currentScrollTop !== next;
+		this.currentScrollTop = next;
+		if (changed) this.requestRenderCallback?.();
+	}
+
+	setPinY(y: number | undefined): void {
+		this.pinY = y === undefined ? undefined : Math.max(0, Math.floor(y));
+		// 新一轮用户消息要重新跟底：否则用户刚滚走过，第二条发出来仍停在旧位置。
+		if (this.pinY !== undefined && this.followEnd) {
+			this.followingEnd = true;
+			this.followSuppressedAtEnd = false;
+		}
+	}
+
+	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		this.realContentHeight = Math.max(0, Math.floor(contentHeight));
+		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
+		this.requestRenderCallback = requestRender;
+		this.reservedPad = pinReservePad(this.realContentHeight, this.currentViewportHeight, this.pinY);
+		const maxScrollTop = this.maxScrollTop();
+		if (this.followingEnd) {
+			const pin = this.pinY;
+			if (pin !== undefined && this.contentHeight - pin <= this.currentViewportHeight) {
+				this.currentScrollTop = Math.max(0, Math.min(pin, maxScrollTop));
+			} else {
+				this.currentScrollTop = maxScrollTop;
+			}
+		} else {
+			this.currentScrollTop = Math.max(0, Math.min(this.currentScrollTop, maxScrollTop));
+		}
+		if (this.currentScrollTop < maxScrollTop) this.followSuppressedAtEnd = false;
+		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
+			this.followingEnd = true;
+		}
+	}
+
+	override addChild(_component: Component): void {
+		throw new Error("ScrollView has exactly one child");
+	}
+
+	override removeChild(_component: Component): void {
+		throw new Error("ScrollView child cannot be removed");
+	}
+
+	override clear(): void {
+		throw new Error("ScrollView child cannot be cleared");
+	}
+
+	override render(width: number): string[] {
+		const contentWidth = this.getContentWidth(width);
+		const lines = this.child.render(contentWidth);
+		return contentWidth === width ? lines : lines.map((line) => `${line} `);
+	}
+
+	[LAYOUT_NODE](): ScrollLayoutNode {
+		return { type: "scroll", component: this.child, state: this };
+	}
+}

@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Text, VStack } from '../../../src/tui/primitives.js';
-import { ScrollView } from '../../../src/tui/scroll-view.js';
+import { Text, VStack } from '@/tui/widgets/primitives.js';
+import { ScrollView } from '@/tui/widgets/scroll-view.js';
 import {
   allocateStackSizes,
   contentPaintRight,
   getScrollbarGeometry,
   getScrollViewBox,
   renderLayoutFrame,
-} from '../../../src/tui/layout.js';
-import { stripTerminalSequences } from '../../../src/tui/utils.js';
+} from '@/tui/screen/layout.js';
+import { stripTerminalSequences } from '@/tui/text/utils.js';
 
 describe('allocateStackSizes', () => {
   const leaf = { component: { render: () => ['x'], invalidate() {} } };

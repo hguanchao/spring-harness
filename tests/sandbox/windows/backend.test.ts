@@ -21,7 +21,7 @@ describe(
   { skip: process.platform === 'win32' ? false : '只有 Windows 有双令牌后端' },
   () => {
     it('init 后 status 正确，dispose 可重复调用', async () => {
-      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('@/plugins/sph-sandbox/windows/backend.js');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-token-ws-'));
       const temp = mkdtempSync(join(tmpdir(), 'sph-token-tmp-'));
       const sandbox = new WindowsAclSandbox({
@@ -43,7 +43,7 @@ describe(
     });
 
     it('tokenTierFor 按 shell 二进制分档：bash 走过滤档，pwsh/未知走受限档', async () => {
-      const { tokenTierFor } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
+      const { tokenTierFor } = await import('@/plugins/sph-sandbox/windows/backend.js');
       assert.equal(tokenTierFor('C:\\Program Files\\Git\\usr\\bin\\bash.exe'), 'filtered');
       assert.equal(tokenTierFor('D:\\tools\\sh.exe'), 'filtered');
       assert.equal(tokenTierFor('C:\\Program Files\\PowerShell\\7\\pwsh.exe'), 'restricted');
@@ -52,8 +52,8 @@ describe(
     });
 
     it('沙箱内跑真 Git Bash 不再撞 signal pipe 初始化失败', { timeout: 60_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
-      const { resolveBashBinary } = await import('../../../src/sandbox/shell-bin.js');
+      const { WindowsAclSandbox } = await import('@/plugins/sph-sandbox/windows/backend.js');
+      const { resolveBashBinary } = await import('@/sandbox/shell-bin.js');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-token-bash-'));
       const temp = mkdtempSync(join(tmpdir(), 'sph-token-bash-tmp-'));
       writeFileSync(join(workspace, 'hello.txt'), 'hi');
@@ -82,8 +82,8 @@ describe(
     });
 
     it('子进程 stdin 是有效句柄，读它会立刻遇到 EOF', { timeout: 60_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
-      const { resolveBashBinary } = await import('../../../src/sandbox/shell-bin.js');
+      const { WindowsAclSandbox } = await import('@/plugins/sph-sandbox/windows/backend.js');
+      const { resolveBashBinary } = await import('@/sandbox/shell-bin.js');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-token-stdin-'));
       const temp = mkdtempSync(join(tmpdir(), 'sph-token-stdin-tmp-'));
       writeFileSync(join(workspace, 'stdin.ps1'), [
@@ -126,7 +126,7 @@ describe(
 /** pwsh 的可用性只认真实调用：where/exists 都可能说谎（只看退出状态）。 */
 async function pwshCommand(): Promise<{ command: string; prefixArgs: string[] } | undefined> {
   try {
-    const { resolvePwshBinary } = await import('../../../src/sandbox/shell-bin.js');
+    const { resolvePwshBinary } = await import('@/sandbox/shell-bin.js');
     return resolvePwshBinary();
   } catch {
     return undefined;
@@ -142,7 +142,7 @@ describe(
   },
   () => {
     it('工作区内可写、工作区外被拒，TMP 指向沙箱私有临时目录', { timeout: 90_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('@/plugins/sph-sandbox/windows/backend.js');
       const shell = await pwshCommand();
       assert.ok(shell, 'pwsh 不可用则本用例应被 skip');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-fence-ws-'));
@@ -196,7 +196,7 @@ describe(
     });
 
     it('abort 终止子进程，而不是只停止等待', { timeout: 45_000 }, async () => {
-      const { WindowsAclSandbox } = await import('../../../src/plugins/sph-sandbox/windows/backend.js');
+      const { WindowsAclSandbox } = await import('@/plugins/sph-sandbox/windows/backend.js');
       const shell = await pwshCommand();
       assert.ok(shell, 'pwsh 不可用则本用例应被 skip');
       const workspace = mkdtempSync(join(tmpdir(), 'sph-abort-ws-'));

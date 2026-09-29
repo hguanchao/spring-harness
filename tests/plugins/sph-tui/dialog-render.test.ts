@@ -1,0 +1,584 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it } from 'node:test';
+import { TuiAltScreen } from '@/tui/screen/tui-alt-screen.js';
+import type { Terminal } from '@/tui/terminal/terminal.js';
+import { showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
+import { PALETTE } from '@/plugins/sph-tui/theme/palettes.js';
+import { theme } from '@/plugins/sph-tui/theme/theme.js';
+import { renderMcpReport, renderSkillsReport } from '@/plugins/sph-tui/commands/reports.js';
+import { runTui, type TuiDeps } from '@/plugins/sph-tui/interactive-mode.js';
+import { createPermissionRuntime } from '@/permission/runtime.js';
+import type { ProviderDeclaration } from '@/config/registry.js';
+import { PluginHost } from '@/plugins/host.js';
+import { discoverPlugins } from '@/plugins/loader.js';
+import { McpHub } from '@/plugins/sph-mcp/hub.js';
+import { testHostFacts } from '../host-fixture.js';
+import type { McpService } from '@/plugins/services.js';
+import { EMPTY_PLUGIN_SERVICES } from '@/plugins/types.js';
+import { JobBoard } from '@/plugins/sph-schedule/jobs.js';
+import { EMPTY_TODO } from '@/plugins/services.js';
+import { JsonlSession } from '@/plugins/sph-session/store.js';
+
+/**
+ * 只写不读的假终端：记录写入，让用例能在渲染结果里搜文本。
+ *
+ * 用真实渲染链（TuiAltScreen）而不是把 showOverlay 桩掉：这一层正是「弹窗到底有没有显示」
+ * 的所在，桩掉等于把要验证的东西验证掉。`renderNow` 是同步的，不必等渲染定时器。
+ */
+class FakeTerminal implements Terminal {
+  private input?: (data: string) => void;
+  private readonly written: string[] = [];
+  columns = 100;
+  rows = 30;
+  kittyProtocolActive = false;
+
+  start(onInput: (data: string) => void): void {
+    this.input = onInput;
+  }
+
+  stop(): void {}
+  async drainInput(): Promise<void> {}
+  write(data: string): void {
+    this.written.push(data);
+  }
+  moveBy(): void {}
+  hideCursor(): void {}
+  showCursor(): void {}
+  clearLine(): void {}
+  clearFromCursor(): void {}
+  clearScreen(): void {}
+  setTitle(): void {}
+  setProgress(): void {}
+
+  /** 累积输出（含转义序列；用例只做子串搜索）。 */
+  screen(): string {
+    return this.written.join('');
+  }
+
+  send(data: string): void {
+    this.input?.(data);
+  }
+}
+
+/** 驱动一次：开屏、渲染、断言、Esc 关闭。返回渲染出的屏幕文本。 */
+async function renderInDialog(title: string, text: string): Promise<string> {
+  const terminal = new FakeTerminal();
+  const ui = new TuiAltScreen(terminal, false, '/ws');
+  ui.start();
+  try {
+    const closed = showMessageDialog(ui, { title, text });
+    ui.renderNow(true);
+    const screen = terminal.screen();
+    terminal.send('\x1b');
+    await closed;
+    return screen;
+  } finally {
+    ui.stop({ preserveScreen: true });
+  }
+}
+
+describe('上报弹窗的真实渲染', () => {
+  it('技能上报的标题与条目真的出现在屏幕上', async () => {
+    const text = renderSkillsReport({
+      catalog: [{ name: 'pdf', description: 'Fill PDF forms', path: '/ws/.sph/skills/pdf/SKILL.md' }],
+      warnings: [],
+      roots: ['/ws/.sph/skills'],
+    });
+    const screen = await renderInDialog('Skills', text);
+    assert.match(screen, /Skills/);
+    assert.match(screen, /pdf/);
+    assert.match(screen, /Fill PDF forms/);
+  });
+
+  it('MCP 上报在连不上时也把 server 名字显示出来', async () => {
+    const text = renderMcpReport({
+      servers: [
+        {
+          name: 'broken',
+          transport: 'stdio',
+          supported: true,
+          enabled: true,
+          connected: false,
+          target: 'npx -y broken-mcp',
+          problem: 'failed to start: spawn npx ENOENT',
+          origin: { label: '~/.sph/config.toml', path: '/home/u/.sph/config.toml', editable: true },
+          tools: [],
+        },
+      ],
+      warnings: ['broken: spawn npx ENOENT'],
+    });
+    const screen = await renderInDialog('MCP servers', text);
+    assert.match(screen, /MCP servers/);
+    assert.match(screen, /broken/);
+    assert.match(screen, /not connected/);
+  });
+
+  it('帮助弹窗盖在原有行上，左右的转录还在', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.addChild({
+      invalidate() {},
+      render: (width: number) => {
+        const line = `Q${' '.repeat(Math.max(0, width - 2))}Q`;
+        return Array.from({ length: 40 }, () => line);
+      },
+    });
+    ui.start();
+    try {
+      const closed = showMessageDialog(ui, { title: 'Help', text: 'commands' });
+      ui.renderNow(true);
+      const screen = terminal.screen();
+      assert.match(screen, /Help/);
+      const rows = screen.split(/\x1b\[\d+;1H/);
+      assert.ok(
+        rows.some((row) => row.includes('Q') && row.includes('│')),
+        '对话框所在行的左右两侧应仍是原来的转录',
+      );
+      terminal.send('\x1b');
+      await closed;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  });
+
+  it('帮助正文走主题白 #c6c6c6，不落到终端默认 #cccccc', async () => {
+    const screen = await renderInDialog('Help', '- `/help` — List commands and key bindings');
+    assert.equal(PALETTE.mdText, '#c6c6c6');
+    const painted = theme.fg('mdText', 'x');
+    const seq = painted.slice(0, painted.indexOf('x'));
+    assert.ok(seq.length > 0, 'mdText 应产出前景色序列');
+    assert.ok(screen.includes(seq), '弹窗正文应使用主题白，而不是终端默认前景');
+    assert.doesNotMatch(screen, /\x1b\[38;2;204;204;204m/);
+  });
+
+  it('选择框正文走主题白，长文可滚而不是截成省略号', async () => {
+    const terminal = new FakeTerminal();
+    terminal.rows = 18;
+    terminal.columns = 80;
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const rows = Array.from({ length: 40 }, (_, i) => `PLANROW-${String(i + 1).padStart(2, '0')}`);
+      const pending = showSelectDialog(ui, {
+        title: 'Plan',
+        bodyText: rows.join('\n\n'),
+        items: [
+          { value: 'approve', label: 'Approve' },
+          { value: 'revise', label: 'Keep planning' },
+        ],
+        maxVisible: 2,
+        maxHeight: '80%',
+      });
+      ui.renderNow(true);
+      const first = terminal.screen();
+      const painted = theme.fg('mdText', 'x');
+      const seq = painted.slice(0, painted.indexOf('x'));
+      assert.ok(first.includes(seq), '计划正文应使用主题白 mdText');
+      assert.match(first, /PLANROW-01/);
+      assert.doesNotMatch(first, /PLANROW-40/);
+      terminal.send('\x1b[F');
+      ui.renderNow(true);
+      assert.match(terminal.screen(), /PLANROW-40/);
+      terminal.send('\x1b');
+      await pending;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  });
+
+  it('Esc 能关掉弹窗（Promise 会 resolve，不会挂住界面）', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const closed = showMessageDialog(ui, { title: 'Skills', text: '## Skills (0)' });
+      ui.renderNow(true);
+      assert.equal(ui.hasOverlay(), true);
+      terminal.send('\x1b');
+      await closed;
+      assert.equal(ui.hasOverlay(), false);
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  });
+
+  it('对话框整行铺浮层面色，行内 SGR 之后要重申', async () => {
+    const terminal = new FakeTerminal();
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const closed = showSelectDialog(ui, {
+        title: 'Help',
+        bodyText: '- `/help` — List commands and key bindings',
+        items: [{ value: 'ok', label: 'Close' }],
+        maxVisible: 1,
+      });
+      ui.renderNow(true);
+      const screen = terminal.screen();
+      const surface = theme.bgSeq('dialogBg');
+      // 画布与浮层同色时，卡片会被读成「抠掉一块露出黑底」——所以每条框线行都要有面层底色，
+      // 且行内 SGR（`0m` 全重置）之后要重申，否则整行后半截会掉回画布色。
+      const boxRows = screen.split(/\x1b\[\d+;1H/).filter((row) => row.includes('│') || row.includes('╭'));
+      assert.ok(boxRows.length >= 3, `应渲染出对话框框线行，实际 ${boxRows.length} 行`);
+      for (const row of boxRows) {
+        const count = row.split(surface).length - 1;
+        assert.ok(count >= 2, `框线行应铺底并在 SGR 后重申，实际出现 ${count} 次: ${JSON.stringify(row.slice(0, 80))}`);
+      }
+      terminal.send('\x1b');
+      await closed;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  });
+});
+
+/**
+ * 审批弹窗的完整性。
+ *
+ * 这里守的是两条用户可见的底线:命令要逐字展示(Markdown 的转义规则会改写 `\|`
+ * 这类内容,批准看到的和实际执行的必须是同一条命令);选项列表在高个子终端里
+ * 全部可见、在矮终端里靠列表自身滚动消化,无论哪种,页脚提示和底边框都不许被
+ * 浮层的超限裁切削掉。
+ */
+describe('审批弹窗的完整性', () => {
+  const backslash = String.fromCharCode(92);
+  const command = `grep -n "ROUTES${backslash}|def ${backslash}|path" server/api/server.py | head -80`;
+  const approvalItems = [
+    { value: 'allow', label: 'Allow once' },
+    { value: 'session', label: 'Allow this exact command for this session' },
+    { value: 'always', label: 'Always allow this exact command for this project' },
+    { value: 'deny', label: 'Deny' },
+  ];
+
+  async function renderApprovalDialog(columns: number, rows: number): Promise<string> {
+    const terminal = new FakeTerminal();
+    terminal.columns = columns;
+    terminal.rows = rows;
+    const ui = new TuiAltScreen(terminal, false, '/ws');
+    ui.start();
+    try {
+      const pending = showSelectDialog(ui, {
+        title: 'Approve bash?',
+        bodyText: command,
+        bodyFormat: 'plain',
+        items: approvalItems,
+        maxVisible: 4,
+      });
+      ui.renderNow(true);
+      const screen = terminal.screen();
+      terminal.send('\x1b');
+      await pending;
+      return screen;
+    } finally {
+      ui.stop({ preserveScreen: true });
+    }
+  }
+
+  it('命令预览逐字保留，不再被 Markdown 转义吃掉反斜杠', async () => {
+    const screen = await renderApprovalDialog(125, 34);
+    assert.ok(screen.includes(`ROUTES${backslash}|def`), '弹窗里的命令必须与实际执行的一致');
+  });
+
+  it('常见终端高度下四个选项、快捷键提示与底边框全部可见', async () => {
+    const screen = await renderApprovalDialog(125, 34);
+    for (const label of approvalItems) {
+      assert.match(screen, new RegExp(label.label.replaceAll('|', String.raw`\|`)));
+    }
+    assert.match(screen, /Esc cancel/);
+    assert.match(screen, /╰/);
+  });
+
+  it('矮终端下选项交给列表滚动消化，页脚与底边框仍然完整', async () => {
+    const screen = await renderApprovalDialog(80, 12);
+    assert.match(screen, /Esc cancel/, '快捷键提示行不许被裁掉');
+    assert.match(screen, /╰/, '底边框不许被裁掉');
+    assert.match(screen, /\(1\/4\)/, '放不下的选项要作为可滚列表呈现');
+  });
+});
+
+/** 让 TUI 把一次输入处理完（渲染是同步的，只需让出事件循环）。 */
+const settle = (ms = 80): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 测试用的 MCP 服务：列表/调用走真 hub，seam 上插件侧才有的两份状态按空给。
+ *
+ * 本文件验的是弹窗渲染（`/mcps` 要把连不上的原因显示出来），刷新与来源报告由
+ * tests/plugins/sph-mcp.test.ts 与 tests/mcp/* 覆盖，这里不重复触发。
+ */
+function mcpService(hub: McpHub): McpService {
+  return {
+    reload: async () => ({ warnings: [], added: [], removed: [], restarted: [] }),
+    sources: () => [],
+    warnings: () => [],
+    listTools: () => hub.listTools(),
+    listServers: () => hub.listServers(),
+    listToolsOf: (server) => hub.listToolsOf(server),
+    call: (server, name, args) => hub.call(server, name, args),
+    whenReady: (timeoutMs) => hub.whenReady(timeoutMs),
+    dispose: () => hub.dispose(),
+  };
+}
+
+function tuiDeps(terminal: Terminal, root: string, mcp: McpHub): TuiDeps {
+  const provider: ProviderDeclaration = {
+    name: 'test',
+    baseUrl: 'https://example.invalid/v1',
+    api: 'chat-completions',
+    apiKey: '',
+    headers: {},
+    models: [{ id: 'test-model' }],
+  };
+  return {
+    workspaceRoot: root,
+    sessionDir: root,
+    configPath: join(root, 'config.toml'),
+    authLabel: 'test',
+    providerName: provider.name,
+    models: () => [provider],
+    resolveModel: (model, providerName) => ({
+      provider: providerName === undefined ? provider : { ...provider, name: providerName },
+      id: model,
+      api: provider.api,
+    }),
+    contextWindow: 100_000,
+    sandbox: {
+      status: { mode: 'off', enforcement: 'none', platform: process.platform },
+      tempDir: '',
+      run: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+      dispose() {},
+    },
+    session: new JsonlSession(root, 'test'),
+    mcp: () => mcpService(mcp),
+    reloadMcp: async () => ({ warnings: [], added: [], removed: [], restarted: [] }),
+    permission: createPermissionRuntime({
+      workspaceRoot: root,
+      userRules: { allow: [], ask: [], deny: [] },
+      userRulesDir: root,
+      home: root,
+      sandboxMode: 'off',
+      sandboxAutoAllow: false,
+      trusted: true,
+    }),
+    pluginReport: () => ({ plugins: [], failures: [], shadowed: [] }),
+    pluginServices: EMPTY_PLUGIN_SERVICES,
+    todos: EMPTY_TODO,
+    jobs: new JobBoard(),
+    approvalMode: 'ask',
+    model: 'test-model',
+    makeClient: () => ({ complete: async () => ({ text: '', finishReason: 'stop' }) }),
+    makeAuxClient: () => undefined,
+    terminal,
+  };
+}
+
+/**
+ * 从敲命令到弹窗上屏的整条链路：命令表注册 → 分派 → 取数 → 弹窗 → 渲染。
+ *
+ * 这里只断言**视口内必然可见**的文本，内容细节交给 reports.test.ts 的纯函数用例——
+ * showMessageDialog 是滚动视口，长过一屏的内容不会进屏幕缓冲，拿折叠区下面的文字做断言
+ * 只会得到一个和实现无关的假失败。真正要这一层验证的是：命令被注册并被分派到（漏加进
+ * COMMANDS 会得到 "Unknown command"，漏一个 switch 分支则静默无反应，两者都不会让
+ * 上报文本的单元测试失败）。
+ *
+ * 另外三条踩过的坑，写在这里免得以后重踩：
+ * - 命令与回车必须**分两次**送：整串 `/skills\r` 会走编辑器的「插入文本」分支，`\r`
+ *   变成正文而不是提交键。真实终端就是逐键到达的。
+ * - 回车要等补全菜单先出来（斜杠补全会异步挂上），模拟真实按键节奏。
+ * - 退出走 Esc 关弹窗 + Ctrl+D，不用 `/exit`：浮层打开时输入被浮层接走，而 Ctrl+D
+ *   只在输入为空时生效。
+ */
+async function driveCommand(
+  terminal: FakeTerminal,
+  root: string,
+  mcp: McpHub,
+  overrides: Partial<TuiDeps>,
+  command: string,
+): Promise<string> {
+  const running = runTui({ ...tuiDeps(terminal, root, mcp), ...overrides });
+  await settle(300);
+  terminal.send(command);
+  await settle(300);
+  terminal.send('\r');
+  await settle(300);
+  const screen = terminal.screen();
+  terminal.send('\x1b');
+  await settle();
+  terminal.send('\x04');
+  await running;
+  return screen;
+}
+
+describe('斜杠命令打通到弹窗', () => {
+  it('/skills 打开弹窗，且目录来自工作区扫描', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-skills-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      // 名字按字母序排最前：列表可能长过一屏，只有排在最前的条目才一定在视口内。
+      const dir = join(root, '.sph', 'skills', '000-widget');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'SKILL.md'), '---\nname: 000-widget\ndescription: Widget builder\n---\n', 'utf8');
+
+      const screen = await driveCommand(terminal, root, mcp, {}, '/skills');
+      assert.match(screen, /Skills \(\d+\)/, '弹窗里应当渲染出上报标题');
+      assert.match(screen, /The model sees only the name and description/, '渲染的是有内容的分支而不是空分支');
+      assert.match(screen, /Widget builder/, '工作区里的技能被扫到了');
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/plugins 打开弹窗，列出插件与它们提供的工具', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-plugins-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      // 真实装载：内置插件在 src/plugins/，sph-mcp 应当出现在报告里并带上它的 mcp 工具。
+      const plugins = new PluginHost({
+        coreTools: [],
+        workspaceRoot: root,
+        configPath: join(root, 'config.toml'),
+      });
+      const discovered = discoverPlugins({ workspaceRoot: root, userRoot: join(root, 'no-user') });
+      await plugins.load(discovered.candidates, discovered.shadowed);
+      try {
+        const screen = await driveCommand(
+          terminal,
+          root,
+          mcp,
+          { pluginReport: () => plugins.report() },
+          '/plugins',
+        );
+        // 弹窗按 markdown 渲染：反引号被吃掉，而行内码是**带颜色**的，所以
+        // "tools: " 与 "mcp" 之间夹着 SGR 序列。先剥色再断言，否则匹配的是转义序列。
+        const plain = screen.replace(/\[[0-9;]*m/g, '');
+        // 报告现在有十几个插件，一屏只看得到按名字排在最前的。工具行的全文在 reports.test.ts。
+        assert.match(plain, /Plugins \(\d+\)/, '弹窗里应当渲染出上报标题');
+        assert.match(plain, /sph-llm/, '按名字排第一的内置插件应当在视口里');
+        assert.match(plain, /services: sph-llm/);
+        assert.equal(screen.includes('Unknown command'), false);
+      } finally {
+        plugins.dispose();
+      }
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/mcps 打开管理器，把连不上的 server 连原因一起显示出来', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-mcps-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      await mcp.reload([{ name: 'broken', command: 'definitely-not-a-real-binary-xyz' }]);
+      await mcp.whenReady();
+      const screen = await driveCommand(terminal, root, mcp, {}, '/mcps');
+      assert.match(screen, /MCP servers \(1\)/);
+      assert.match(screen, /broken — not connected/);
+      assert.match(screen, /Reload from disk/, '管理器动作要可见，而不是只读弹窗');
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/resume 打开会话选择器并列出会话', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-resume-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      // 选择器只列有对话的会话：没有 message 记录的文件会被 listSessions 跳过。
+      writeFileSync(
+        join(root, 'aaaaaaaa.jsonl'),
+        `${JSON.stringify({ type: 'message', ts: new Date().toISOString(), id: 'e1', parentId: null, role: 'user', content: 'earlier work' })}\n`,
+        'utf8',
+      );
+
+      const screen = await driveCommand(terminal, root, mcp, {}, '/resume');
+      assert.match(screen, /Sessions/, '选择器标题');
+      assert.match(screen, /aaaaaaaa/, '会话 id 进了列表');
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/sessions 是 /resume 的别名，仍然可达', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-alias-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      // 空目录下能走到「没有会话」这句，就说明别名解析到了 /resume；被当成未知命令时
+      // 屏幕上会是 "Unknown command"，两者完全不同。
+      const screen = await driveCommand(terminal, root, mcp, {}, '/sessions');
+      assert.match(screen, /No sessions yet/);
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/permission 打开审批模式选择器', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-permission-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      const screen = await driveCommand(terminal, root, mcp, {}, '/permission');
+      assert.match(screen, /Approval mode/);
+      assert.equal(screen.includes('Unknown command'), false);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('/compact 把历史压成检查点，并新开一个会话', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sph-cmd-compact-'));
+    const terminal = new FakeTerminal();
+    const mcp = new McpHub(testHostFacts());
+    try {
+      // 摘要只在「保留窗口之外还有原始记录」时才会跑，所以要给足 8 条以上。
+      // 用 JsonlSession 真写一遍而不是手搓 JSON：parentId 链条由 append 自己接，
+      // 手写时链条一断 readMessages 就只剩尾巴，断言会退化成「测了个空」。
+      const seed = new JsonlSession(root, 'test');
+      for (let i = 1; i <= 12; i++) {
+        seed.appendMessage({ role: 'user', content: `turn ${i}` });
+        seed.appendMessage({ role: 'assistant', content: `a${i}` });
+      }
+
+      const screen = await driveCommand(
+        terminal,
+        root,
+        mcp,
+        {
+          makeClient: () => ({
+            complete: async () => ({ text: '## Goal and Acceptance Criteria\n- done', finishReason: 'stop' }),
+          }),
+        },
+        '/compact',
+      );
+
+      assert.match(screen, /Compacted \d+ messages into a new session/);
+      assert.equal(screen.includes('Unknown command'), false);
+      const oldLog = readFileSync(join(root, 'test.jsonl'), 'utf8');
+      assert.match(oldLog, /"kind":"session_fork"/);
+      assert.equal(oldLog.includes('"kind":"compaction"'), false, '原会话不能再写会改写发送投影的 compaction 事件');
+      const current = JSON.parse(readFileSync(join(root, 'current.json'), 'utf8')) as { id: string };
+      assert.notEqual(current.id, 'test');
+      const opened = readFileSync(join(root, `${current.id}.jsonl`), 'utf8');
+      assert.match(opened, /compacted earlier context/);
+    } finally {
+      mcp.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

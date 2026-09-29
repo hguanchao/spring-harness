@@ -1,4 +1,5 @@
 import { type CompatProfile } from '../../config/primitives.js';
+import { escapeRegExp } from '../../util.js';
 
 /**
  * 请求参数容忍度（caps）：把「同一协议在不同端点上的参数差异」收敛成一组布尔位。
@@ -150,10 +151,6 @@ const UNSUPPORTED_WORDS = [
   'not permitted',
   'extra inputs',
 ];
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 /**
  * 报文里是否点名了某个参数。用词边界而不是裸 includes：

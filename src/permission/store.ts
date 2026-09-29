@@ -19,8 +19,8 @@ import { addGrant, grantFilePath, readGrants } from './grant-file.js';
 /**
  * 从工作区根向上找第一个含 `.git` 的目录。
  *
- * 不 fork `git rev-parse`：sph 读分支时也是直接读 `.git/HEAD`（见 tui/git.ts），
- * 这里保持同一条线——不为一次路径解析起子进程。
+ * 不 fork `git rev-parse`：sph 读分支时也是直接读 `.git/HEAD`
+ * （见 src/plugins/sph-tui/footer/git.ts），这里保持同一条线——不为一次路径解析起子进程。
  */
 function findGitRoot(from: string): string | undefined {
   let dir = canonicalize(from);

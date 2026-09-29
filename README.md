@@ -237,12 +237,27 @@ src/
 ├── permission/  approval policy. This stays in the host: it is the safety check, not a feature
 ├── config/      which plugins are disabled, credentials, models.json
 ├── workspace/   path boundary, root resolution, trust
-├── tui/         terminal widgets. Entry is `src/tui/index.ts`; product UI stays in sph-tui
+├── tui/         terminal widgets, split by module: screen/ terminal/ input/ widgets/ text/.
+│                Entry is `src/tui/index.ts`; product UI stays in sph-tui
 └── plugins/     host, loader, seams, and the bundled implementations:
                  sph-llm, sph-tools, sph-skills, sph-session, sph-storage,
                  sph-loop, sph-schedule, sph-tui,
                  sph-mcp, sph-todo, sph-plan, sph-sandbox, sph-subagent
 ```
+
+Both UI trees are grouped by feature rather than by layer. `src/tui` splits into the render core (`screen`), terminal plumbing (`terminal`), input (`input`), reusable widgets (`widgets`), and text measurement (`text`). `src/plugins/sph-tui` splits into the regions and concerns of the product UI — `header`, `footer`, `messages`, `tools`, `interaction`, `input`, `commands`, `transcript`, `theme`, `trust` — and keeps only the process entry (`index.ts`), the dependency surface (`deps.ts`), the main loop (`interactive-mode.ts`), the dialog primitives (`dialogs.ts`), and the screen behaviour shared by the entry and the loop (`chrome.ts`) at its root.
+
+### Import paths
+
+Cross-module imports go through a single root alias instead of deep relative paths: `@/x` means `src/x` (so `@/tui/index.js` is the widget layer, `@/plugins/sph-loop/loop.js` a plugin, `@/util.js` a core module). It is declared in `tsconfig.json` as `paths` only — entries resolve relative to the config file, and `baseUrl` is deprecated as of TypeScript 6 and removed in 7.
+
+`tsc` does not rewrite import specifiers, so `dist/` still contains `@/tui/index.js` — and Node would take that for a bare package name and fail with `ERR_MODULE_NOT_FOUND`. `src/cli/alias-resolver.ts` closes that gap: a side-effect module that registers a `resolve` hook mapping `@/*` onto the emitted tree. It is imported first by both process entries (`src/cli/index.ts`, `src/sdk.ts`), because ESM evaluates the dependency graph in import order and the hook has to be in place before anything else resolves. Under `tsx` the module is a no-op — `tsx` resolves the alias from `tsconfig.json` itself.
+
+The CLI therefore boots in two steps: `src/cli/index.ts` registers the resolver and then dynamically imports `src/cli/main.ts`. The import has to be dynamic — a static one would resolve the whole graph before the resolver ran.
+
+Within `src/tui` and `src/plugins/sph-tui` there are no relative imports left at all, so moving a file never needs a second edit elsewhere.
+
+`src/tui/index.ts` is the widget layer's public API — tests and out-of-tree consumers import it. Call sites that sit on a **startup path** take deep paths instead, so a screen pays only for what it draws: the trust gate is the first thing a user sees and needs three files, but the barrel would pull the whole layer — editor, markdown (and `marked`), alt-screen diffing — to render a logo and a `y/n` prompt. That path went from ~825 ms to ~150 ms. The main interactive stack loads the layer in full regardless, so those call sites keep using the barrel. The same split applies to the alt-screen options: `chrome.ts` carries only the canvas colour and is what the trust gate takes, while the sticky user-message overlay lives in `transcript-chrome.ts` — structurally out of reach until there is a transcript to stick.
 
 Startup resolves `sph-llm`, `sph-session`, `sph-loop`, and `sph-schedule` by service name. If one of those is disabled, sph exits instead of running a turn with a missing half. `sph-sandbox` is the other required piece for `workspace` and `read-only`, and a same-named third-party plugin cannot replace it. Tools are not a service: `sph-tools` registers them into an otherwise empty tool table.
 

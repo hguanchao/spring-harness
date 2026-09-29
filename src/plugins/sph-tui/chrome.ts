@@ -1,31 +1,15 @@
 /**
- * 产品叠在备用屏幕上的行为。
+ * 备用屏幕的产品外观——只有画布底色这一项。
  *
- * 吸顶气泡认识具体消息块，控件层只留四个调用点。
- * 信任页和主界面共用这一份，避免两处各接一遍之后有一处漏掉画布色或吸顶。
+ * 这里必须保持「轻」：信任页在 bootstrap 之前跑，用的就是这份选项，静态引进来任何消息块，
+ * 都会让一屏 logo + y/n 连带加载它们。主界面专属的叠层（用户消息吸顶）在
+ * transcript-chrome.ts，由它把这里的画布色组合进完整的一套。
  */
 
-import type { TuiAltScreenOptions, ViewportChrome } from '../../tui/tui-alt-screen.js';
-import { compositeStickyUserMessages, stickyOverlayRects } from './components/sticky-user-message.js';
-import { oscResetCanvasBackground, oscSetCanvasBackground } from './theme/theme.js';
+import type { TuiAltScreenOptions } from '@/tui/screen/tui-alt-screen.js';
+import { oscResetCanvasBackground, oscSetCanvasBackground } from '@/plugins/sph-tui/theme/theme.js';
 
-export const transcriptChrome: ViewportChrome = {
-  reset() {},
-  hitRects(frame) {
-    return stickyOverlayRects(frame);
-  },
-  // 行选中标记(行首 ❙)已移除:点击只保留按压接管语义,不再有需要重绘的选中状态。
-  pressEmpty() {
-    return false;
-  },
-  composite(screen, frame, width) {
-    return compositeStickyUserMessages(screen, frame, width);
-  },
+/** 信任页与主界面共用的画布色：一处定义，两边都从这里取，不会各接一遍后漏掉。 */
+export const canvasOptions: Pick<TuiAltScreenOptions, 'canvas'> = {
+  canvas: { set: oscSetCanvasBackground, reset: oscResetCanvasBackground },
 };
-
-export function productScreenOptions(): Pick<TuiAltScreenOptions, 'canvas' | 'chrome'> {
-  return {
-    canvas: { set: oscSetCanvasBackground, reset: oscResetCanvasBackground },
-    chrome: transcriptChrome,
-  };
-}

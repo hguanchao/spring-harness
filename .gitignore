@@ -14,3 +14,6 @@ Thumbs.db
 .zcode/
 .workbuddy/
 .workbuddy-ai/
+
+# sph: 本项目的授权记录，不入库
+.sph/permissions.json

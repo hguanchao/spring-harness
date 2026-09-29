@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applySelectionHighlight, paintScreenDiff, selectionAutoScrollDirection } from '../../../src/tui/tui-alt-screen.js';
-import { compositeTuiLine } from '../../../src/tui/tui.js';
+import { applySelectionHighlight, paintScreenDiff, selectionAutoScrollDirection } from '@/tui/screen/tui-alt-screen.js';
+import { compositeTuiLine } from '@/tui/screen/tui.js';
 
 describe('拖选自动滚动', () => {
   it('指针还在视口首行或末行时不扩选', () => {
@@ -130,7 +130,7 @@ describe('applySelectionHighlight', () => {
 
 describe('CURSOR_MARKER', () => {
   it('是控件层的 APC，不含产品名', async () => {
-    const { CURSOR_MARKER } = await import('../../../src/tui/tui.js');
+    const { CURSOR_MARKER } = await import('@/tui/screen/tui.js');
     assert.equal(CURSOR_MARKER.includes('pi'), false);
     assert.equal(CURSOR_MARKER.includes('sph'), false);
     assert.ok(CURSOR_MARKER.includes('tui'));

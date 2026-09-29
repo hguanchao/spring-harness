@@ -4,8 +4,8 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import type { EditorTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '../../../tui/index.js';
-import { overlayPalette, PALETTE, type ThemeColor } from './palettes.js';
+import type { EditorTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '@/tui/index.js';
+import { overlayPalette, PALETTE, type ThemeColor } from '@/plugins/sph-tui/theme/palettes.js';
 
 export type { ThemeColor };
 /**
