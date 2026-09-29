@@ -1613,8 +1613,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       title: 'Skills',
       text: renderSkillsReport({ catalog, warnings, roots: skillRoots(this.deps.workspaceRoot) }),
       hint: 'Esc close · re-scanned on every open',
-      // 报告框单独一档：半宽、占屏高四分之三、顶边距屏幕 10%，框内不铺面色。
-      width: '50%',
+      // 报告框单独一档：六成宽、占屏高四分之三、顶边距屏幕 10%，框内铺画布底（与终端同色）。
+      width: '60%',
       maxWidth: 10_000,
       maxHeight: '75%',
       // OverlayOptions.row 的百分比是剩余空白里的比例，不是距顶部。这里按终端行数取 10%。

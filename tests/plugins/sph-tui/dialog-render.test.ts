@@ -428,10 +428,12 @@ describe('斜杠命令打通到弹窗', () => {
       const bare = screen.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
       assert.match(bare, /╭─ Skills ─/, '弹窗标题栏渲染出来');
       assert.match(bare, /Skills \(1 found\)/, '正文标题带上扫到的数量');
-      const surface = theme.bgSeq('dialogBg');
+      const dialogSurface = theme.bgSeq('dialogBg');
+      const canvasSurface = theme.bgSeq('bg');
       const boxRows = screen.split(/\x1b\[\d+;\d+H/).filter((row) => row.includes('╭'));
       assert.ok(boxRows.length > 0, '应渲染出对话框顶边');
-      assert.equal(boxRows.some((row) => row.includes(surface)), false, '技能报告框不铺面色');
+      assert.equal(boxRows.some((row) => row.includes(dialogSurface)), false, '技能报告框不铺浮层面色');
+      assert.ok(boxRows.some((row) => row.includes(canvasSurface)), '技能报告框铺画布底，与终端同色');
       assert.match(screen, /The model sees only the name and description/, '渲染的是有内容的分支而不是空分支');
       assert.match(screen, /Widget builder/, '工作区里的技能被扫到了');
       assert.equal(screen.includes('Unknown command'), false);

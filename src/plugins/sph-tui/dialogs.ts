@@ -84,7 +84,7 @@ class RoundedDialogBox extends Container {
 	private leftInfo: () => string = () => '';
 	/** 高度预算的硬封顶（与浮层 maxHeight 同源）。 */
 	private readonly maxRows?: () => number;
-	/** 为 true 时不铺 dialogBg，框内露出画布底。 */
+	/** 为 true 时铺画布底（与终端同色），不铺浮层面 dialogBg。 */
 	private readonly transparent: boolean;
 
 	constructor(title: string, bottomInfo: () => string = () => '', maxRows?: () => number, transparent = false) {
@@ -127,8 +127,9 @@ class RoundedDialogBox extends Container {
 			frame: (text) => theme.fg('borderMuted', text),
 			titlePaint: (text) => theme.bold(theme.fg('primary', text)),
 		});
-		if (this.transparent) return boxed;
-		const surface = theme.bgSeq('dialogBg');
+		// 透空档铺画布底（truecolor 下即 OSC 11 的 #141414，ansi 下是终端默认 49m），
+		// 空格仍盖住底下的页眉/转录；不打穿，否则标题栏空格会把「Skills」拆开。
+		const surface = theme.bgSeq(this.transparent ? 'bg' : 'dialogBg');
 		return boxed.map((row) => fillDialogSurface(row, width, surface));
 	}
 
@@ -716,6 +717,7 @@ export function showMessageDialog(
 		maxWidth?: number;
 		priority?: number;
 		row?: SizeValue;
+		/** 铺画布底（与终端同色），不铺浮层面 dialogBg。 */
 		transparent?: boolean;
 	},
 ): Promise<void> {
@@ -730,8 +732,6 @@ export function showMessageDialog(
 		);
 		const overlay = overlayOptions('document', maxHeight, options.priority, options.width, options.maxWidth);
 		if (options.row !== undefined) overlay.row = options.row;
-		// 不铺面色之后，空格仍会盖成一块纯色。透空才是「只留边框和文字」。
-		if (options.transparent === true) overlay.punchSpaces = true;
 		const handle = tui.showOverlay(dialog, overlay);
 		const finish = settleOnce<void>(handle, resolve);
 		dialog.setCloseHandler(() => finish());
