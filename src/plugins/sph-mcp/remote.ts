@@ -145,6 +145,8 @@ class HttpLink implements RemoteLink {
     headers.set('accept', 'application/json, text/event-stream');
     headers.set('mcp-protocol-version', '2025-03-26');
     if (this.sessionId !== undefined) headers.set('mcp-session-id', this.sessionId);
+    const { ensureDirectDispatcher } = await import('../../net/proxy.js');
+    await ensureDirectDispatcher();
     const response = await fetch(this.options.url, {
       method: 'POST',
       headers,
@@ -215,6 +217,8 @@ class SseLink implements RemoteLink {
     const headers = baseHeaders(this.options.headers);
     headers.set('accept', 'text/event-stream');
     // 这条 GET 要活过整个会话，不能套单次超时；超时只卡「迟迟不给 endpoint」。
+    const { ensureDirectDispatcher } = await import('../../net/proxy.js');
+    await ensureDirectDispatcher();
     const response = await fetch(this.options.url, { headers, signal: this.abort.signal });
     if (!response.ok || response.body === null) {
       throw new Error(`HTTP ${response.status}: ${clip(await response.text())}`);
@@ -259,6 +263,8 @@ class SseLink implements RemoteLink {
   private async post(postUrl: string, message: JsonRpcMessage): Promise<void> {
     const headers = baseHeaders(this.options.headers);
     headers.set('content-type', 'application/json');
+    const { ensureDirectDispatcher } = await import('../../net/proxy.js');
+    await ensureDirectDispatcher();
     const response = await fetch(postUrl, {
       method: 'POST',
       headers,

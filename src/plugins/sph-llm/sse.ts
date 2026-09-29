@@ -2,7 +2,6 @@
 // 依赖 lock 重算后全局名不再可用（教训：类型别依赖传递全局）。
 import { Readable } from 'node:stream';
 import type { ReadableStreamDefaultReader, ReadableStreamReadResult } from 'node:stream/web';
-import { request as undiciRequest } from 'undici';
 import { formatFetchError, flattenWhitespace } from '../../util.js';
 import { classifyHttpError, llmError } from './errors.js';
 import { isRetryableStatus, RetryableError, retryAfterMs } from './retry.js';
@@ -143,7 +142,12 @@ async function postLlm(params: SseStreamParams): Promise<Response> {
       signal: params.signal,
     });
   }
-  const res = await undiciRequest(params.url, {
+  const [{ request }, { ensureDirectDispatcher }] = await Promise.all([
+    import('undici'),
+    import('../../net/proxy.js'),
+  ]);
+  await ensureDirectDispatcher();
+  const res = await request(params.url, {
     method: 'POST',
     headers: params.headers,
     body: params.body,

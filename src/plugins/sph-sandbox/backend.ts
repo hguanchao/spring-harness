@@ -7,20 +7,21 @@
  */
 import { sphHome } from '../../home.js';
 import { SandboxError, type SandboxHandle, type SandboxMode } from '../../sandbox/types.js';
-import { DarwinSeatbeltSandbox } from './darwin.js';
-import { LinuxBwrapSandbox, bwrapUsable, findBwrap } from './linux.js';
-import { LinuxLandlockSandbox, landlockUsable } from './landlock.js';
-import { selectRunner } from './select.js';
 
 type LinuxRunner = 'bwrap' | 'landlock';
 
 let linuxRunner: Promise<LinuxRunner> | undefined;
 
 function chooseLinuxRunner(mode: Exclude<SandboxMode, 'off'>, workspaceRoot: string, tempDir: string): Promise<LinuxRunner> {
-  linuxRunner ??= selectRunner<LinuxRunner>([
-    { id: 'bwrap', usable: () => bwrapUsable(mode, workspaceRoot, tempDir) },
-    { id: 'landlock', usable: () => landlockUsable() },
-  ]);
+  linuxRunner ??= (async () => {
+    const { selectRunner } = await import('./select.js');
+    const { bwrapUsable } = await import('./linux.js');
+    const { landlockUsable } = await import('./landlock.js');
+    return selectRunner<LinuxRunner>([
+      { id: 'bwrap', usable: () => bwrapUsable(mode, workspaceRoot, tempDir) },
+      { id: 'landlock', usable: () => landlockUsable() },
+    ]);
+  })();
   return linuxRunner;
 }
 
@@ -47,17 +48,20 @@ export async function createSandboxBackend(
   if (process.platform === 'linux') {
     const runner = await chooseLinuxRunner(mode, workspaceRoot, tempDir);
     if (runner === 'bwrap') {
+      const { findBwrap, LinuxBwrapSandbox } = await import('./linux.js');
       const bwrap = findBwrap();
       if (!bwrap) throw new SandboxError('bwrap disappeared after probe; pass --sandbox off');
       const backend = new LinuxBwrapSandbox(mode, workspaceRoot, tempDir, bwrap);
       await backend.init();
       return backend;
     }
+    const { LinuxLandlockSandbox } = await import('./landlock.js');
     const backend = new LinuxLandlockSandbox(mode, workspaceRoot, tempDir);
     await backend.init();
     return backend;
   }
   if (process.platform === 'darwin') {
+    const { DarwinSeatbeltSandbox } = await import('./darwin.js');
     const backend = new DarwinSeatbeltSandbox(mode, workspaceRoot, tempDir);
     await backend.init();
     return backend;

@@ -10,15 +10,18 @@
 import type { SandboxMode } from '../../sandbox/types.js';
 import { SANDBOX_SERVICE, SESSION_SERVICE, type SessionService } from '../services.js';
 import type { PluginApi } from '../types.js';
-import { createSandboxBackend } from './backend.js';
 
 /** 插件入口。宿主按 `src/plugins/sph-sandbox/` 装载，插件名取目录名。 */
 export default function setup(api: PluginApi): void {
-  api.provide(SANDBOX_SERVICE, (mode: SandboxMode, workspaceRoot: string, tempDir: string) => createSandboxBackend(
-    mode,
-    workspaceRoot,
-    tempDir,
-    // 问会话服务，不自己去翻 JSONL 目录。服务不在时保留授权，避免把别人的写权限收掉。
-    () => api.consume<SessionService>(SESSION_SERVICE)?.hasOtherLiveSession(workspaceRoot) === true,
-  ));
+  // 后端按需加载：默认 sandbox=off 时核心自己处理，不该为 Landlock / Seatbelt / koffi 付钱。
+  api.provide(SANDBOX_SERVICE, async (mode: SandboxMode, workspaceRoot: string, tempDir: string) => {
+    const { createSandboxBackend } = await import('./backend.js');
+    return createSandboxBackend(
+      mode,
+      workspaceRoot,
+      tempDir,
+      // 问会话服务，不自己去翻 JSONL 目录。服务不在时保留授权，避免把别人的写权限收掉。
+      () => api.consume<SessionService>(SESSION_SERVICE)?.hasOtherLiveSession(workspaceRoot) === true,
+    );
+  });
 }

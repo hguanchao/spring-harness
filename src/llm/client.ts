@@ -110,9 +110,7 @@ export interface LlmClient {
   ): Promise<StreamDelta>;
 }
 
-/** 推理力度档位：off 表示不发送 reasoning_effort，走端点默认。 */
-export const REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+export { REASONING_EFFORTS, type ReasoningEffort } from '../config/primitives.js';
 
 /** 传输层默认重试次数（不含首次）。config.toml `max_retries` 未写时用这个。 */
 export const DEFAULT_MAX_RETRIES = 10;

@@ -14,7 +14,7 @@ import {
   type RuleSet,
 } from '../permission/policy.js';
 import { createLlmClassifier } from '../permission/auto.js';
-import { HELP, parseArgs, type CliArgs } from './args.js';
+import { type CliArgs } from './args.js';
 import { CliError, bootstrapRuntime, type Runtime } from './bootstrap.js';
 import { ConfigError, loadConfig } from '../config/load.js';
 import { loadProjectPermissions } from '../config/project.js';
@@ -253,6 +253,10 @@ async function runInteractive(args: CliArgs, workspaceRoot: string): Promise<voi
     throw error;
   }
 
+  // 主界面栈（marked + 控件层）与 bootstrap 重叠：会话锁 / MCP / 插件 setup
+  // 在跑的时候，interactive-mode 已经在拉。模块缓存让后面 screen.run 的 import 立刻命中。
+  void import('../plugins/sph-tui/interactive-mode.js');
+
   // 信任页和主界面都由 sph-tui 提供。未信任时 bootstrap 先装内置插件，让信任页画出来。
   let runtime: Runtime | undefined;
   let deferredError: string | undefined;
@@ -368,20 +372,8 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
   }
 }
 
-async function main(): Promise<void> {
-  let args: CliArgs;
-  try {
-    args = parseArgs(process.argv.slice(2));
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 2;
-    return;
-  }
-  if (args.help) {
-    process.stdout.write(HELP);
-    return;
-  }
-
+/** 入口已经解析完参数；`--help` 不会走到这里。 */
+export async function run(args: CliArgs): Promise<void> {
   const workspaceRoot = resolveWorkspaceRoot(process.cwd());
 
   // 首次运行：~/.sph 缺配置就生成参考模板（已有的绝不覆盖）。生成后 loadConfig 会在
@@ -428,8 +420,3 @@ async function main(): Promise<void> {
   }
   await runHeadless(args, workspaceRoot, args.prompt);
 }
-
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});

@@ -7,6 +7,7 @@
  */
 
 import { ConfigError } from './errors.js';
+import type { SandboxMode } from '../sandbox/types.js';
 
 /** 会话亲和头形态。`off` 不发；其余按厂商常见名字。 */
 export const SESSION_AFFINITY_FORMATS = ['openai', 'openrouter', 'off'] as const;
@@ -27,11 +28,28 @@ export interface CompatProfile {
 export const API_PROTOCOLS = ['chat-completions', 'responses', 'anthropic-messages'] as const;
 export type ApiProtocol = (typeof API_PROTOCOLS)[number];
 
+/** 推理力度档位：off 表示不发送 reasoning_effort，走端点默认。 */
+export const REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 export function parseApiProtocol(value: unknown, where = 'api'): ApiProtocol {
   if (typeof value !== 'string' || !(API_PROTOCOLS as readonly string[]).includes(value)) {
     throw new ConfigError(`${where} must be one of: ${API_PROTOCOLS.join(' | ')}`);
   }
   return value as ApiProtocol;
+}
+
+/**
+ * 省略即关。同机围栏要显式打开：没装 bwrap / sandbox-exec 的机器也能启动，
+ * 打开之后后端缺失则拒绝启动，而不是悄悄无围栏跑。
+ *
+ * 放在基元层：CLI 参数解析只需要这一段，不该为了 `--sandbox` 去拉 config/load
+ * （那会把 smol-toml、models.json、undici 代理整图带进 `sph --help`）。
+ */
+export function parseSandboxMode(value: string | undefined): SandboxMode {
+  if (value === undefined || value === '') return 'off';
+  if (value === 'off' || value === 'workspace' || value === 'read-only') return value;
+  throw new ConfigError(`unknown sandbox mode: ${value} (off | workspace | read-only)`);
 }
 
 function parseOptionalBoolean(value: unknown, key: string): boolean | undefined {

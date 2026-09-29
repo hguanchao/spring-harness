@@ -102,6 +102,8 @@ export async function listAvailableModels(
   } else if (apiKey && !hasHeader(headers, 'authorization')) {
     headers.authorization = `Bearer ${apiKey}`;
   }
+  const { ensureDirectDispatcher } = await import('../../net/proxy.js');
+  await ensureDirectDispatcher();
   const response = await fetch(url, {
     method: 'GET',
     headers,

@@ -320,20 +320,33 @@ export async function loadPluginModules(
 ): Promise<{ loaded: Array<{ candidate: PluginCandidate; modules: unknown[] }>; failures: PluginLoadFailure[] }> {
   const loaded: Array<{ candidate: PluginCandidate; modules: unknown[] }> = [];
   const failures: PluginLoadFailure[] = [];
-  for (const candidate of candidates) {
+  // 导入互不依赖，可以并行：13 个内置插件各自拉自己的模块图，串行会把冷启动
+  // 拉成「最慢那一个 × 个数」。setup 仍按发现顺序执行，consume 看到的服务表不变。
+  const settled = await Promise.all(candidates.map(async (candidate) => {
     try {
       const modules: unknown[] = [];
       for (const entry of candidate.entries) {
         modules.push(await importPluginModule(entry));
       }
-      loaded.push({ candidate, modules });
+      return { ok: true as const, candidate, modules };
     } catch (error) {
-      failures.push({
-        name: candidate.name,
-        entries: [...candidate.entries],
+      return {
+        ok: false as const,
+        candidate,
         reason: explainImportFailure(candidate.entries[0] ?? '', errorMessage(error)),
-      });
+      };
     }
+  }));
+  for (const row of settled) {
+    if (row.ok) {
+      loaded.push({ candidate: row.candidate, modules: row.modules });
+      continue;
+    }
+    failures.push({
+      name: row.candidate.name,
+      entries: [...row.candidate.entries],
+      reason: row.reason,
+    });
   }
   return { loaded, failures };
 }

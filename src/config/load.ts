@@ -8,16 +8,22 @@ import {
 } from '../permission/policy.js';
 import { SUBAGENT_APPROVAL_POLICIES, validateRules } from '../permission/policy.js';
 import { sphConfigPath, sphModelsPath } from '../home.js';
-import { DEFAULT_MAX_RETRIES, DEFAULT_SPILL_THRESHOLD, REASONING_EFFORTS, type ReasoningEffort } from '../llm/client.js';
+import { DEFAULT_MAX_RETRIES, DEFAULT_SPILL_THRESHOLD } from '../llm/client.js';
 import type { McpServerConfig } from '../plugins/services.js';
-import { type CompatProfile } from './primitives.js';
+import {
+  API_PROTOCOLS,
+  parseSandboxMode,
+  REASONING_EFFORTS,
+  type ApiProtocol,
+  type CompatProfile,
+  type ReasoningEffort,
+} from './primitives.js';
 import type { SandboxMode } from '../sandbox/types.js';
 import { ConfigError } from './errors.js';
-import { API_PROTOCOLS, type ApiProtocol } from './primitives.js';
 import { loadRegistry, resolveModel, type ProviderDeclaration } from './registry.js';
 import { parseGrants, parseRules, parseTrusted } from './state.js';
 
-export { ConfigError, API_PROTOCOLS };
+export { ConfigError, API_PROTOCOLS, parseSandboxMode };
 export type { ApiProtocol };
 
 export type McpServerConfigFile = McpServerConfig;
@@ -126,16 +132,6 @@ export interface SphConfig {
    * 拒启动等于把 `/provider` 也挡住。这里记下原因，调用方打出来，实际请求改走一份能用的声明。
    */
   startupWarnings: readonly string[];
-}
-
-/**
- * 省略即关。同机围栏要显式打开：没装 bwrap / sandbox-exec 的机器也能启动，
- * 打开之后后端缺失则拒绝启动，而不是悄悄无围栏跑。
- */
-export function parseSandboxMode(value: string | undefined): SandboxMode {
-  if (value === undefined || value === '') return 'off';
-  if (value === 'off' || value === 'workspace' || value === 'read-only') return value;
-  throw new ConfigError(`unknown sandbox mode: ${value} (off | workspace | read-only)`);
 }
 
 /** 缺 provider / model / key 时拒绝启动，避免绑死供应商或空跑。 */

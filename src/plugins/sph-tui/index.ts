@@ -18,27 +18,31 @@ import { sphSpillRoot } from '@/home.js';
 import type { Runtime } from '@/cli/bootstrap.js';
 import { UI_SERVICE, type UiService } from '@/plugins/services.js';
 import type { PluginApi } from '@/plugins/types.js';
-import { canvasOptions } from '@/plugins/sph-tui/chrome.js';
-import { confirmWorkspaceTrust } from '@/plugins/sph-tui/trust/index.js';
-import { TuiAltScreen } from '@/tui/screen/tui-alt-screen.js';
 import type { ViewportTUI } from '@/tui/screen/tui.js';
-import { ProcessTerminal } from '@/tui/terminal/terminal.js';
 
-export type { TuiDeps } from '@/plugins/sph-tui/interactive-mode.js';
-export { confirmWorkspaceTrust } from '@/plugins/sph-tui/trust/index.js';
+export type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 /**
  * 信任页的备用屏幕。调用方 start 一次，结束时 stop。
  *
  * 只挂画布色（`canvasOptions`），不挂主界面的吸顶叠层：这一屏没有转录，吸顶无处可贴。
+ * 屏幕实现按需加载：插件 setup 只登记服务，不把 TuiAltScreen / 主题 / 信任页静态拉进来。
  */
-export function createScreen(workspaceRoot: string): ViewportTUI {
+export async function createScreen(workspaceRoot: string): Promise<ViewportTUI> {
+  const [{ canvasOptions }, { TuiAltScreen }, { ProcessTerminal }] = await Promise.all([
+    import('@/plugins/sph-tui/chrome.js'),
+    import('@/tui/screen/tui-alt-screen.js'),
+    import('@/tui/terminal/terminal.js'),
+  ]);
   return new TuiAltScreen(new ProcessTerminal(), false, workspaceRoot, canvasOptions);
 }
 
 const ui: UiService = {
   async confirmTrust(workspaceRoot) {
-    const screen = createScreen(workspaceRoot);
+    const [{ confirmWorkspaceTrust }, screen] = await Promise.all([
+      import('@/plugins/sph-tui/trust/index.js'),
+      createScreen(workspaceRoot),
+    ]);
     try {
       const decision = confirmWorkspaceTrust(workspaceRoot, screen);
       screen.start();

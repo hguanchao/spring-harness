@@ -213,6 +213,8 @@ function htmlSnippet(html: string): { title?: string; snippet: string } {
 }
 
 async function fetchFollow(url: string, signal: AbortSignal): Promise<Response> {
+  const { ensureDirectDispatcher } = await import('../../net/proxy.js');
+  await ensureDirectDispatcher();
   let current = assertPublicHttpUrl(url).href;
   for (let hop = 0; hop < 5; hop++) {
     const response = await fetch(current, {

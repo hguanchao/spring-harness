@@ -175,7 +175,7 @@ export async function bootstrapRuntime(options: BootstrapOptions): Promise<Runti
     for (const warning of config.startupWarnings) process.stderr.write(`warning: ${warning}\n`);
   }
   // 代理是进程级出网开关，必须在任何可能出网的步骤（MCP、模型目录预热）之前装好。
-  applyProxy(config.proxy);
+  await applyProxy(config.proxy);
 
   // `--model` 整串就是模型 id，不从斜杠里猜 provider。换提供商用 `--provider`。
   // 命中的模型若是声明的，其 contextWindow / maxTokens / api 一并生效。
