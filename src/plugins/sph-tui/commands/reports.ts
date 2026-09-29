@@ -58,19 +58,21 @@ export function renderSkillsReport(input: {
   const lines: string[] = [];
 
   const total = catalog.length;
-  const countLine = `## Skills (${total} found)`;
+  const listHeading = `### Skills (${total})`;
   if (total === 0) {
     lines.push(
-      countLine,
       'No skills found. A skill is a directory holding `SKILL.md` with `name` and',
       '`description` frontmatter — drop one in any root below and it is picked up on the',
       'next turn.',
+      '',
+      listHeading,
     );
   } else {
-    lines.push(countLine);
     lines.push(
       'The model sees only the name and description; the `skill` tool reads the full',
       '`SKILL.md` when one matches the task.',
+      '',
+      listHeading,
       '',
     );
     for (const skill of catalog) {

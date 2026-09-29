@@ -427,7 +427,8 @@ describe('斜杠命令打通到弹窗', () => {
       // 标题两侧隔着上色用的转义序列，断言前先剥掉 ANSI。
       const bare = screen.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
       assert.match(bare, /╭─ Skills ─/, '弹窗标题栏渲染出来');
-      assert.match(bare, /Skills \(1 found\)/, '正文标题带上扫到的数量');
+      assert.equal(bare.includes('Skills (1 found)'), false, '正文不再重复 Skills (N found)');
+      assert.match(bare, /Skills \(1\)/, '描述下方的列表标题带上扫到的数量');
       const dialogSurface = theme.bgSeq('dialogBg');
       const canvasSurface = theme.bgSeq('bg');
       const boxRows = screen.split(/\x1b\[\d+;\d+H/).filter((row) => row.includes('╭'));
