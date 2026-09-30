@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import type { SelectItem, SelectListTheme } from '@/tui/widgets/select-list.js';
 import { SelectList } from '@/tui/widgets/select-list.js';
 import type { TuiMouseEvent } from '@/tui/screen/tui.js';
+import { visibleWidth } from '@/tui/text/utils.js';
 
 const UP = '\x1b[A';
 const DOWN = '\x1b[B';
@@ -44,7 +45,7 @@ function wheel(delta: number, y = 0): TuiMouseEvent {
 /** 选中行在渲染结果里带 selectedMark 前缀，据此反查当前选中项。 */
 function selectedValue(list: SelectList, width = 40): string | undefined {
 	for (const line of list.render(width)) {
-		if (line.startsWith('❙ ')) return line.slice(2).trim().split(/\s{2,}/)[0];
+		if (line.startsWith('> ')) return line.slice(2).trim().split(/\s{2,}/)[0];
 	}
 	return undefined;
 }
@@ -155,5 +156,88 @@ describe('SelectList 的键盘与点击', () => {
 		const before = selectedValue(l);
 		l.handleMouse({ ...wheel(0), type: 'move', button: 'left', y: 2 });
 		assert.equal(selectedValue(l), before);
+	});
+});
+
+describe('SelectList 的分组标题', () => {
+	const grouped = (): SelectList =>
+		new SelectList(
+			[
+				{ value: 'header', label: 'Group', kind: 'header' },
+				{ value: 'v0', label: 'item-0' },
+			],
+			2,
+			theme,
+		);
+
+	it('标签嵌在横线里，且与 markdown 的 h3 用同一套线条字形', () => {
+		const line = grouped().render(20)[0] ?? '';
+		assert.match(line, /^─ Group ─+$/);
+		assert.equal(line.includes('—'), false, '线条里不出现长破折号');
+		assert.equal(visibleWidth(line), 20, '占满整宽');
+	});
+
+	it('标签比内容还宽时截到整宽，不撑破边框', () => {
+		const l = new SelectList(
+			[
+				{ value: 'header', label: 'Plugins & Skills', kind: 'header' },
+				{ value: 'v0', label: 'item-0' },
+			],
+			2,
+			theme,
+		);
+		const line = l.render(12)[0] ?? '';
+		assert.ok(visibleWidth(line) <= 12, `标题行不该超出内容宽，实际 ${visibleWidth(line)}`);
+	});
+});
+
+describe('行号槽', () => {
+	function rendered(source: SelectItem[], maxVisible: number, width: number, numbered: boolean): string[] {
+		const list = new SelectList(source, maxVisible, theme, { numbered, minPrimaryColumnWidth: 12, maxPrimaryColumnWidth: 12 });
+		list.renderScrollInfoLine = false;
+		return list.render(width).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''));
+	}
+
+	it('关掉时行首仍是原来的选中条', () => {
+		const lines = rendered([{ value: 'a', label: 'alpha' }], 3, 40, false);
+		assert.equal(lines[0], '> alpha', '未开号：一个字节都不多');
+	});
+
+	it('号接在选中条后面：`>` 永远占最外一格', () => {
+		const lines = rendered([{ value: 'a', label: 'alpha' }, { value: 'b', label: 'beta' }], 3, 40, true);
+		assert.equal(lines[0]?.startsWith('> 1 '), true, '选中行的号不越位');
+		assert.equal(lines[1]?.startsWith('  2 '), true, '未选中行只是没有竖条');
+	});
+
+	it('号列宽按整表算，滚过 9→10 不把正文往右推', () => {
+		const lines = rendered(items(12), 3, 40, true);
+		const first = lines[0] ?? '';
+		const second = lines[1] ?? '';
+		assert.equal(first.slice(0, 5), '>  1 ', '个位数左补空格，不补零');
+		assert.equal(second.slice(0, 5), '   2 ', '补零会让它看起来像 ID');
+		assert.equal(first.indexOf('item-'), second.indexOf('item-'), '正文列在两行之间不抖');
+	});
+
+	it('非可选行不占号，但仍对齐到同一列', () => {
+		const source: SelectItem[] = [
+			{ value: 'h', label: 'Group', kind: 'header' },
+			{ value: 'a', label: 'alpha' },
+			{ value: 'd', label: 'note', kind: 'doc' },
+			{ value: 'b', label: 'beta' },
+		];
+		const lines = rendered(source, 5, 40, true);
+		const alpha = lines.find((line) => line.includes('alpha')) ?? '';
+		const note = lines.find((line) => line.includes('note')) ?? '';
+		const beta = lines.find((line) => line.includes('beta')) ?? '';
+		assert.equal(alpha.indexOf('alpha'), note.indexOf('note'), '说明行跟可选行同列');
+		assert.equal(beta.indexOf('beta'), alpha.indexOf('alpha'));
+		assert.equal(alpha.indexOf('alpha'), beta.indexOf('beta'));
+		assert.ok(alpha.includes(' 1 '));
+		assert.ok(beta.includes(' 2 '), '头与说明行不占号：beta 是第 2 条');
+	});
+
+	it('底边框位置读数换成 n/m（不再套括号）', () => {
+		const list = new SelectList(items(30), 5, theme);
+		assert.equal(list.getScrollInfo(), '1/30');
 	});
 });

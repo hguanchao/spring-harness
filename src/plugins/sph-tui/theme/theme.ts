@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import type { EditorTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '@/tui/index.js';
+import type { EditorTheme, GroupListTheme, MarkdownTheme, SelectListTheme, SelectionHighlight } from '@/tui/index.js';
 import { overlayPalette, PALETTE, type ThemeColor } from '@/plugins/sph-tui/theme/palettes.js';
 
 export type { ThemeColor };
@@ -335,8 +335,14 @@ export function getMarkdownTheme(): MarkdownTheme {
     },
     link: (text: string) => theme.underline(theme.fg('mdLink', text)),
     linkUrl: (text: string) => theme.fg('mdLinkUrl', text),
-    // 次要信息（`{{…}}`，报告里的路径、来源）：与行内码同一档蓝。
+    // 次要信息（`{{…}}`，报告里的来源、根目录）：与行内码同一档蓝。
     secondary: (text: string) => theme.fg('mdCode', text),
+    // 弱化信息（`%%…%%`，报告里的技能路径）：中性灰，退到正文之后。
+    muted: (text: string) => theme.fg('muted', text),
+    // 警示信息（`!!…!!`，后果句、warning）：warning 橙。
+    warning: (text: string) => theme.fg('warning', text),
+    // 错误信息（`@@…@@`，加载失败的名字）：error 红。
+    error: (text: string) => theme.fg('error', text),
     // 行内码整段蓝、加粗，不做词法猜测。
     code: (text: string) => theme.bold(theme.fg('mdCode', text)),
     codeBlock: (text: string) => theme.fg('mdCodeBlock', text),
@@ -362,6 +368,26 @@ export function getSelectListTheme(): SelectListTheme {
     noMatch: (text: string) => theme.fg('muted', text),
     selectedMark: (mark: string) => theme.fg('primary', mark),
     selectedRow: (text: string) => theme.bold(theme.fg('text', text)),
+    // 选中行整行实底：只靠一格标记加粗，长列表里扫不动。灰底对齐工具行选中条那一档；
+    // 底色挂行首、行尾复位（49m）——行内的 SGR 只动前景，不会把底色洗掉。
+    selectedBg: (text: string) => `${theme.bgSeq('rowSelectedBg')}${text}\x1b[49m`,
+    hoverBg: (text: string) => `${theme.bgSeq('rowHoverBg')}${text}\x1b[49m`,
+    // tone: "danger" 的主文案：删除/拒绝这类破坏性选项，红是安全语义不是装饰。
+    danger: (text: string) => theme.fg('error', text),
+  };
+}
+
+/**
+ * 可折叠分组列表（GroupList，报告弹窗用）的画笔。
+ *
+ * 选中/悬停底色与 SelectList 同一档：同一个屏幕里「选中」只能有一种长法。
+ * 折叠字形走弱化档——它是结构记号，不参与「现在在哪」的表达，高亮那是选中行的事。
+ */
+export function getGroupListTheme(): GroupListTheme {
+  return {
+    selectedBg: (text: string) => `${theme.bgSeq('rowSelectedBg')}${text}\x1b[49m`,
+    hoverBg: (text: string) => `${theme.bgSeq('rowHoverBg')}${text}\x1b[49m`,
+    fold: (text: string) => theme.fg('muted', text),
   };
 }
 
@@ -374,5 +400,7 @@ export function getEditorTheme(): EditorTheme {
     menuTitle: (text: string) => theme.bold(theme.fg('primary', text)),
     // 输入框里的 /command 与菜单标题同一主色，参数仍是正文色。
     slashCommand: (text: string) => theme.fg('primary', text),
+    // 菜单底边框的按键提示：与对话框那侧同一档弱化，别和标题抢注意力。
+    menuHint: (text: string) => theme.fg('dim', text),
   };
 }

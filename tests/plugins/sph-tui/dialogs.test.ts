@@ -67,18 +67,30 @@ describe('对话框版式档位', () => {
 		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 56);
 	});
 
-	it('选择框取 select 档上限', () => {
+	it('选择框宽度随内容收，宽内容仍到 select 档上限', () => {
 		const { tui, overlays } = fakeTui(147, 40);
 		void showSelectDialog(tui, { title: 't', items: [{ value: 'a', label: 'a' }] });
-		assert.equal(overlays[0]?.maxWidth, 84);
-		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 84);
+		// 短菜单不再铺满档位：盒宽 = 最长内容 + 26 列余量（与标题取大）。
+		assert.equal(overlays[0]?.maxWidth, 27);
+		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 27);
+		const wide = fakeTui(147, 40);
+		void showSelectDialog(wide.tui, { title: 't', items: [{ value: 'a', label: 'x'.repeat(80) }] });
+		// 80 + 26 = 106 超过档位上限——天花板仍是 84。
+		assert.equal(wide.overlays[0]?.maxWidth, 84);
+		assert.equal(resolveOverlayWidth(wide.overlays[0]?.width, 147, 147, undefined, wide.overlays[0]?.maxWidth), 84);
 	});
 
-	it('输入框取 input 档上限', () => {
+	it('输入框宽度随内容收，长值仍到 input 档上限', () => {
 		const { tui, overlays } = fakeTui(147, 40);
 		void showInputDialog(tui, { title: 't' });
-		assert.equal(overlays[0]?.maxWidth, 72);
-		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 72);
+		// 无初始值的短输入收到 40 列地板，不再铺满 72。
+		assert.equal(overlays[0]?.maxWidth, 40);
+		assert.equal(resolveOverlayWidth(overlays[0]?.width, 147, 147, undefined, overlays[0]?.maxWidth), 40);
+		const long = fakeTui(147, 40);
+		void showInputDialog(long.tui, { title: 't', initialValue: 'v'.repeat(60) });
+		// 60 + 24 = 84 超过档位上限——天花板仍是 72。
+		assert.equal(long.overlays[0]?.maxWidth, 72);
+		assert.equal(resolveOverlayWidth(long.overlays[0]?.width, 147, 147, undefined, long.overlays[0]?.maxWidth), 72);
 	});
 
 	it('文档框取 document 档上限', () => {

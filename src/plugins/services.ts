@@ -321,6 +321,13 @@ export interface SkillEntry {
   name: string;
   description: string;
   path: string;
+  /**
+   * 这条技能来自哪个根目录（`skills/<name>/SKILL.md` 里的那个根）。
+   *
+   * `/skills` 按根分组显示，而「同名谁赢」的问题就是靠根与根的先后回答的——只给 path 的话，
+   * 显示层得自己把路径拆一遍，等于把 scan 的目录布局规则抄第二份。
+   */
+  root: string;
   /** frontmatter 写了 user-invocable 时，出现在 `/` 命令里，由用户送进一轮。 */
   userInvocable?: boolean;
 }

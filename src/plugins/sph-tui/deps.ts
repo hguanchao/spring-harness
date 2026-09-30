@@ -8,6 +8,7 @@
 
 import type { AgentDriver } from '@/agent/driver.js';
 import type { ApiProtocol } from '@/config/load.js';
+import type { NotifySetting } from '@/config/primitives.js';
 import type { ProviderDeclaration, ResolvedModel } from '@/config/registry.js';
 import type { LlmClient, ReasoningEffort } from '@/plugins/sph-llm/openai.js';
 import type { McpReloadResult, McpService } from '@/plugins/services.js';
@@ -23,7 +24,7 @@ import type { WorktreePort } from '@/plugins/services.js';
 import type { SandboxHandle } from '@/sandbox/types.js';
 import type { SessionFactory, SessionPort } from '@/session/types.js';
 import type { ToolRegistry } from '@/plugins/sph-tools/index.js';
-import type { Terminal, TUI } from '@/tui/index.js';
+import type { ClipboardCopy, Terminal, TUI } from '@/tui/index.js';
 
 export interface TuiDeps {
   workspaceRoot: string;
@@ -69,6 +70,20 @@ export interface TuiDeps {
   todos: TodoService;
   jobs: JobBoardPort;
   approvalMode: ApprovalMode;
+  /**
+   * `[ui] notify`：任务完成时怎么提醒。省略按 `auto`（与配置解析的默认一致）。
+   *
+   * 界面级配置不走插件服务接缝：它只有 TUI 一个读者。
+   */
+  notify?: NotifySetting;
+  /** `[ui] notify_after_seconds`：焦点在终端时至少等多久才提醒；0 = 完成就提醒。 */
+  notifyAfterSeconds?: number;
+  /**
+   * 写系统剪贴板的通路（选区复制与 `/copy` 共用）。
+   *
+   * 省略用平台工具那条真实路径。做成可注入：测试驱动整条链路时不该去动开发机的剪贴板。
+   */
+  clipboard?(text: string): Promise<ClipboardCopy>;
   /**
    * 权限运行时：分层规则、授权落盘、沙箱档位。
    *

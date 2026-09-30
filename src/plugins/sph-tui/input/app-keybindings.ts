@@ -17,6 +17,7 @@ export type AppKeybinding =
   | 'app.command'
   | 'app.help'
   | 'app.followUp'
+  | 'app.copy'
   | 'app.approval.cycle'
   | 'app.agent.cycle';
 
@@ -50,6 +51,16 @@ export const APP_KEYBINDINGS: Record<AppKeybinding, AppKeybindingDefinition> = {
     keys: ['alt+enter'],
     description: 'queue a follow-up for after this turn',
     when: 'always',
+  },
+  /**
+   * 键盘复制。绑在 `ctrl+shift+c`：贴近终端习惯，但部分终端会先把这个组合自己吃掉
+   * （那时按键到不了这里），所以只在**有选区**时拦下——没选区就原样透传，
+   * 终端的复制/中断语义不受影响。
+   */
+  'app.copy': {
+    keys: ['ctrl+shift+c'],
+    description: 'copy the selection to the system clipboard',
+    when: 'selection',
   },
   'app.approval.cycle': {
     keys: ['shift+tab'],

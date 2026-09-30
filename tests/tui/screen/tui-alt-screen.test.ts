@@ -82,6 +82,39 @@ describe('paintScreenDiff', () => {
     assert.ok(buffer.includes('f'));
   });
 
+  it('浮层在场时不用滚动区：对话框的边框与内边距不跟正文走', () => {
+    // 一屏开着对话框：固定边框夹着几行会随滚动变化的正文。
+    const previous = [
+      'blank',
+      '╭─ Title ─╮',
+      '│ c-1     │',
+      '│ c-2     │',
+      '│ c-3     │',
+      '│ c-4     │',
+      '│ c-5     │',
+      '╰─────────╯',
+      'blank',
+    ];
+    const screen = [
+      'blank',
+      '╭─ Title ─╮',
+      '│ c-2     │',
+      '│ c-3     │',
+      '│ c-4     │',
+      '│ c-5     │',
+      '│ c-6     │',
+      '╰─────────╯',
+      'blank',
+    ];
+    const frame = { screen, previous, previousWidth: 11, previousHeight: 9, width: 11, height: 9 };
+    // 没有浮层时这段整体平移确实会走滚动区——所以上面那条守卫不是白加的。
+    assert.match(paintScreenDiff(frame).buffer, /\x1b\[\d+;\d+r/);
+    const withOverlay = paintScreenDiff({ ...frame, hasOverlay: true });
+    assert.equal(/\x1b\[\d+;\d+r/.test(withOverlay.buffer), false, '浮层在场不许发滚动区指令');
+    assert.equal(withOverlay.buffer.includes('\x1b[1S'), false, '也不许整屏上滚');
+    assert.ok(withOverlay.buffer.includes('\x1b[3;1H'), '改过的正文行要照常重画');
+  });
+
   it('尺寸变了整屏重画', () => {
     const { fullRedraw } = paintScreenDiff({
       screen: ['a'],

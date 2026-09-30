@@ -618,11 +618,25 @@ export interface TUI extends Component {
 /** 备用屏幕才有的视口能力。模块内 Symbol，不用 Symbol.for。 */
 export const VIEWPORT_TUI = Symbol("tui.viewport");
 
+/**
+ * 一次复制的真实落点。
+ *
+ * `native` 才有资格说「Copied!」：平台剪贴板工具退出码 0。`osc52` 只是把文本交给了终端，
+ * 终端不认这段 OSC 时剪贴板根本没动，所以文案要分开。`failed` 是两条都没走通。
+ */
+export type ClipboardCopy = "native" | "osc52" | "failed";
+
 export interface ViewportTUI extends TUI {
 	readonly [VIEWPORT_TUI]: true;
 	setLayoutRoot(component: Component | undefined): void;
 	/** 只重画视口（滚动、dock 转圈），不使转录内容缓存失效。 */
 	requestViewportRender(): void;
+	/** 屏幕上是否有可复制的选区（键盘复制的生效条件）。 */
+	hasTextSelection(): boolean;
+	/** 复制当前选区；没有选区时返回 undefined，调用方不该报任何反馈。 */
+	copyTextSelection(): Promise<ClipboardCopy | undefined>;
+	/** 终端焦点是否在这个窗口（1004 上报；不上报的终端恒为 true）。 */
+	terminalFocused(): boolean;
 }
 
 export function isViewportTUI(tui: TUI): tui is ViewportTUI {
@@ -987,6 +1001,16 @@ export abstract class TuiBase extends Container implements TUI {
 		return component;
 	}
 
+	/**
+	 * 本次渲染落在屏幕上的浮层矩形，自底向上。
+	 *
+	 * 由 compositeOverlays 在渲染时填写，所以读到的一定是这一帧的位置。给选区用：
+	 * 浮层内的拖选要在浮层合成之后补一次高亮，否则染好的底色会被浮层本身盖掉。
+	 */
+	protected renderedOverlayRects(): readonly { row: number; col: number; width: number; height: number }[] {
+		return this.renderedOverlayLayouts.map(({ row, col, width, height }) => ({ row, col, width, height }));
+	}
+
 	/** Dispatch to the visually topmost overlay under the pointer. */
 	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {
 		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
@@ -1017,8 +1041,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	/** Check if an overlay entry is currently visible */
-	private isOverlayVisible(entry: OverlayStackEntry): boolean {
-		if (entry.hidden) return false;
+	private isOverlayVisible(entry: OverlayStackEntry): boolean {		if (entry.hidden) return false;
 		if (entry.options?.visible) {
 			return entry.options.visible(this.terminal.columns, this.terminal.rows);
 		}

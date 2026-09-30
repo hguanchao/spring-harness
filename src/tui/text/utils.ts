@@ -1358,24 +1358,45 @@ export interface RoundedBoxOptions {
 	 * 编辑器补全菜单沿用 string.length，与历史绘制一致。
 	 */
 	infoWidth?: number;
+	/**
+	 * 四角字形。缺省圆角——这是全屏绝大多数框的观感，方角只有报告面板这类静态阅读面在用。
+	 *
+	 * 存在的理由不是"多一种风格可选"：报告面板要长时间停留、正文是结构化列表，方角更像一块面板；
+	 * 而 markdown 表格早已在用 `┌┐└┘`，方角也谈不上是本项目的新语汇。
+	 */
+	corners?: 'round' | 'square';
 }
+
+/** 圆角与方角两套角字，横竖线共用同一套 `─` / `│`。 */
+const BOX_CORNERS = {
+	round: { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯' },
+	square: { topLeft: '┌', topRight: '┐', bottomLeft: '└', bottomRight: '┘' },
+} as const;
 
 /** 圆角菜单/对话框外壳：顶边嵌标题，底边可嵌滚动信息。 */
 export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 	const { width, title, lines, frame } = options;
+	const corners = BOX_CORNERS[options.corners ?? 'round'];
 	const inner = Math.max(1, width - 2);
 	const titlePaint = options.titlePaint ?? frame;
 	const top =
-		width >= visibleWidth(`╭─${title}─╮`)
-			? frame('╭─') + titlePaint(title) + frame(`${'─'.repeat(width - visibleWidth(`╭─${title}╮`))}╮`)
-			: frame(`╭${'─'.repeat(Math.max(1, inner))}╮`);
+		width >= visibleWidth(`${corners.topLeft}─${title}─${corners.topRight}`)
+			? frame(`${corners.topLeft}─`) +
+				titlePaint(title) +
+				frame(`${'─'.repeat(width - visibleWidth(`${corners.topLeft}─${title}${corners.topRight}`))}${corners.topRight}`)
+			: frame(`${corners.topLeft}${'─'.repeat(Math.max(1, inner))}${corners.topRight}`);
 	const result: string[] = [top];
 	for (const line of lines) {
 		const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));
 		result.push(`${frame("│")}${line}${pad}${frame("│")}`);
 	}
 	const info = options.bottomInfo ?? "";
-	const infoWidth = info === "" ? 0 : (options.infoWidth ?? visibleWidth(info));
+	// 右侧状态位两侧各垫一个空格：`── 1-11/21 ─╯`。左侧提示有垫、右侧没有，
+	// 同一条底边框两种间距待遇——补齐之后读数不再贴着横线挤成一团。
+	// 显式传 infoWidth 的调用方（编辑器补全菜单）自管几何，保持历史画法不动。
+	const flanked = options.infoWidth === undefined;
+	const infoWidth = info === "" ? 0 : flanked ? visibleWidth(info) + 2 : (options.infoWidth ?? 0);
+	const infoText = info === "" || !flanked ? info : ` ${info} `;
 	// 左侧提示照顶边标题的写法嵌进边框：╰─ 提示 ────(状态)─╯。空间不够先截提示（带 …），
 	// 右侧状态位保留；连一个字符都放不下才退化成单侧底边框——提示不能无声无息地整段消失。
 	const left = options.leftInfo ?? "";
@@ -1389,19 +1410,58 @@ export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 		if (shownWidth > 0 && dashes >= 2) {
 			bottom =
 				infoWidth > 0
-					? frame(`╰─`) + leftPaint(` ${shown} `) + frame(`${"─".repeat(dashes)}${info}─╯`)
-					: frame(`╰─`) + leftPaint(` ${shown} `) + frame(`${"─".repeat(dashes)}╯`);
+					? frame(`${corners.bottomLeft}─`) +
+						leftPaint(` ${shown} `) +
+						frame(`${"─".repeat(dashes)}${infoText}─${corners.bottomRight}`)
+					: frame(`${corners.bottomLeft}─`) +
+						leftPaint(` ${shown} `) +
+						frame(`${"─".repeat(dashes)}${corners.bottomRight}`);
 		}
 	}
 	if (bottom === undefined) {
 		const dashes = width - 3 - infoWidth;
 		bottom =
 			infoWidth > 0 && dashes >= 1
-				? frame(`╰${"─".repeat(dashes)}${info}─╯`)
-				: frame(`╰${"─".repeat(inner)}╯`);
+				? frame(`${corners.bottomLeft}${"─".repeat(dashes)}${infoText}─${corners.bottomRight}`)
+				: frame(`${corners.bottomLeft}${"─".repeat(inner)}${corners.bottomRight}`);
 	}
 	result.push(bottom);
 	return result;
+}
+
+/**
+ * 「─ 标题 ───…」横线标题：线条铺满给定宽度，标题夹在左端第一段里。
+ *
+ * 线条一律用制表符 `─`，和弹窗边框（`╭─ Title ─╮`）、页脚提示同一套字形——整屏的横线
+ * 只有这一种画法，换成长破折号 `—` 会显得比边框重一档，两块放在一起像两套版式。
+ *
+ * 语义层级（markdown 的 h3 及以上、选择列表的分组标题）共用这一条规则线，两处各写一遍
+ * 字形迟早会长歪。着色交给调用方——同一套字形、各自的颜色。
+ */
+export function ruleHeadingLine(label: string, width: number, style: (text: string) => string): string {
+	// 标签装不下时从中间缩：头保留语义起点（`#1 User —`），尾保留计数（`· 1`）——
+	// 计数是组头最常被核对的信息，从尾巴上截掉等于白画。整行至少留两条横线，
+	// 规则线「铺满整行」的字形在任何宽度下都不破（此前窄终端会折成两行断线）。
+	let shown = label;
+	// `─ ` 前缀 + 标签后空格 + 两条横线 = 5 列固定开销。
+	if (visibleWidth(label) > width - 5) {
+		const allow = Math.max(1, width - 5);
+		const tailWidth = Math.min(4, Math.floor(allow / 4));
+		if (tailWidth === 0) {
+			shown = `${sliceByColumn(label, 0, allow - 1, true)}…`;
+		} else {
+			const headWidth = Math.max(1, allow - tailWidth - 1);
+			shown = `${sliceByColumn(label, 0, headWidth, true)}…${sliceByColumn(label, visibleWidth(label) - tailWidth, tailWidth, true)}`;
+		}
+	}
+	const head = `─ ${shown} `;
+	const used = visibleWidth(head);
+	const fill = Math.max(0, width - used);
+	const dash = "─";
+	const dashWidth = visibleWidth(dash) || 1;
+	const count = Math.floor(fill / dashWidth);
+	const leftover = fill - count * dashWidth;
+	return style(head + dash.repeat(count) + " ".repeat(leftover));
 }
 
 /** Like sliceByColumn but also returns the actual visible width of the result. */

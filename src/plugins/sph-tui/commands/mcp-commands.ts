@@ -8,7 +8,7 @@
 import { removeSphMcpServer, setSphMcpDisabled, splitCommandLine, upsertSphMcpServer } from '@/config/mcp-write.js';
 import type { TUI } from '@/tui/index.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
-import { showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
+import { commandPanelOptions, showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
 import { mcpServerLabel, mcpStateLabel, renderMcpReport, renderMcpTools } from '@/plugins/sph-tui/commands/reports.js';
 import { SERVER_PREFIX } from '@/plugins/sph-tui/commands/index.js';
 
@@ -48,25 +48,37 @@ export async function commandMcps(host: McpCommandHost): Promise<void> {
         'Plugin load problems are printed at startup.',
       ].join('\n'),
       hint: 'Esc close',
+      // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
+      termColumns: true,
+      ...commandPanelOptions(ui),
     });
     return;
   }
   for (;;) {
     const servers = service.listServers();
     const choice = await showSelectDialog(ui, {
-      title: `MCP servers (${servers.length})`,
+      // 顶栏只写名字（与 Skills/Help/Plugins 对齐）；数量挂在 Servers 组头上。
+      title: 'MCP servers',
       maxVisible: 14,
       hint: 'Enter act · Esc close',
       items: [
+        // 动作与清单分组：组头走选择列表的横线标题，与报告的 `### 段名` 同一套字形。
+        { value: 'hdr-actions', kind: 'header' as const, label: 'Actions' },
         { value: 'reload', label: 'Reload from disk', description: 're-read every source and reconnect' },
         { value: 'report', label: 'Show full report', description: 'sources scanned, warnings, per-server tools' },
         { value: 'add', label: 'Add a server…', description: `append to ${deps.configPath}` },
+        { value: 'hdr-servers', kind: 'header' as const, label: `Servers · ${servers.length}` },
         ...servers.map((server) => ({
           value: `server:${server.name}`,
-          label: `${mcpServerLabel(server)} — ${mcpStateLabel(server)}`,
-          description: `${server.target} · from ${server.origin.label}`,
+          label: mcpServerLabel(server),
+          // 状态与来源放说明列：主列只剩名字，词项列对齐；target 这类细节点进动作菜单看。
+          description: `${mcpStateLabel(server)} · from ${server.origin.label}`,
         })),
+        ...(servers.length === 0
+          ? [{ value: 'no-servers', kind: 'doc' as const, label: 'nothing configured yet — add one with the action above' }]
+          : []),
       ],
+      ...commandPanelOptions(ui),
     });
     if (choice === undefined) return;
     if (choice === 'report') {
@@ -77,7 +89,10 @@ export async function commandMcps(host: McpCommandHost): Promise<void> {
           warnings: [...(service.warnings())],
           sources: [...service.sources()],
         }),
-        hint: 'Esc close · status is live',
+        hint: 'Esc close',
+        // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
+        termColumns: true,
+        ...commandPanelOptions(ui),
       });
       continue;
     }
@@ -153,7 +168,7 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
   const { ui, deps } = host;
   const server = deps.mcp()?.listServers().find((item) => item.name === name);
   if (server === undefined) return; // 列表是上一轮取的，条目可能已经不在了
-  type Action = { value: string; label: string; description?: string };
+  type Action = { value: string; label: string; description?: string; tone?: 'danger' };
   const items: Action[] = [
     {
       value: 'toggle',
@@ -169,13 +184,17 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
     items.push({ value: 'tools', label: 'Show tools', description: `${server.tools.length} available` });
   }
   if (server.origin.editable) {
-    items.push({ value: 'remove', label: 'Remove from config', description: server.origin.path });
+    items.push({ value: 'remove', label: 'Remove from config', description: server.origin.path, tone: 'danger' });
   }
   const action = await showSelectDialog(ui, {
     title: `${mcpServerLabel(server)} — ${mcpStateLabel(server)}`,
-    bodyText: `${server.target}\nfrom ${server.origin.label}`,
+    // 状态型正文排成键值行（key-value 对齐靠空格，markdown 会折叠空格，所以走 plain）：
+    // 散文句里键藏在语法里，键值行扫一眼就知道「哪个 server、配置来自哪」。
+    bodyText: `server  ${server.target}\nsource  ${server.origin.label}`,
+    bodyFormat: 'plain',
     items,
     maxVisible: 4,
+    ...commandPanelOptions(ui),
   });
 
   if (action === 'toggle') {
@@ -191,14 +210,17 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
       title: `${mcpServerLabel(server)} tools`,
       text: renderMcpTools(server),
       hint: 'Esc close',
+      ...commandPanelOptions(ui),
     });
     return;
   }
   if (action === 'remove') {
+    // 危险确认：Remove 标红、焦点初始停在 Cancel——Enter 连按不会误删配置。
     const confirmed = await showConfirmDialog(ui, {
       title: `Remove ${mcpServerLabel(server)}?`,
       message: `This deletes the entry from ${server.origin.path}. Nothing else is touched.`,
       confirmLabel: 'Remove',
+      danger: true,
     });
     if (!confirmed) return;
     const removed = removeSphMcpServer(server.origin.path, server.name);

@@ -38,6 +38,8 @@ export const COMMANDS: readonly CommandItem[] = [
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)', group: 'Model & Input' },
   { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo', group: 'Model & Input' },
   { id: 'permissions', label: '/permissions', hint: 'Show effective rules, their sources, sandbox, and approved actions', group: 'Model & Input' },
+  { id: 'notify', label: '/notify', hint: 'Set how sph reminds you when work finishes', group: 'Model & Input' },
+  { id: 'copy', label: '/copy', hint: 'Copy an assistant reply to the system clipboard', group: 'Session' },
   { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html', group: 'Session' },
   { id: 'prompts', label: '/prompts', hint: 'Insert a saved prompt template', group: 'Tools' },
   { id: 'diff', label: '/diff', hint: 'Show the workspace git diff, read only', group: 'Tools' },

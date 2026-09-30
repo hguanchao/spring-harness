@@ -1,7 +1,7 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
 import { getCapabilities, hyperlink } from "@/tui/terminal/terminal-image.js";
 import type { Component } from "@/tui/screen/tui.js";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "@/tui/text/utils.js";
+import { applyBackgroundToLine, ruleHeadingLine, visibleWidth, wrapTextWithAnsi } from "@/tui/text/utils.js";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -34,20 +34,24 @@ function applyTextWithNewlines(text: string, applyText: (segment: string) => str
 }
 
 /**
- * h3 及以上画成「—— 标题 ———」横线，破折号铺满内容宽。
- * 源码仍写 `### Skills 5`；井号前缀不进画面。
+ * 「词项 + 说明」列表的排版常量。见 `MarkdownOptions.termColumnLists`。
  */
-function ruleHeadingLine(label: string, width: number, style: (text: string) => string): string {
-	const head = `—— ${label} `;
-	const used = visibleWidth(head);
-	const fill = Math.max(0, width - used);
-	const dash = "—";
-	const dashWidth = visibleWidth(dash) || 1;
-	const count = Math.floor(fill / dashWidth);
-	const leftover = fill - count * dashWidth;
-	return style(head + dash.repeat(count) + " ".repeat(leftover));
+/** 词项列的上限：再宽就会把说明挤成一列竖字。 */
+const TERM_COLUMN_MAX = 24;
+/** 说明列的保底下限：窄终端里优先保说明，词项超出上限就自己占一行。 */
+const TERM_COLUMN_MIN_DESCRIPTION = 16;
+/** 词项后面那个连接号（` — `）。有了列轨它就是多余标点。 */
+const TERM_CONNECTOR = /^\s+(?:[—–:]\s+|-\s+)/;
+
+/** 把已经上色的文本补到指定可见宽度。 */
+function padVisible(text: string, width: number): string {
+	return `${text}${" ".repeat(Math.max(0, width - visibleWidth(text)))}`;
 }
 
+/**
+ * h3 及以上画成「─ 标题 ───…」横线，线条铺满内容宽（字形见 ruleHeadingLine）。
+ * 源码仍写 `### Skills 5`；井号前缀不进画面。
+ */
 function trimPartialClosingFences(tokens: readonly Token[]): void {
 	const token = tokens[tokens.length - 1];
 	if (token?.type === "list") {
@@ -79,11 +83,31 @@ markdownParser.setOptions({
 });
 
 /**
- * `{{次要信息}}` 内联标记：路径、来源这类需要弱化的内容，主题画成中性灰，
- * 与蓝色行内码区分（报告里「工具名要亮眼、路径要退后」就是这对组合）。
+ * `{{次要信息}}` 内联标记：来源、根目录这类需要弱化的内容，主题画成蓝色（行内码同一档）。
  * 生成器负责不把 `}{` 放进内容；内容里真有 `}}` 时不匹配，原样输出花括号，无害降级。
  */
 const SECONDARY_REGEX = /^\{\{([^{}\n]+)\}\}/;
+
+/**
+ * `%%弱化信息%%` 内联标记：技能路径这类「要看得见、但不该抢话」的内容，主题画成中性灰。
+ *
+ * 与 `{{…}}` 同一路数：内容**逐字保留**，不再过 markdown 的行内规则，所以路径里的反引号、
+ * 下划线、星号都不会被当成标记吃掉——拿斜体承载路径恰好栽在这些字符上（`_a_` 会连下划线
+ * 一起吞掉）。代价是内容不能含 `%`：不匹配时原样输出标记本身，无害降级。
+ */
+const MUTED_REGEX = /^%%([^%\n]+)%%/;
+
+/**
+ * `!!警示信息!!` 内联标记：确认框的后果句、报告里的 warning。主题画成 warning 橙。
+ * 内容逐字保留、不过行内规则（与 `%%…%%` 同理）；内容不能含 `!`，不匹配时原样输出，无害降级。
+ */
+const WARNING_REGEX = /^!!([^!\n]+)!!/;
+
+/**
+ * `@@错误信息@@` 内联标记：加载失败的名字这类 error 级内容。主题画成 error 红。
+ * 内容不能含 `@`，其余同上。
+ */
+const ERROR_REGEX = /^@@([^@\n]+)@@/;
 
 markdownParser.use({
 	extensions: [
@@ -98,6 +122,45 @@ markdownParser.use({
 				const match = SECONDARY_REGEX.exec(src);
 				if (!match) return undefined;
 				return { type: "secondary", raw: match[0], text: match[1] };
+			},
+		},
+		{
+			name: "muted",
+			level: "inline",
+			start(src: string): number | undefined {
+				const index = src.indexOf("%%");
+				return index === -1 ? undefined : index;
+			},
+			tokenizer(src: string): Tokens.Generic | undefined {
+				const match = MUTED_REGEX.exec(src);
+				if (!match) return undefined;
+				return { type: "muted", raw: match[0], text: match[1] };
+			},
+		},
+		{
+			name: "warning",
+			level: "inline",
+			start(src: string): number | undefined {
+				const index = src.indexOf("!!");
+				return index === -1 ? undefined : index;
+			},
+			tokenizer(src: string): Tokens.Generic | undefined {
+				const match = WARNING_REGEX.exec(src);
+				if (!match) return undefined;
+				return { type: "warning", raw: match[0], text: match[1] };
+			},
+		},
+		{
+			name: "error",
+			level: "inline",
+			start(src: string): number | undefined {
+				const index = src.indexOf("@@");
+				return index === -1 ? undefined : index;
+			},
+			tokenizer(src: string): Tokens.Generic | undefined {
+				const match = ERROR_REGEX.exec(src);
+				if (!match) return undefined;
+				return { type: "error", raw: match[0], text: match[1] };
 			},
 		},
 	],
@@ -144,8 +207,14 @@ export interface MarkdownTheme {
 	strong?: (text: string) => string;
 	/** 斜体着色；缺省回落到 italic。 */
 	emphasis?: (text: string) => string;
-	/** `{{次要信息}}`：路径、来源这类要弱化成中性灰的内容；缺省原样输出（含花括号）。 */
+	/** `{{次要信息}}`：来源、根目录这类要弱化的内容；缺省原样输出（含花括号）。 */
 	secondary?: (text: string) => string;
+	/** `%%弱化信息%%`：技能路径这类要退到背景里的内容；缺省原样输出（含百分号）。 */
+	muted?: (text: string) => string;
+	/** `!!警示信息!!`：后果句、warning；缺省原样输出（含叹号）。 */
+	warning?: (text: string) => string;
+	/** `@@错误信息@@`：加载失败的名字；缺省原样输出（含艾特）。 */
+	error?: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
 	/** 代码块每行的缩进，缺省两个空格。代码一律走 codeBlock，不再按语言上色。 */
@@ -159,6 +228,16 @@ export interface MarkdownOptions {
 	preserveBackslashEscapes?: boolean;
 	/** Transform source Markdown before parsing, with the exact width available for content. */
 	transform?: (markdown: string, availableWidth: number) => string;
+	/**
+	 * 把「每条都以行内码开头」的无序列表排成两列：词项列 + 说明列（折行悬挂到说明列），
+	 * 词项后面的 ` — ` 连接号不再上屏。
+	 *
+	 * 默认关。转录里的模型输出也会写成 `- \`x\` — y`，但那里的连接号是模型自己的标点，
+	 * 替它吃掉等于改用户的内容；报告弹窗的条目全是这一种形状，列轨才是它们要的排版。
+	 * 判据是「整块每一条都符合」——有一条形不像词项表（如 `- **label** — state`），整块
+	 * 退回普通列表，避免出现半转换的锯齿。
+	 */
+	termColumnLists?: boolean;
 }
 
 interface InlineStyleContext {
@@ -563,6 +642,24 @@ export class Markdown implements Component {
 					break;
 				}
 
+				case "muted": {
+					// `%%…%%`：弱化信息（技能路径）。同上，主题缺席时原样输出，含标记。
+					result += (this.theme.muted ?? (() => token.raw))(token.text) + stylePrefix;
+					break;
+				}
+
+				case "warning": {
+					// `!!…!!`：警示信息（后果句、warning）。主题缺席时原样输出，含标记。
+					result += (this.theme.warning ?? (() => token.raw))(token.text) + stylePrefix;
+					break;
+				}
+
+				case "error": {
+					// `@@…@@`：错误信息（加载失败的名字）。同上。
+					result += (this.theme.error ?? (() => token.raw))(token.text) + stylePrefix;
+					break;
+				}
+
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
@@ -628,6 +725,101 @@ export class Markdown implements Component {
 	}
 
 	/**
+	 * 列表项正文的内联 token。marked 把条目正文放在第一个 token（紧凑列表是 `text`，
+	 * 宽松列表是 `paragraph`）的 `tokens` 里，两个形状都认。
+	 */
+	private listItemInline(item: Tokens.ListItem): Token[] {
+		const body = item.tokens?.[0] as { type?: string; tokens?: Token[] } | undefined;
+		if (body === undefined || (body.type !== "text" && body.type !== "paragraph")) return [];
+		return body.tokens ?? [];
+	}
+
+	/**
+	 * 这条列表项是不是「词项 + 说明」：正文以行内码开头，且行内码后面只剩连接号或正文。
+	 * 返回词项原文（未上色），不符合时 undefined。
+	 */
+	private getListItemTerm(item: Tokens.ListItem): string | undefined {
+		if (item.task) return undefined;
+		const inline = this.listItemInline(item);
+		const first = inline[0];
+		if (first?.type !== "codespan") return undefined;
+		const next = inline[1];
+		// 行内码后面还有内容时，必须正好是连接号——`- `a` `b`` 那种不是词项表。
+		if (next !== undefined) {
+			const rest = (next as { text?: string }).text ?? "";
+			if (next.type !== "text" || (!TERM_CONNECTOR.test(rest) && rest.trim() !== "")) return undefined;
+		}
+		return (first as { text?: string }).text;
+	}
+
+	/**
+	 * 本块的词项列宽；整块不是词项表时返回 undefined（调用方退回普通列表）。
+	 * 宽度 = 最长词项 + 2 列间隙，受上限与说明列保底双重夹制。
+	 */
+	private getTermColumnWidth(token: Tokens.List, width: number, markerWidth: number): number | undefined {
+		if (token.items.length === 0) return undefined;
+		const contentWidth = Math.max(1, width - markerWidth);
+		let widest = 0;
+		for (const item of token.items) {
+			const term = this.getListItemTerm(item);
+			if (term === undefined) return undefined;
+			widest = Math.max(widest, visibleWidth(term));
+		}
+		const cap = Math.min(TERM_COLUMN_MAX, Math.max(4, contentWidth - TERM_COLUMN_MIN_DESCRIPTION));
+		return Math.min(widest + 2, cap);
+	}
+
+	/** 剥掉词项后面的连接号（` — `）。只动第一个 text 片段，正文里的破折号一律不碰。 */
+	private stripTermConnector(tokens: Token[]): Token[] {
+		const first = tokens[0] as { type?: string; text?: string; tokens?: Token[] } | undefined;
+		if (first?.type !== "text" || first.tokens !== undefined) return tokens;
+		const text = first.text ?? "";
+		const stripped = text.replace(TERM_CONNECTOR, "");
+		if (stripped === text) return tokens;
+		if (stripped === "") return tokens.slice(1);
+		return [{ ...first, text: stripped, raw: stripped } as unknown as Token, ...tokens.slice(1)];
+	}
+
+	/** 一条「词项 + 说明」：标记列 + 词项列，说明折行悬挂到说明列。 */
+	private renderTermListItem(
+		item: Tokens.ListItem,
+		indent: string,
+		marker: string,
+		markerWidth: number,
+		columnWidth: number,
+		width: number,
+		styleContext?: InlineStyleContext,
+	): string[] {
+		const lines: string[] = [];
+		// 有序列表的号照画（它就是行内容），无序的留同宽占位以对齐相邻列表。
+		const prefix = `${indent}${marker}${" ".repeat(Math.max(0, markerWidth - visibleWidth(marker)))}`;
+		const rail = `${indent}${" ".repeat(markerWidth + columnWidth)}`;
+		const style = styleContext ?? this.getDefaultInlineStyleContext();
+		const inline = this.listItemInline(item);
+		const termText = (inline[0] as { text?: string } | undefined)?.text ?? "";
+		const styledTerm = `${(style.codeStyle ?? this.theme.code)(termText)}${style.stylePrefix}`;
+		const description = this.renderInlineTokens(this.stripTermConnector(inline.slice(1)), style);
+		const descWidth = Math.max(1, width - visibleWidth(rail));
+		const wrapped = description.trim() === "" ? [] : wrapTextWithAnsi(description, descWidth);
+		// 词项顶到上限还装不下时让它独占一行，说明退到下一行的说明列——不缩词项。
+		if (visibleWidth(termText) + 2 <= columnWidth) {
+			lines.push(prefix + padVisible(styledTerm, columnWidth) + (wrapped.shift() ?? ""));
+		} else {
+			lines.push(prefix + styledTerm);
+		}
+		for (const line of wrapped) lines.push(rail + line.replace(/^ /, ""));
+		// 条目里的其余块级 token（嵌套列表、续段）接着排在说明列下。
+		for (const token of (item.tokens ?? []).slice(1)) {
+			const nested =
+				token.type === "list"
+					? this.renderList(token as Tokens.List, 1, descWidth, style)
+					: this.renderToken(token, descWidth, undefined, style);
+			for (const line of nested) lines.push(rail + line);
+		}
+		return lines;
+	}
+
+	/**
 	 * Render a list with proper nesting support
 	 */
 	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
@@ -635,10 +827,26 @@ export class Markdown implements Component {
 		const indent = "    ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
+		// 号（有序列表）也要进列轨：`/permissions` 的规则行是「号 · 动作 · 规则」三列，
+		// 号列宽按整块最大号算，不然 9→10 会把动作列推右一格。无序列表留同宽占位，
+		// 词项列的左缘才和相邻的普通列表对得上。
+		const markerText = (index: number): string =>
+			token.ordered ? `${startNumber + index}. ` : "  ";
+		const markerWidth = token.ordered ? `${startNumber + token.items.length - 1}. `.length : 2;
+		// 词项列宽整块一起算：列轨的价值就在对齐，逐条判断会锯齿。
+		const termColumn =
+			this.options.termColumnLists === true ? this.getTermColumnWidth(token, width, markerWidth) : undefined;
 
 		for (let i = 0; i < token.items.length; i++) {
 			const item = token.items[i];
 			const isLastItem = i === token.items.length - 1;
+			if (termColumn !== undefined) {
+				lines.push(
+					...this.renderTermListItem(item, indent, markerText(i), markerWidth, termColumn, width, styleContext),
+				);
+				if (token.loose && !isLastItem) lines.push("");
+				continue;
+			}
 			const bullet = token.ordered
 				? this.options.preserveOrderedListMarkers
 					? (this.getOrderedListMarker(item) ?? `${startNumber + i}. `)

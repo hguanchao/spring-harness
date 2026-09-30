@@ -3,12 +3,30 @@ import { describe, it } from 'node:test';
 import {
   clipLineToWidth,
   contentVisibleWidth,
+  ruleHeadingLine,
   sliceByColumn,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from '@/tui/text/utils.js';
+
+describe('ruleHeadingLine', () => {
+  it('标签装不下时从中间缩，尾部计数保留、横线仍铺满整行', () => {
+    const width = 36;
+    const line = ruleHeadingLine('#1 User — /home/u/.sph/skills · 1', width, (text) => text);
+    assert.equal(visibleWidth(line), width, '横线必须铺满整行');
+    assert.ok(line.startsWith('─ #1 User'), '头部语义起点保留');
+    assert.ok(line.includes('· 1 ─'), '尾部计数不能被截掉');
+    assert.ok(line.includes('…'), '缩掉的部分要有省略号交代');
+  });
+
+  it('标签装得下时原样嵌线', () => {
+    const line = ruleHeadingLine('Group', 30, (text) => text);
+    assert.ok(line.startsWith('─ Group ─'));
+    assert.equal(visibleWidth(line), 30);
+  });
+});
 
 describe('visibleWidth', () => {
   it('纯 ASCII 按字符数', () => {

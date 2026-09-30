@@ -49,9 +49,32 @@ function scanRoot(root: string, warnings: string[], byName: Map<string, SkillEnt
       name: meta.name,
       description: meta.description,
       path: skillPath,
+      root,
       ...(meta.userInvocable ? { userInvocable: true } : {}),
     });
   }
+}
+
+/** 一个技能根，以及它属于哪一级（`/skills` 的分组标题要写这个词）。 */
+export interface SkillRoot {
+  path: string;
+  level: 'User' | 'Project';
+}
+
+/** 根清单的唯一出处：顺序即覆盖顺序，`level` 供显示分组用。 */
+function rootSpecs(
+  workspaceRoot: string,
+  home: string,
+  userHome: string,
+): SkillRoot[] {
+  return [
+    { path: join(userHome, '.agents', 'skills'), level: 'User' },
+    { path: join(userHome, '.claude', 'skills'), level: 'User' },
+    { path: join(home, 'skills'), level: 'User' },
+    { path: join(workspaceRoot, '.agents', 'skills'), level: 'Project' },
+    { path: join(workspaceRoot, '.claude', 'skills'), level: 'Project' },
+    { path: join(workspaceRoot, '.sph', 'skills'), level: 'Project' },
+  ];
 }
 
 /**
@@ -65,14 +88,16 @@ export function skillRoots(
   home = sphHome(),
   userHome = process.env.USERPROFILE ?? process.env.HOME ?? '',
 ): string[] {
-  return [
-    join(userHome, '.agents', 'skills'),
-    join(userHome, '.claude', 'skills'),
-    join(home, 'skills'),
-    join(workspaceRoot, '.agents', 'skills'),
-    join(workspaceRoot, '.claude', 'skills'),
-    join(workspaceRoot, '.sph', 'skills'),
-  ];
+  return rootSpecs(workspaceRoot, home, userHome).map((root) => root.path);
+}
+
+/** 带分级的根清单；`/skills` 的组标题用（顺序与 {@link skillRoots} 一致）。 */
+export function skillRootGroups(
+  workspaceRoot: string,
+  home = sphHome(),
+  userHome = process.env.USERPROFILE ?? process.env.HOME ?? '',
+): SkillRoot[] {
+  return rootSpecs(workspaceRoot, home, userHome);
 }
 
 /** 六个根后者覆盖前者；只认 skills/<name>/SKILL.md。 */

@@ -43,14 +43,16 @@ import {
   shouldSuppressAutoRecapDisplay,
   type RecapContext,
 } from '@/plugins/sph-loop/recap.js';
-import { scanSkills, skillRoots } from '@/plugins/sph-skills/scan.js';
+import { scanSkills } from '@/plugins/sph-skills/scan.js';
 import { builtinAgents } from '@/plugins/sph-subagent/agents.js';
 import { createLlmClassifier } from '@/permission/auto.js';
 import { HeadlessApprover, visibleTools, type ApprovalMode, type ApprovalRequest, type Approver } from '@/permission/policy.js';
 import type { SandboxMode } from '@/sandbox/types.js';
-import { updateConfigFile } from '@/config/save.js';
+import { updateConfigFile, updateConfigTableEntry } from '@/config/save.js';
 import { upsertModelApi, type ProviderDeclaration } from '@/config/registry.js';
 import type { ApiProtocol } from '@/config/load.js';
+import type { NotifySetting } from '@/config/primitives.js';
+import { NOTIFY_TITLE } from '@/tui/terminal/notifications.js';
 import type { LlmClient, ReasoningEffort, TokenUsage } from '@/plugins/sph-llm/openai.js';
 import { SpillStore } from '@/plugins/sph-storage/spill.js';
 import { combineListeners } from '@/agent/events.js';
@@ -65,10 +67,13 @@ import { defaultTools } from '@/plugins/sph-tools/index.js';
 import {
   BLOCK_GAP,
   CombinedAutocompleteProvider,
+  type ClipboardCopy,
   Container,
   findFdBinary,
+  getCapabilities,
   isKeyRelease,
   isViewportTUI,
+  type NotificationChannel,
   type SelectItem,
   type SlashCommand,
   Spacer,
@@ -78,12 +83,14 @@ import {
   ProcessTerminal,
   VStack,
   ScrollView,
-  formatKeyText,
 } from '@/tui/index.js';
-import { APP_KEYBINDINGS, matchesAppKey, type AppKeybindingDefinition } from '@/plugins/sph-tui/input/app-keybindings.js';
+import { clipboardFailureHint, copyToClipboard as writeClipboard } from '@/plugins/sph-tui/clipboard.js';
+import { formatElapsed, notificationBytes } from '@/plugins/sph-tui/notify.js';
+import { APP_KEYBINDINGS, matchesAppKey } from '@/plugins/sph-tui/input/app-keybindings.js';
 import { InteractiveApprover, type ApprovalChoice, type ApprovalUi } from '@/plugins/sph-tui/trust/permission.js';
-import { APPROVAL_OVERLAY_PRIORITY, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
-import { renderPluginsReport, renderSkillsReport } from '@/plugins/sph-tui/commands/reports.js';
+import { APPROVAL_OVERLAY_PRIORITY, commandPanelOptions, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
+import { renderHelpReport, renderPluginsReport } from '@/plugins/sph-tui/commands/reports.js';
+import { openReport } from '@/plugins/sph-tui/report/dialog.js';
 import { readGitBranch } from '@/plugins/sph-tui/footer/git.js';
 import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from '@/plugins/sph-tui/interaction/index.js';
 import { clearedHoverNeedsRepaint, clearHoverHighlight } from '@/plugins/sph-tui/interaction/hover-highlight.js';
@@ -105,9 +112,9 @@ import { SteerBar, type SteerBarHost } from '@/plugins/sph-tui/input/steer-bar.j
 import { TranscriptProjection, type TranscriptHost } from '@/plugins/sph-tui/transcript/index.js';
 import { restoreSessionInto, type ReplayHost } from '@/plugins/sph-tui/transcript/session-replay.js';
 import { commandMcps } from '@/plugins/sph-tui/commands/mcp-commands.js';
-import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
+import { commandHistory, commandNewSession, commandResume, commandExport, commandCopy, type SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
 import { commandDiff, commandFork, commandPrompts, invocableSkillPrompt } from '@/plugins/sph-tui/commands/workspace-commands.js';
-import { commandModel, commandProvider, commandEffort, commandPermission, commandPermissions, cycleApprovalMode, type SettingsCommandHost } from '@/plugins/sph-tui/commands/settings-commands.js';
+import { commandModel, commandProvider, commandEffort, commandPermission, commandPermissions, commandNotify, cycleApprovalMode, type SettingsCommandHost } from '@/plugins/sph-tui/commands/settings-commands.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 /** 命令模块和测试从这里拿 TuiDeps。进程入口不再把屏幕类型一起导出。 */
@@ -115,86 +122,6 @@ export type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 function message(error: unknown): string {
   return errorMessage(error);
-}
-
-/**
- * /help 面板的行清单。命令按 group 分组（可选，Enter 直接执行），别名放行尾右对齐；
- * 键位、队列与编辑器说明是不可选的 doc 行（↑/↓ 与点选自动跳过，也不计入 (n/m)）。
- */
-function buildHelpPanelItems(commands: readonly CommandItem[]): SelectItem[] {
-  const items: SelectItem[] = [];
-  const groups = new Map<string, CommandItem[]>();
-  for (const command of commands) {
-    const group = command.group ?? 'Plugins & Skills';
-    const bucket = groups.get(group) ?? [];
-    bucket.push(command);
-    groups.set(group, bucket);
-  }
-  for (const [group, groupCommands] of groups) {
-    items.push({ value: `group:${group}`, label: group, kind: 'header' });
-    for (const command of groupCommands) {
-      // 别名不进清单（菜单只列正名），但必须能看见，否则靠旧名字找命令的人会以为它没了。
-      const alias = Object.entries(COMMAND_ALIASES).find(([, canonical]) => canonical === command.id)?.[0];
-      items.push({
-        value: command.id,
-        label: command.label,
-        description: command.hint,
-        trailing: alias ? `/${alias}` : undefined,
-      });
-    }
-  }
-
-  const keyGroups = new Map<string, AppKeybindingDefinition[]>();
-  for (const definition of Object.values(APP_KEYBINDINGS) as AppKeybindingDefinition[]) {
-    const bucket = keyGroups.get(definition.when) ?? [];
-    bucket.push(definition);
-    keyGroups.set(definition.when, bucket);
-  }
-  for (const [when, definitions] of keyGroups) {
-    items.push({
-      value: `keys:${when}`,
-      label: `Keys · ${when === 'always' ? 'Available anytime' : when}`,
-      kind: 'header',
-    });
-    definitions.forEach((definition, index) => {
-      items.push({
-        value: `key:${when}:${index}`,
-        label: formatKeyText(definition.keys.join('/')),
-        description: definition.description,
-        kind: 'doc',
-      });
-    });
-  }
-
-  items.push({ value: 'spacer:queue', label: '', kind: 'spacer' });
-  items.push({ value: 'queue:header', label: 'Queue (mouse)', kind: 'header' });
-  items.push({
-    value: 'queue:1',
-    label: 'Hover a queued row for [↑] [↓] [Send now] [edit] [cancel] buttons',
-    kind: 'doc',
-  });
-  items.push({
-    value: 'queue:2',
-    label: 'Click a row to select it; [edit] takes it back to the input (queued order preserved)',
-    kind: 'doc',
-  });
-
-  items.push({ value: 'spacer:editor', label: '', kind: 'spacer' });
-  items.push({ value: 'editor:header', label: 'Editor', kind: 'header' });
-  items.push({ value: 'editor:1', label: '/', description: 'slash-command autocomplete in the editor', kind: 'doc' });
-  items.push({
-    value: 'editor:2',
-    label: 'Enter (turn running)',
-    description: 'queue the message (delivered after the turn ends)',
-    kind: 'doc',
-  });
-  items.push({
-    value: 'editor:3',
-    label: 'Alt+Enter',
-    description: 'queue a follow-up that starts after this turn',
-    kind: 'doc',
-  });
-  return items;
 }
 
 /** 交互模式入口。 */
@@ -303,6 +230,11 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0 };
   private contextTokens?: number;
 
+  /** `[ui] notify` 的当前值；`/notify` 改它并写回 config.toml。 */
+  private notifySetting: NotifySetting;
+  /** `[ui] notify_after_seconds`：焦点还在本终端时的最短等待门槛。 */
+  private notifyAfterSeconds: number;
+
   /**
    * Recap 状态。
    *
@@ -324,6 +256,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   constructor(deps: TuiDeps) {
     this.deps = deps;
     this.session = deps.session;
+    this.notifySetting = deps.notify ?? 'auto';
+    this.notifyAfterSeconds = deps.notifyAfterSeconds ?? 10;
     this.model = deps.model;
     this.provider = deps.providerName;
     this.effort = deps.effort;
@@ -370,6 +304,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         ...productScreenOptions(),
         selectionStyle: theme.selectionStyle(),
         onCopyFeedback: (message) => this.showCopyHint(message),
+        copySelection: (text) => this.copyToClipboard(text),
       });
     this.editor = new CustomEditor(this.ui, getEditorTheme(), {
       paddingX: 1,
@@ -561,6 +496,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       // 事件，release 同样被 matchesKey 匹配为原键；不过滤会让 Ctrl+C 双击退出退化成
       // 一次按键就退出。焦点组件路径已由框架过滤，这里补齐 UI 层监听器。
       if (isKeyRelease(data)) return undefined;
+      if (matchesAppKey(data, 'app.copy')) {
+        // 有选区才拦。没选区时这个组合多半是终端自己的「复制」，抢过来只会让复制键失灵。
+        if (!isViewportTUI(this.ui) || !this.ui.hasTextSelection()) return undefined;
+        void this.ui.copyTextSelection();
+        return { consume: true };
+      }
       if (this.ui.hasOverlay()) {
         // 浮层上的 Ctrl+C 也要计入「再按一次退出」。以前这里只 hideOverlay：
         // 这一下不算退出连按，审批/消息框的 Promise 还不结束，空闲时的两次变成三次。
@@ -742,6 +683,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const controller = new AbortController();
     this.abort = controller;
     this.running = true;
+    // 收尾通知的耗时起点。放在这里而不是指示器里：中断/失败也要能报出等了多久。
+    const startedAt = Date.now();
     this.projection.beginTurn();
     // 首轮（且标题还没生成过）记下素材源头；后续轮次不覆盖，素材在 'text' 事件里累积。
     if (!this.sessionTitleAttempted) {
@@ -764,6 +707,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     // 失败标记：非中断的异常收尾。模型零输出就失败的轮次不算「正常收尾」——否则端点
     // 挂掉（如 403 区域限制）时轮次秒败，收尾自动投递会把挂起队列一条条烧成同一个错误。
     let turnFailed = false;
+    /** 收尾通知里那一行原因；与转录 notice 同源，不另编一套文案。 */
+    let failureReason: string | undefined;
     try {
       await (this.deps.driver ?? runTurn)({
         prompt,
@@ -810,6 +755,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       if (!controller.signal.aborted) {
         this.addNotice(message(error), 'error');
         turnFailed = true;
+        failureReason = message(error);
       }
     } finally {
       this.projection.finalizeStreaming();
@@ -872,6 +818,18 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       // 竞态收口：通知在轮次收尾瞬间到达时，onTaskDone 回调已被 running 挡掉，
       // 这里补一次 drain——否则结果要滞留到用户下一次发言才被注入。
       this.wakeForCompletedJobs();
+      // 完成提醒。三种收尾里只跳过用户主动中断（Esc / Ctrl+C：按得下这个键，说明人就在跟前）。
+      // 收尾即自动开新轮的几种情况也不在这里响——挂起队列接管、follow-up、后台任务唤醒都还在
+      // 往下跑，那不是「做完了」；新轮自己的收尾会提醒。
+      const resumes = this.sendAfterInterrupt !== undefined || steerNext !== undefined || follow !== undefined;
+      if (!controller.signal.aborted && !resumes && !this.running) {
+        this.notifyFinished(
+          turnFailed
+            ? `Turn failed — ${failureReason ?? 'unknown error'}`
+            : `Turn finished — ${formatElapsed(Date.now() - startedAt)}`,
+          Date.now() - startedAt,
+        );
+      }
       // 立即发送：挂起队列触发的「现在就发」——中断后以合并文本接续，优先于
       // followUps（followUps 属于被中断的那一轮，留给新轮结束后再消费）。
       if (this.sendAfterInterrupt !== undefined) {
@@ -904,6 +862,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     if (!notify) return;
     const prompt = notifications.map(notify).join('\n\n');
     this.addNotice('Background task completed — continuing.', 'dim');
+    // 一批完成只响一次：挂起队列连续接管时，逐条响会把提醒变成噪音。
+    // 耗时传 0——JobRecord 不带起止时间，焦点在时就当「你能看见转录里那行」不响。
+    this.notifyFinished(
+      notifications.length === 1 ? 'Background task completed' : `${notifications.length} background tasks completed`,
+      0,
+    );
     void this.executeTurn(prompt);
   }
 
@@ -1228,6 +1192,45 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
+   * 一次「跑完了」的提醒。该不该响、响哪一档全在 `notificationBytes` 里（不响就返回空串，
+   * 连 write 都不发生），这里只把这一轮等了多久和终端焦点递给它。
+   * 桌面通知标题固定 `sph`：正文才是有用那句。
+   *
+   * `elapsedMs` 传 0 表示这段等待没有可报的时长（后台任务交付）：焦点在时就静音，走转录。
+   */
+  private notifyFinished(body: string, elapsedMs: number): void {
+    const bytes = notificationBytes({
+      setting: this.notifySetting,
+      channel: this.notificationChannel(),
+      focused: this.focusOnTerminal(),
+      elapsedMs,
+      afterMs: this.notifyAfterSeconds * 1000,
+      title: NOTIFY_TITLE,
+      body,
+    });
+    if (bytes !== '') this.ui.terminal.write(bytes);
+  }
+
+  /** 焦点在不在终端。普通（非替代屏幕）界面没有 1004 上报，按一直在跟前处理。 */
+  private focusOnTerminal(): boolean {
+    return isViewportTUI(this.ui) ? this.ui.terminalFocused() : true;
+  }
+
+  /**
+   * 写系统剪贴板（选区复制与 `/copy` 共用这一条通路）。
+   *
+   * 状态行只有一格，说不清「为什么没成、该怎么办」，所以失败时往转录补一条 dim 说明。
+   * 返回值仍按通路三档交给控件层去措辞：只有平台工具退出码 0 才配得上 `Copied!`。
+   */
+  public async copyToClipboard(text: string): Promise<ClipboardCopy> {
+    const result = this.deps.clipboard
+      ? await this.deps.clipboard(text)
+      : await writeClipboard(text, { writeOsc52: (sequence) => this.ui.terminal.write(sequence) });
+    if (result === 'failed') this.addNotice(`Copy failed — ${clipboardFailureHint()}`, 'dim');
+    return result;
+  }
+
+  /**
    * 把 warn 写进工作状态行。同一条警告本轮累加 `(N)`；换文案从 1 重新计。
    * 没有指示器（轮次已结束）时返回 false，调用方退回转录 notice。
    */
@@ -1411,6 +1414,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       bodyFormat: 'plain',
       // 审批是安全边界；普通帮助/设置弹窗不能覆盖它，也不能抢走它的键盘焦点。
       priority: APPROVAL_OVERLAY_PRIORITY,
+      hint: 'Enter approve · Esc deny',
       items: [
         { value: 'once', label: 'Allow once' },
         { value: 'session', label: `Allow ${scope} for this session` },
@@ -1418,7 +1422,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         ...(suggestedRule === undefined
           ? []
           : [{ value: 'rule', label: `Always allow rules like this — ${suggestedRule}` }]),
-        { value: 'deny', label: 'Deny' },
+        { value: 'deny', label: 'Deny', tone: 'danger' },
       ],
       maxVisible: 5,
     });
@@ -1549,6 +1553,12 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       case 'permissions':
         await commandPermissions(this);
         break;
+      case 'notify':
+        await commandNotify(this, argument);
+        break;
+      case 'copy':
+        await commandCopy(this, argument);
+        break;
       case 'export':
         await commandExport(this, argument);
         break;
@@ -1567,31 +1577,27 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
-   * `/help`：命令面板。命令按注册表的 group 分组、可直接选中执行（Enter 等价于敲命令）；
-   * 键位与鼠标说明作为不可选的说明行排在后面，↑/↓ 与点选自动跳过。命令表从注册表取数，
-   * 键位清单由注册表驱动（app-keybindings 的 when 字段分组）：新增键位只需改注册表，
-   * 帮助自动跟上——手写清单必然漂移，这次收编就是为了消灭它。
+   * `/help`：命令表报告。命令按注册表的 group 分段、键位按生效上下文分段，全部从注册表取数
+   * ——新加一条命令、一个键位，帮助自动跟上。
+   *
+   * 这里是报告而不是可点选的面板：命令本来就靠敲（`/name`）、靠 `/` 补全，把「看清单」和
+   * 「执行」拆开之后，键盘焦点与滚动手感都和 `/skills`、`/plugins` 一致了。
    */
   private async commandHelp(): Promise<void> {
-    const selected = await showSelectDialog(this.ui, {
+    await showMessageDialog(this.ui, {
       title: 'Help',
-      items: buildHelpPanelItems(this.commandItems()),
-      maxVisible: 24,
-      kind: 'document',
-      // 内容反正要滚动，88% 高的整屏面板压得太满；收到七成上下，四周留点呼吸感。
-      maxHeight: '72%',
-      hint: '↑/↓ select · Enter run · Esc close',
+      text: renderHelpReport({
+        commands: this.commandItems(),
+        aliases: COMMAND_ALIASES,
+        keybindings: Object.values(APP_KEYBINDINGS),
+      }),
+      hint: 'Esc close',
+      // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
+      termColumns: true,
+      ...commandPanelOptions(this.ui),
     });
-    // Enter 选中即执行：与敲命令同一条路（含别名展开与未知命令兜底）。
-    if (selected) await this.handleCommand(`/${selected}`);
   }
 
-  /**
-   * 重新扫一遍技能目录，而不是复用本轮提示词里那份目录。
-   *
-   * 会话中途新建一个 skill 是正常用法，当场扫就能立刻看到；代价只是读几个 SKILL.md 的文件头。
-   * 与当前轮次提示词有分歧时以本弹窗为准——下一轮的提示词就会跟上。
-   */
   /**
    * `/plugins`：装了哪些插件、各自贡献了什么、谁没装起来。
    *
@@ -1603,24 +1609,22 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     await showMessageDialog(this.ui, {
       title: 'Plugins',
       text: renderPluginsReport(report),
-      hint: 'Esc close · plugin state is fixed for this process',
+      hint: 'Esc close',
+      // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
+      termColumns: true,
+      ...commandPanelOptions(this.ui),
     });
   }
 
+  /**
+   * `/skills`：报告弹窗（灰度第一个入口）。
+   *
+   * 数据在弹窗打开时现扫，而不是复用本轮提示词里那份目录：会话中途新建一个 skill 是
+   * 正常用法，当场扫就能立刻看到；代价只是读几个 SKILL.md 的文件头。与当前轮次提示词
+   * 有分歧时以本弹窗为准——下一轮的提示词就会跟上。
+   */
   private async commandSkills(): Promise<void> {
-    const { catalog, warnings } = scanSkills(this.deps.workspaceRoot);
-    await showMessageDialog(this.ui, {
-      title: 'Skills',
-      text: renderSkillsReport({ catalog, warnings, roots: skillRoots(this.deps.workspaceRoot) }),
-      hint: 'Esc close · re-scanned on every open',
-      // 报告框单独一档：六成宽、占屏高四分之三、顶边距屏幕 10%，框内铺画布底（与终端同色）。
-      width: '60%',
-      maxWidth: 10_000,
-      maxHeight: '75%',
-      // OverlayOptions.row 的百分比是剩余空白里的比例，不是距顶部。这里按终端行数取 10%。
-      row: Math.max(0, Math.floor(this.ui.terminal.rows * 0.1)),
-      transparent: true,
-    });
+    await openReport(this.ui, 'skills', { workspaceRoot: this.deps.workspaceRoot });
   }
 
   // ------------------------------------------------------------------ 会话切换落地
@@ -1734,6 +1738,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     const indicator = new WorkingStatusIndicator(this.ui, WorkingLabel.compacting);
     this.setStatusIndicator(indicator);
     this.setActivity(WorkingLabel.compacting);
+    const startedAt = Date.now();
     try {
       const projection = await projectContext({
         ...this.sessionContext(messages),
@@ -1766,8 +1771,11 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       if (this.session.id === forked.session.id) {
         this.addNotice(`Compacted ${next.covered - covered} messages into a new session.`, 'success');
       }
+      // 折叠要等一次摘要调用，几秒起步——和 /compact 同一条「长耗时命令完成」的提醒口径。
+      this.notifyFinished(`Compacted ${next.covered - covered} messages`, Date.now() - startedAt);
     } catch (error) {
       this.addNotice(`Compact failed: ${message(error)}`, 'error');
+      this.notifyFinished(`Compact failed — ${message(error)}`, Date.now() - startedAt);
     } finally {
       this.setStatusIndicator(undefined);
       // 指示器清掉后活动词已归位；这里刷新 tab 标题落回空闲，不能再用 setActivity 记词——
@@ -1828,6 +1836,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
 
     this.recapInFlight = true;
     const epoch = this.recapEpoch;
+    const startedAt = Date.now();
     // 手动路径先挂 pending 行：生成要几秒，没有反馈用户会以为命令没生效。
     const block = auto ? undefined : this.startRecapBlock();
     try {
@@ -1856,6 +1865,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       this.commitRecap(result.summary, auto, mainTurns, true);
       if (block) block.setSummary(result.summary);
       else this.addRecap(result.summary);
+      // recap 只在空闲轮询里自己起（没有 /recap 这条命令），跑完时人多半不在跟前——
+      // 回来发现有份摘要在等，正是这一声该说的。失败保持原有的静默：没人为它按过键。
+      this.notifyFinished('Recap ready', Date.now() - startedAt);
     } catch (error) {
       // recap 是旁路功能：失败只提示，绝不打断会话，也不推进水印（下次还能再试）。
       this.dropRecapBlock(block);
@@ -1960,7 +1972,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         { value: 'revise', label: 'Keep planning', description: 'Stay in plan mode; optional feedback next' },
       ],
       maxVisible: 2,
-      maxHeight: '80%',
+      ...commandPanelOptions(this.ui),
     });
     if (choice === 'approve') return { approved: true };
     if (choice === 'revise') {
@@ -1989,6 +2001,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
             { value: 'clear', label: 'Clear goal' },
           ],
           maxVisible: 2,
+          ...commandPanelOptions(this.ui),
         });
         if (choice === 'clear') this.writeGoal('');
       } else {
@@ -2082,6 +2095,24 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     );
   }
 
+  /** `/notify` 读当前档位与探测到的通道（SettingsCommandHost）。 */
+  public currentNotify(): NotifySetting {
+    return this.notifySetting;
+  }
+
+  public notificationChannel(): NotificationChannel {
+    return getCapabilities().notifications;
+  }
+
+  public applyNotify(setting: NotifySetting): void {
+    this.notifySetting = setting;
+    const error = this.writeConfigTable('ui', 'notify', setting);
+    this.addNotice(
+      error ? `Notifications set to ${setting} (config write failed: ${error})` : `Notifications set to ${setting}`,
+      error ? 'warn' : 'success',
+    );
+  }
+
   public applyApproval(mode: ApprovalMode): void {
     this.approval = mode;
     this.applyEditorBorder();
@@ -2129,6 +2160,19 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private writeConfig(patch: Readonly<Record<string, string | number>>): string | undefined {
     try {
       updateConfigFile(this.deps.configPath, patch);
+      return undefined;
+    } catch (error) {
+      return message(error);
+    }
+  }
+
+  /**
+   * 表体里的键（`[ui] notify`）另写一条通路：updateConfigFile 只认第一个表头**之前**的顶层
+   * 标量，把 `notify` 交给它会追加成 `[permissions]` 表里的键——文件里看着有、顶层读不到。
+   */
+  private writeConfigTable(table: string, key: string, value: string | number): string | undefined {
+    try {
+      updateConfigTableEntry(this.deps.configPath, table, key, value);
       return undefined;
     } catch (error) {
       return message(error);

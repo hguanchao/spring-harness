@@ -70,6 +70,8 @@ const ui: UiService = {
       todos: rt.todos,
       jobs: rt.jobs,
       approvalMode: cli.approval ?? rt.config.approval ?? 'ask',
+      notify: rt.config.notify,
+      notifyAfterSeconds: rt.config.notifyAfterSeconds,
       permission: rt.permission,
       subagentApproval: rt.config.subagentApproval,
       configPath: rt.configPath,

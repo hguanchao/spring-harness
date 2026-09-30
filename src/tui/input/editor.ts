@@ -242,6 +242,8 @@ export interface EditorTheme {
 	selectList: SelectListTheme;
 	/** 自动完成菜单标题。省略则沿用 borderColor，控件层不自带强调色。 */
 	menuTitle?: (str: string) => string;
+	/** 菜单底边框的按键提示。省略则跟边框同色。 */
+	menuHint?: (str: string) => string;
 	/** 输入框里的 `/command`。省略则不着色，参数保持正文色。 */
 	slashCommand?: (str: string) => string;
 }
@@ -358,13 +360,16 @@ export class Editor implements Component, Focusable {
 		  }
 		| undefined;
 	/** 补全与内联菜单共用同一盒渲染;内联菜单优先。 */
-	private activeMenu(): { list: SelectList; title: string } | undefined {
+	private activeMenu(): { list: SelectList; title: string; filterable: boolean } | undefined {
 		if (this.inlineMenu) {
 			const query = this.inlineMenu.query;
 			const title = query === '' ? this.inlineMenu.title : `${this.inlineMenu.title}  ${query}`;
-			return { list: this.inlineMenu.list, title };
+			return { list: this.inlineMenu.list, title, filterable: this.inlineMenu.filterable };
 		}
-		if (this.autocompleteState && this.autocompleteList) return { list: this.autocompleteList, title: " Commands " };
+		// 斜杠补全的过滤就是输入框里的 `/xxx` 本身，按键提示里「打字即在筛」是真话。
+		if (this.autocompleteState && this.autocompleteList) {
+			return { list: this.autocompleteList, title: " Commands ", filterable: true };
+		}
 		return undefined;
 	}
 
@@ -609,6 +614,12 @@ export class Editor implements Component, Focusable {
 					lines: listLines,
 					bottomInfo: scrollInfo,
 					infoWidth: scrollInfo.length,
+					// 底边框左格补按键：这张框挂在输入框上、不像对话框那样自带提示行，
+					// 以前全靠用户猜「Enter 是确认菜单还是提交输入框」。
+					leftInfo: menu.filterable
+						? '↑↓ select · type to filter · Enter choose · Esc cancel'
+						: '↑↓ select · Enter confirm · Esc cancel',
+					leftInfoPaint: (text: string) => (this.theme.menuHint ?? this.theme.borderColor)(text),
 					frame: (text: string) => this.theme.borderColor(text),
 					titlePaint: (text: string) => (this.theme.menuTitle ?? this.theme.borderColor)(text),
 				});
@@ -2365,14 +2376,19 @@ export class Editor implements Component, Focusable {
 		primaryColumnWidth?: number;
 		/** 允许打字或粘贴，按条目 value 的前缀过滤。方向键和回车仍是选择。 */
 		filterable?: boolean;
+		/** 行号槽。只给「条目名字不可称呼」的表（会话 id、历史 prompt）。 */
+		numbered?: boolean;
 	}): Promise<SelectItem | undefined> {
 		this.closeInlineMenu(undefined); // 已有菜单先收:旧的以 undefined 结束
-		const layout = options.primaryColumnWidth === undefined
-			? undefined
-			: {
-				minPrimaryColumnWidth: options.primaryColumnWidth,
-				maxPrimaryColumnWidth: options.primaryColumnWidth,
-			};
+		const layout: SelectListLayoutOptions = {
+			...(options.primaryColumnWidth === undefined
+				? {}
+				: {
+						minPrimaryColumnWidth: options.primaryColumnWidth,
+						maxPrimaryColumnWidth: options.primaryColumnWidth,
+					}),
+			numbered: options.numbered === true,
+		};
 		const list = new SelectList(options.items, options.maxVisible ?? 10, this.theme.selectList, layout);
 		list.renderScrollInfoLine = false;
 		return new Promise((resolve) => {

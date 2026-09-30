@@ -17,6 +17,7 @@ export { Marked, type Token, type Tokens } from "marked";
 
 // screen —— 屏幕、布局与备用屏幕
 export {
+	type ClipboardCopy,
 	type Component,
 	Container,
 	SELECTION_BLOCK,
@@ -69,9 +70,11 @@ export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "
 export { ProcessTerminal, type Terminal } from "@/tui/terminal/terminal.js";
 export {
 	detectCapabilities,
+	detectNotificationChannelFromEnvironment,
 	getCapabilities,
 	hyperlink,
 	setCapabilities,
+	type NotificationChannel,
 	type TerminalCapabilities,
 } from "@/tui/terminal/terminal-image.js";
 
@@ -128,6 +131,13 @@ export {
 	type SelectListTheme,
 	type SelectListTruncatePrimaryContext,
 } from "@/tui/widgets/select-list.js";
+export {
+	FOLD_MARK,
+	GroupList,
+	type GroupListTheme,
+	type GroupRow,
+} from "@/tui/widgets/group-list.js";
+export { type TabBarTheme, TabBar } from "@/tui/widgets/tab-bar.js";
 
 // text —— 文本度量与 ANSI 处理
 export {

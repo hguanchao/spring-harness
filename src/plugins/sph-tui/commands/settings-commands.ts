@@ -7,6 +7,10 @@
  */
 
 import { API_PROTOCOLS, type ApiProtocol } from '@/config/load.js';
+import { NOTIFY_SETTINGS, type NotifySetting } from '@/config/primitives.js';
+import type { NotificationChannel } from '@/tui/terminal/terminal-image.js';
+import { NOTIFY_HINTS } from '@/plugins/sph-tui/notify.js';
+import { renderPermissionsReport } from '@/plugins/sph-tui/commands/reports.js';
 import { appendModelDeclaration, type ProviderDeclaration } from '@/config/registry.js';
 import { sphModelsPath } from '@/home.js';
 import { displayNameForModel, listAvailableModels } from '@/plugins/sph-llm/models.js';
@@ -16,7 +20,7 @@ import { errorMessage } from '@/util.js';
 import { primaryColumnWidthFor } from '@/plugins/sph-tui/commands/index.js';
 import type { TUI, SelectItem } from '@/tui/index.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
-import { showInputDialog, showLoadingDialog, showMessageDialog } from '@/plugins/sph-tui/dialogs.js';
+import { commandPanelOptions, showInputDialog, showLoadingDialog, showMessageDialog } from '@/plugins/sph-tui/dialogs.js';
 import { theme } from '@/plugins/sph-tui/theme/theme.js';
 import { visibleWidth } from '@/tui/text/utils.js';
 import type { CustomEditor } from '@/plugins/sph-tui/input/custom-editor.js';
@@ -40,6 +44,10 @@ export interface SettingsCommandHost {
   /** 把协议写到该模型的声明上（覆盖 provider 默认）并立刻重建 client。 */
   applyApi(api: ApiProtocol, provider: ProviderDeclaration, modelId: string): void;
   applyApproval(mode: ApprovalMode): void;
+  /** `/notify`：完成提醒的当前档位、探测到的桌面通道，以及切换后的落盘。 */
+  currentNotify(): NotifySetting;
+  notificationChannel(): NotificationChannel;
+  applyNotify(setting: NotifySetting): void;
 }
 
 export async function commandModel(host: SettingsCommandHost, argument = ''): Promise<void> {
@@ -287,45 +295,26 @@ export async function commandPermissions(host: SettingsCommandHost): Promise<voi
   const layers = deps.permission.layers();
   const sandbox = deps.permission.sandbox();
   const grants = deps.permission.grants();
-  const keys = grants.load();
-  const lines: string[] = [
-    `Approval mode: ${host.currentApproval()}`,
-    `Sandbox: ${sandbox.mode}${sandbox.autoAllow ? ' (shell commands inside the sandbox are not asked)' : ''}`,
-    '',
-  ];
-  const section = (title: string, rules: { allow: readonly string[]; ask: readonly string[]; deny: readonly string[] } | undefined, where: string): void => {
-    lines.push(`${title} — ${where}`);
-    if (rules === undefined) {
-      lines.push('  (none)');
-      return;
-    }
-    const rows = [
-      ['deny', rules.deny],
-      ['ask', rules.ask],
-      ['allow', rules.allow],
-    ] as const;
-    if (rows.every(([, list]) => list.length === 0)) {
-      lines.push('  (no rules)');
-      return;
-    }
-    for (const [action, list] of rows) {
-      for (const rule of list) lines.push(`  ${action}: ${rule}`);
-    }
-  };
-  section('User rules', layers.user?.rules, layers.user?.sourceDir ?? '(none)');
-  section('Project rules', layers.project?.rules, deps.permission.projectPath());
-  if (deps.permission.projectAllowDropped()) {
-    lines.push('', 'Project allow rules are ignored: this workspace is not trusted (deny / ask still apply).');
-  }
-  lines.push(
-    '',
-    `Approved actions: ${keys.length} (${grants.path})`,
-    ...(keys.length === 0 ? [] : keys.slice(0, 20).map((key) => `  ${key}`)),
-    ...(keys.length > 20 ? [`  … ${keys.length - 20} more`] : []),
-  );
+  const text = renderPermissionsReport({
+    approval: host.currentApproval(),
+    sandboxMode: sandbox.mode,
+    sandboxAutoAllow: sandbox.autoAllow,
+    layers,
+    userSourceDir: layers.user?.sourceDir ?? '',
+    projectPath: deps.permission.projectPath(),
+    projectAllowDropped: deps.permission.projectAllowDropped(),
+    approved: grants.load(),
+    grantsPath: grants.path,
+  });
   const grantWarning = grants.warning();
-  if (grantWarning !== undefined) lines.push('', theme.fg('warning', grantWarning));
-  await showMessageDialog(host.ui, { title: 'Permissions', text: lines.join('\n'), hint: 'Esc close' });
+  await showMessageDialog(host.ui, {
+    title: 'Permissions',
+    text: grantWarning === undefined ? text : `${text}\n\n${theme.fg('warning', grantWarning)}`,
+    hint: 'Esc close',
+    // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
+    termColumns: true,
+    ...commandPanelOptions(host.ui),
+  });
 }
 
 export async function commandPermission(host: SettingsCommandHost, argument = ''): Promise<void> {
@@ -346,6 +335,50 @@ export async function commandPermission(host: SettingsCommandHost, argument = ''
   const selected = await host.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: APPROVAL_MODES.length, primaryColumnWidth: primaryColumnWidthFor(items) });
   if (!selected) return;
   host.applyApproval(selected.value as ApprovalMode);
+}
+
+/**
+ * `/notify [mode]`：任务完成时怎么提醒。无参数打开选择器，带参数直接设。
+ *
+ * 菜单顶部的分隔行写这台终端探测到的桌面通道——`desktop` 一档在接不到通知的终端上等于
+ * 什么都不响，与其事后疑惑，不如在选的那一刻说明。落盘走 `[ui] notify`（表体键），
+ * 与 `/permission` 的顶层标量不同一条通路。
+ */
+export async function commandNotify(host: SettingsCommandHost, argument = ''): Promise<void> {
+  if (argument !== '') {
+    const match = NOTIFY_SETTINGS.find((setting) => setting === argument);
+    if (!match) {
+      host.addNotice(`Unknown notify mode: ${argument} (${NOTIFY_SETTINGS.join(' | ')})`, 'warn');
+      return;
+    }
+    host.applyNotify(match);
+    return;
+  }
+  const channel = host.notificationChannel();
+  const items: SelectItem[] = [
+    {
+      value: 'channel',
+      label:
+        channel === 'none'
+          ? 'no desktop notification channel detected in this terminal'
+          : `desktop channel: ${channel}`,
+      kind: 'header' as const,
+    },
+    ...NOTIFY_SETTINGS.map((setting) => ({
+      value: setting,
+      label: setting,
+      description: NOTIFY_HINTS[setting],
+      trailing: setting === host.currentNotify() ? 'current' : undefined,
+    })),
+  ];
+  const selected = await host.editor.showInlineMenu({
+    title: 'Notifications',
+    items,
+    maxVisible: NOTIFY_SETTINGS.length + 1,
+    primaryColumnWidth: primaryColumnWidthFor(items),
+  });
+  if (!selected) return;
+  host.applyNotify(selected.value as NotifySetting);
 }
 
 /** Shift+Tab：按 APPROVAL_MODES 的顺序循环审批模式（复用 /permission 的应用逻辑）。 */

@@ -12,10 +12,12 @@ import { DEFAULT_MAX_RETRIES, DEFAULT_SPILL_THRESHOLD } from '../llm/client.js';
 import type { McpServerConfig } from '../plugins/services.js';
 import {
   API_PROTOCOLS,
+  NOTIFY_SETTINGS,
   parseSandboxMode,
   REASONING_EFFORTS,
   type ApiProtocol,
   type CompatProfile,
+  type NotifySetting,
   type ReasoningEffort,
 } from './primitives.js';
 import type { SandboxMode } from '../sandbox/types.js';
@@ -24,7 +26,7 @@ import { loadRegistry, resolveModel, type ProviderDeclaration } from './registry
 import { parseGrants, parseRules, parseTrusted } from './state.js';
 
 export { ConfigError, API_PROTOCOLS, parseSandboxMode };
-export type { ApiProtocol };
+export type { ApiProtocol, NotifySetting };
 
 export type McpServerConfigFile = McpServerConfig;
 
@@ -126,6 +128,18 @@ export interface SphConfig {
    */
   disabledPlugins: string[];
   /**
+   * `[ui] notify`：任务完成时怎么提醒。默认 `auto`（响铃 + 终端接得到的桌面通知）。
+   *
+   * 只在界面侧读取；headless（`sph -p`）没有「等在外面的人」，不碰这个字段。
+   */
+  notify: NotifySetting;
+  /**
+   * `[ui] notify_after_seconds`：焦点仍在终端时，一段等待至少要跑够这么久才提醒。默认 10。
+   *
+   * `0` = 只要完成就提醒（不看焦点）。失焦时本字段不参与判定，一定提醒。
+   */
+  notifyAfterSeconds: number;
+  /**
    * 端点指针对不上时的说明。
    *
    * provider / model 写错不再拒绝启动：首启模板和用户自己的 models.json 经常对不上，
@@ -212,6 +226,9 @@ export function loadConfig(options?: {
   const maxSessionTokens = readInt(file.max_session_tokens, 'max_session_tokens', 0, 0, startupWarnings);
   const maxRetries = readInt(file.max_retries, 'max_retries', 0, DEFAULT_MAX_RETRIES, startupWarnings);
   const disabledPlugins = readDisabledPlugins(file.plugins, startupWarnings);
+  const ui = readUiTable(file.ui, startupWarnings);
+  const notify = readChoice(ui.notify, 'ui.notify', NOTIFY_SETTINGS, 'auto', startupWarnings);
+  const notifyAfterSeconds = readInt(ui.notify_after_seconds, 'ui.notify_after_seconds', 0, 10, startupWarnings);
   return {
     provider: provider.name,
     model,
@@ -225,7 +242,7 @@ export function loadConfig(options?: {
     sandbox, reasoningEffort, approval, mcpServers,
     permissions, subagentApproval, sandboxAutoAllow,
     compactModel, reviewModel, aux, spillThreshold, proxy, subagentMaxDepth, maxTurns, promptCache,
-    maxSessionTokens, maxRetries, disabledPlugins, startupWarnings,
+    maxSessionTokens, maxRetries, disabledPlugins, notify, notifyAfterSeconds, startupWarnings,
   };
 }
 
@@ -370,6 +387,19 @@ function readAux(
     return undefined;
   }
   return { provider: written };
+}
+
+/**
+ * `[ui]` 表：界面行为。整段不是表就当没写，只记一条说明——界面配置不涉及安全边界，
+ * 写错的代价不该是启动失败。
+ */
+function readUiTable(value: unknown, warnings: string[]): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    note(warnings, 'ui', value, 'the defaults');
+    return {};
+  }
+  return value as Record<string, unknown>;
 }
 
 /** 辅助模型名。空着用主模型；写了却不在当前 provider 的声明里也当没写。 */

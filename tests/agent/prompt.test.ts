@@ -52,7 +52,7 @@ describe('主系统提示词的结构', () => {
   });
 
   it('系统提示不含会变的环境事实', () => {
-    const p = base({ model: 'some-model', skills: [{ name: 'pdf', description: 'forms', path: 'a' }] });
+    const p = base({ model: 'some-model', skills: [{ name: 'pdf', description: 'forms', path: 'a', root: '/ws/skills' }] });
     assert.equal(p.includes('Workspace root:'), false);
     assert.equal(p.includes('Today:'), false);
     assert.equal(p.includes('Model:'), false);

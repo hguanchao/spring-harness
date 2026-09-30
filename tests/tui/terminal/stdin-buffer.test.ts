@@ -35,6 +35,15 @@ describe('StdinBuffer', () => {
     assert.deepEqual(out.data, ['\x1b[<35;20;5m']);
   });
 
+  it('拼在一起的滚轮序列要拆成几条', () => {
+    // 滚轮快速滚动时终端会把几格攒在一个 chunk 里发过来。上层按「一条输入 = 一个事件」处理
+    // （parseWheelEvent 整串锚定匹配），整串发上去等于把这几格一起吞掉——滚轮看着就是滚不动。
+    const buffer = new StdinBuffer();
+    const out = collect(buffer);
+    buffer.process('\x1b[<65;20;5M\x1b[<65;20;5M\x1b[<64;20;5M');
+    assert.deepEqual(out.data, ['\x1b[<65;20;5M', '\x1b[<65;20;5M', '\x1b[<64;20;5M']);
+  });
+
   it('括号粘贴走 paste 事件，内容不拆成按键', () => {
     const buffer = new StdinBuffer();
     const out = collect(buffer);

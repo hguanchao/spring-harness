@@ -17,6 +17,7 @@ import {
 import { getLayoutNode } from "@/tui/screen/layout.js";
 import type { Terminal } from "@/tui/terminal/terminal.js";
 import {
+	type ClipboardCopy,
 	type Component,
 	Container,
 	CURSOR_MARKER,
@@ -170,10 +171,13 @@ export interface TuiAltScreenOptions {
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
 	/**
-	 * Copy selected text to the system clipboard. Return `true` on success; the caller flashes
-	 * an error otherwise. When omitted, the selection is copied via an OSC 52 write.
+	 * Copy selected text to the system clipboard and report where it actually landed:
+	 * `native` (a platform tool exited 0), `osc52` (handed to the terminal, unverified), or
+	 * `failed`. The widget turns that into status-line wording, so a copy that never reached
+	 * the clipboard cannot claim "Copied!". When omitted, the selection is copied via an OSC 52
+	 * write and reported as `osc52`.
 	 */
-	copySelection?: (text: string) => Promise<boolean>;
+	copySelection?: (text: string) => Promise<ClipboardCopy>;
 	/**
 	 * 复制反馈文案的路由。设置后复制提示交给应用（如落到输入框右上角的状态行），
 	 * 不再走全屏 flash；未设置保持原行为。
@@ -220,6 +224,9 @@ interface VerticalShift {
 
 /**
  * 找一段纯垂直平移。终端用滚动区把这段像素挪走，只重画滚出来的新行和吸顶、滑块那些对不上的行。
+ *
+ * 只在「这段像素真的整体平移」时才成立：滑块钉在视口上不跟正文走，浮层的边框同理，
+ * 都得由调用方先挡住（见 paintScreenDiff 的 hasOverlay），否则滚动区会把它们一起卷走。
  */
 function verticalShift(screen: readonly string[], previous: readonly string[], height: number): VerticalShift | undefined {
   // 滑块钉在视口上，不跟正文走。滚动区会把 █ 一起卷走，下一帧只补一部分行，滑块就会闪、会断。
@@ -275,12 +282,20 @@ export function paintScreenDiff(options: {
   height: number;
   cursor?: { row: number; col: number } | null;
   showHardwareCursor?: boolean;
+  /**
+   * 屏幕上有浮层时为 true：禁用滚动区挪像素。
+   *
+   * 浮层（对话框）里还有自己的固定边框与内边距，它们不随正文滚动；滚动区会把整段像素
+   * 一起卷走，下一帧又只补一部分行，边框就会错位。转录区那边有滚动条兜着（见 verticalShift
+   * 的 `█` 守卫），浮层没有，所以必须由调用方把这件事告诉这里。
+   */
+  hasOverlay?: boolean;
 }): { buffer: string; fullRedraw: boolean } {
   const { screen, previous, previousWidth, previousHeight, width, height, cursor, showHardwareCursor } = options;
   const fullRedraw = previous.length === 0 || previousWidth !== width || previousHeight !== height;
   let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
   if (fullRedraw) buffer += `\x1b[49m\x1b[2J`;
-  const shift = fullRedraw ? undefined : verticalShift(screen, previous, height);
+  const shift = fullRedraw || options.hasOverlay === true ? undefined : verticalShift(screen, previous, height);
   if (shift) {
     const top = shift.top + 1;
     const bottom = shift.bottom + 1;
@@ -363,6 +378,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
 	private pressedUrl?: string;
 	private selectionDragged = false;
+	/**
+	 * 终端焦点在不在这个窗口里。1004 上报早就开着（`ENABLE_ALL_MOTION_MOUSE` 里的 `?1004h`），
+	 * 以前收到 `\x1b[I`/`\x1b[O` 只拿来清选区，现在顺手记一笔：完成提醒要在「你正盯着」时闭嘴。
+	 * 默认 true：不上报焦点的终端等于一直在跟前，宁可少响。
+	 */
+	private terminalHasFocus = true;
 	private mouseCapture?: TuiMouseDispatchTarget;
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
@@ -378,7 +399,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly mouseEnabled: boolean;
 	private readonly scrollToEndIndicator?: () => string;
 	private readonly openUrl?: (url: string) => void;
-	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly copySelection?: (text: string) => Promise<ClipboardCopy>;
 	private readonly onCopyFeedback?: (message: string) => void;
 	private readonly selectionStyle?: SelectionHighlight;
 	private readonly canvas?: { set(): string; reset(): string };
@@ -573,6 +594,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
+			this.terminalHasFocus = false;
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
@@ -590,7 +612,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.lastClick = undefined;
 			return { consume: true };
 		}
-		if (data === FOCUS_IN) return { consume: true };
+		if (data === FOCUS_IN) {
+			this.terminalHasFocus = true;
+			return { consume: true };
+		}
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {
@@ -962,7 +987,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private handleRightClickCopy(event: SgrMouseEvent): boolean {
 		if (event.release || event.button !== 2) return false;
 		if (!this.getSelectionBounds()) return false;
-		void this.copySelectionToClipboard();
+		void this.copyTextSelection();
 		return true;
 	}
 
@@ -1471,34 +1496,79 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return text.trim().length === 0 ? undefined : text;
 	}
 
-	private async copySelectionToClipboard(): Promise<boolean> {
+	/** 屏幕上是否有可复制的选区（键盘复制的生效条件）。 */
+	hasTextSelection(): boolean {
+		return this.getSelectionBounds() !== undefined;
+	}
+
+	/** 终端焦点在不在这个窗口（1004 上报）。给完成提醒用：正盯着就别响。 */
+	terminalFocused(): boolean {
+		return this.terminalHasFocus;
+	}
+
+	/**
+	 * 复制当前选区。没有选区返回 undefined，调用方不报任何反馈——右键在无选区时不拦截，
+	 * 终端自己的「复制/粘贴」语义才留得下来。
+	 */
+	async copyTextSelection(): Promise<ClipboardCopy | undefined> {
 		const text = this.getActiveSelectionText();
-		if (!text) return false;
-		return this.copyTextToClipboard(text);
+		if (!text) return undefined;
+		const result = this.copySelection ? await this.copySelection(text) : this.writeOsc52(text);
+		this.copyFeedback(result);
+		return result;
 	}
 
-	private async copyTextToClipboard(text: string): Promise<boolean> {
-		// Prefer an injected clipboard implementation (native clipboard + platform tools with a
-		// verified success path) when the host app provides one. A bare OSC 52 write can show
-		// "Copied!" while leaving the system clipboard untouched (e.g. macOS Terminal.app, tmux
-		// without OSC 52 clipboard passthrough), so only report success when it actually copies.
-		if (this.copySelection) {
-			const ok = await this.copySelection(text);
-			this.copyFeedback(ok ? "Copied!" : "Copy failed");
-			return ok;
-		}
+	/** 兜底通路：把文本写给终端。是否真进了剪贴板无从确认，所以返回值是 `osc52` 而不是成功。 */
+	private writeOsc52(text: string): ClipboardCopy {
 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
-		this.copyFeedback("Copied!");
-		return true;
+		return "osc52";
 	}
 
-	/** 复制反馈：应用接了 onCopyFeedback 就交给应用落位，否则退回全屏 flash。 */
-	private copyFeedback(message: string): void {
+	/** 复制反馈：只有原生通路退出码 0 才说 Copied!，OSC 52 如实标出通路，失败就说失败。 */
+	private copyFeedback(result: ClipboardCopy): void {
+		const message = result === "native" ? "Copied!" : result === "osc52" ? "Copied (OSC 52)" : "Copy failed";
 		if (this.onCopyFeedback) {
 			this.onCopyFeedback(message);
 			return;
 		}
 		this.flash(message);
+	}
+
+	/** 把一行的选区段染上高亮；无选区段或整行不在选区内时原样返回。 */
+	private paintSelectionLine(
+		line: string,
+		row: number,
+		selection: SelectionRange,
+		minColumn = 0,
+		maxColumn = this.terminal.columns,
+	): string {
+		const lineWidth = visibleWidth(line);
+		const columns = this.getSelectionColumns(line, row, selection, minColumn, maxColumn);
+		if (columns.end <= columns.start) return line;
+		const before = sliceByColumn(line, 0, columns.start, true);
+		const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
+		const after = sliceByColumn(line, columns.end, Math.max(0, lineWidth - columns.end), true);
+		return `${before}${applySelectionHighlight(selected, this.selectionStyle)}${after}`;
+	}
+
+	/**
+	 * 浮层内那一块的选区高亮：正文那趟染色发生在浮层合成**之前**，对话框会把它整个盖掉，
+	 * 于是弹窗里拖选手感有、颜色没有。这里在合成之后、按浮层实际占的屏幕行补一次同一套染法。
+	 *
+	 * 只补屏幕缓冲（非 scrollView）的选区——弹窗内的选区正是这一种：滚动内容按源码行选，
+	 * 而弹窗自己的滚动区不参与布局命中，隐藏行本来就不在可选范围内。
+	 */
+	private applyOverlaySelection(screen: string[]): string[] {
+		const selection = this.getSelectionBounds();
+		if (!selection || selection.start.scrollView) return screen;
+		const rects = this.renderedOverlayRects();
+		if (rects.length === 0) return screen;
+		const result = [...screen];
+		for (let row = selection.start.row; row <= Math.min(selection.end.row, result.length - 1); row++) {
+			if (!rects.some((rect) => row >= rect.row && row < rect.row + rect.height)) continue;
+			result[row] = this.paintSelectionLine(result[row] ?? "", row, selection);
+		}
+		return result;
 	}
 
 	private applySelection(screen: string[], layout = this.currentLayout): string[] {
@@ -1539,13 +1609,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			) {
 				return line;
 			}
-			const lineWidth = visibleWidth(line);
-			const columns = this.getSelectionColumns(line, row, screenSelection, minColumn, maxColumn);
-			if (columns.end <= columns.start) return line;
-			const before = sliceByColumn(line, 0, columns.start, true);
-			const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
-			const after = sliceByColumn(line, columns.end, Math.max(0, lineWidth - columns.end), true);
-			return `${before}${applySelectionHighlight(selected, this.selectionStyle)}${after}`;
+			return this.paintSelectionLine(line, row, screenSelection, minColumn, maxColumn);
 		});
 	}
 
@@ -1612,6 +1676,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeFlashes(screen, width, height);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
+		// 浮层内的拖选在这一步才染：早于合成的高亮会被浮层自己盖掉。
+		screen = this.applyOverlaySelection(screen);
 
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => clipLineToWidth(line, width));
@@ -1625,6 +1691,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			height,
 			cursor: cursorPos,
 			showHardwareCursor: this.getShowHardwareCursor(),
+			// 浮层在场时不许用终端滚动区挪像素：对话框的边框与内边距不跟正文走。
+			hasOverlay: this.hasOverlay(),
 		});
 		if (painted.fullRedraw) this.fullRedrawCount += 1;
 		this.terminal.write(painted.buffer);

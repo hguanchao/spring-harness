@@ -32,6 +32,15 @@ export type ApiProtocol = (typeof API_PROTOCOLS)[number];
 export const REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
+/**
+ * 任务完成时怎么提醒。定义在基元层而不是 TUI 插件里：`[ui] notify` 是 config.toml 的取值，
+ * 而 config/load 不该反向依赖插件目录（CLI 的轻启动路径也会被这条 import 拖重）。
+ *
+ * `auto` = 响铃 + 桌面通知（终端不接通知时就只剩响铃）；`off` = 完全不提醒。
+ */
+export const NOTIFY_SETTINGS = ['auto', 'bell', 'desktop', 'off'] as const;
+export type NotifySetting = (typeof NOTIFY_SETTINGS)[number];
+
 export function parseApiProtocol(value: unknown, where = 'api'): ApiProtocol {
   if (typeof value !== 'string' || !(API_PROTOCOLS as readonly string[]).includes(value)) {
     throw new ConfigError(`${where} must be one of: ${API_PROTOCOLS.join(' | ')}`);

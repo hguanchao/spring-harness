@@ -13,7 +13,7 @@ import { appendableMessage } from '@/plugins/sph-loop/compact.js';
 import { EMPTY_PLUGIN_SERVICES } from '@/plugins/types.js';
 import { SESSION_SERVICE, type SessionService, type SkillEntry } from '@/plugins/services.js';
 import { sessionService } from '@/plugins/sph-session/index.js';
-import { showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
+import { commandPanelOptions, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
 import type { SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
 
 function sessionsOf(host: SessionCommandHost): SessionService | undefined {
@@ -64,6 +64,7 @@ export async function commandPrompts(host: SessionCommandHost): Promise<void> {
     title: 'Prompt templates',
     items: prompts.map((prompt) => ({ value: prompt.name, label: prompt.name })),
     maxVisible: 12,
+    ...commandPanelOptions(host.ui),
   });
   if (picked === undefined) return;
   const text = prompts.find((prompt) => prompt.name === picked)?.text ?? '';
@@ -91,7 +92,11 @@ export async function commandDiff(host: SessionCommandHost): Promise<void> {
     host.addNotice('No unstaged diff.', 'dim');
     return;
   }
-showMessageDialog(host.ui, { title: 'git diff', text: text.length > 12_000 ? `${text.slice(0, 12_000)}\n…` : text });
+showMessageDialog(host.ui, {
+  title: 'git diff',
+  text: text.length > 12_000 ? `${text.slice(0, 12_000)}\n…` : text,
+  ...commandPanelOptions(host.ui),
+});
 }
 
 /**

@@ -1,7 +1,16 @@
 import { execSync } from "node:child_process";
 
+/**
+ * 这台终端接受哪一种桌面通知 OSC。
+ *
+ * 只有四类合法答案：`osc9`（iTerm2 / Windows Terminal / WezTerm / Ghostty 等）、
+ * `osc777`（rxvt-unicode 系）、`osc99`（kitty）、`none`（写了也没人接）。
+ */
+export type NotificationChannel = "osc9" | "osc777" | "osc99" | "none";
+
 export interface TerminalCapabilities {
 	hyperlinks: boolean;
+	notifications: NotificationChannel;
 }
 
 let cachedCapabilities: TerminalCapabilities | null = null;
@@ -51,10 +60,34 @@ function parseBooleanCapabilityOverride(value: string | undefined): boolean | un
 	return value === "1" ? true : value === "0" ? false : undefined;
 }
 
+/**
+ * 桌面通知通道的判定。
+ *
+ * 与超链接同一套环境变量线索，因为「这台终端认不认通知 OSC」基本就是终端家族的问题。
+ * 复用 detectHyperlinksFromEnvironment 里已经列出的那几个变量，避免两处对终端的说法不一致。
+ *
+ * tmux / screen 一律算 `none`：它们不会把未知 OSC 原样转发给外层终端。
+ * 优先级：显式环境变量 > kitty（自成一套 OSC 99）> urxvt > 其余认 OSC 9 的家族 > none。
+ */
+export function detectNotificationChannelFromEnvironment(env: NodeJS.ProcessEnv = process.env): NotificationChannel {
+	const termProgram = env.TERM_PROGRAM?.toLowerCase() || "";
+	const term = env.TERM?.toLowerCase() || "";
+	if (env.TMUX || term.startsWith("tmux") || term.startsWith("screen")) return "none";
+	if (env.KITTY_WINDOW_ID || termProgram === "kitty") return "osc99";
+	if (termProgram === "warpterminal" || env.WARP_SESSION_ID || env.WARP_TERMINAL_SESSION_UUID) return "none";
+	if (termProgram === "alacritty" || termProgram === "vscode" || termProgram === "zed") return "none";
+	if (term.includes("rxvt") || termProgram === "urxvt") return "osc777";
+	// 这些家族都接 OSC 9；接不了也只是被忽略，写错方向的代价是一行没弹，而不是画面上多出乱码。
+	if (env.WT_SESSION || env.ITERM_SESSION_ID || env.WEZTERM_PANE || env.GHOSTTY_RESOURCES_DIR) return "osc9";
+	if (termProgram === "iterm.app" || termProgram === "wezterm" || termProgram === "ghostty") return "osc9";
+	return "none";
+}
+
 export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks): TerminalCapabilities {
 	const override = parseBooleanCapabilityOverride(process.env.SPH_HYPERLINKS);
 	return {
 		hyperlinks: override ?? detectHyperlinksFromEnvironment(tmuxForwardsHyperlink),
+		notifications: detectNotificationChannelFromEnvironment(),
 	};
 }
 

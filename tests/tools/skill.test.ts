@@ -34,7 +34,7 @@ describe('skillTool', () => {
       writeFileSync(join(dir, 'refs.md'), 'api reference body');
       writeFileSync(join(dir, 'notes.txt'), 'plain notes');
       const result = await skillTool.execute({ name: 'pdf-guide' }, ctx([
-        { name: 'pdf-guide', description: 'build pdfs', path: join(dir, 'SKILL.md') },
+        { name: 'pdf-guide', description: 'build pdfs', path: join(dir, 'SKILL.md'), root: dir },
       ]));
       assert.equal(result.ok, true);
       assert.ok(result.content.includes('# PDF guide'));
@@ -53,7 +53,7 @@ describe('skillTool', () => {
       mkdirSync(dir);
       writeFileSync(join(dir, 'SKILL.md'), '---\nname: solo\ndescription: one file\n---\n\n# solo');
       const result = await skillTool.execute({ name: 'solo' }, ctx([
-        { name: 'solo', description: 'one file', path: join(dir, 'SKILL.md') },
+        { name: 'solo', description: 'one file', path: join(dir, 'SKILL.md'), root: dir },
       ]));
       assert.equal(result.ok, true);
       assert.ok(!result.content.includes('Attached files'));
@@ -71,7 +71,7 @@ describe('skillTool', () => {
       writeFileSync(join(dir, 'SKILL.md'), '---\nname: nested\ndescription: has subdir\n---\n\n# nested');
       writeFileSync(join(dir, 'scripts', 'run.py'), 'print(1)');
       const result = await skillTool.execute({ name: 'nested' }, ctx([
-        { name: 'nested', description: 'has subdir', path: join(dir, 'SKILL.md') },
+        { name: 'nested', description: 'has subdir', path: join(dir, 'SKILL.md'), root: dir },
       ]));
       assert.equal(result.ok, true);
       assert.ok(!result.content.includes('scripts'));
