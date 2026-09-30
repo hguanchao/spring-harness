@@ -11,7 +11,7 @@
  * - **盒子吃满行预算 + 垂直居中**：报告是「看一块全貌」的模态，贴顶缩高会像随手弹出的
  *   提示。四类弹窗保持原样（它们是「就地展开的一层」）。
  * - **footer 在框内居中**：提示项带丢弃优先级，窄终端先丢次要项、`Esc close` 永远在场
- *   ——这是把 dialogs.ts 里那份手写键名白名单（compactHint）的意图变成数据。
+ *   ——「谁先让位」写成数据（dropPriority），不再需要一份手写的键名白名单。
  *
  * 键盘：`Tab` 切 tab（懒构造，切到谁才建谁）、`/` 搜索、`↑↓` 移动、`Enter` 开合组、
  * `Esc` 逐级退（清搜索 → 退搜索 → 关弹窗）。
@@ -21,13 +21,14 @@ import { matchesKey, type Component, type OverlayHandle, type SizeValue, type TU
 import { renderRoundedBox, visibleWidth } from '@/tui/text/utils.js';
 import { GroupList } from '@/tui/widgets/group-list.js';
 import { TabBar } from '@/tui/widgets/tab-bar.js';
+import { errorMessage } from '@/util.js';
 import { fillDialogSurface, rowBudget } from '@/plugins/sph-tui/dialogs.js';
 import { getGroupListTheme, theme } from '@/plugins/sph-tui/theme/theme.js';
 import type { ReportAction, ReportTab } from './doc.js';
 import { type FilteredTab, filterTab } from './filter.js';
 import { FoldState } from './fold.js';
 import { projectReport } from './render.js';
-import { type ReportContext, type ReportTabSpec, findReportTab } from './registry.js';
+import { REPORT_TABS, type ReportContext, type ReportTabSpec, findReportTab } from './registry.js';
 
 /** 与 dialogs.ts 同源的内边距：正文贴着边框会像「文字要溢出盒子」。 */
 const PAD_X = 2;
@@ -122,7 +123,19 @@ export class ReportDialog implements Component {
 		const cached = this.built.get(this.activeId);
 		if (cached !== undefined) return cached;
 		const spec = this.specs.find((candidate) => candidate.id === this.activeId) ?? findReportTab(this.activeId);
-		const tab = spec.build(this.context);
+		let tab: ReportTab;
+		try {
+			tab = spec.build(this.context);
+		} catch (error) {
+			// 单个数据源失败（文件读不到、宿主缺依赖）只砸自己这块：显示空态，别把整个
+			// 弹窗拖垮——其余 tab 与关闭路径都还能用。
+			tab = {
+				id: spec.id,
+				label: spec.label,
+				blocks: [{ kind: 'prose', text: `This tab failed to load: ${errorMessage(error)}` }],
+				empty: 'Nothing to show.',
+			};
+		}
 		this.built.set(this.activeId, tab);
 		return tab;
 	}
@@ -354,16 +367,17 @@ export class ReportDialog implements Component {
 }
 
 /**
- * 打开报告弹窗。`tabId` 决定落点；一次只建一个 tab，切到谁才建谁。
+ * 打开报告弹窗。`tabId` 决定落点；一次只建落点这一个 tab，`Tab` 切到谁才建谁。
  *
- * 一期只注册了 skills（灰度跑通），plugins / permissions / commands / keys 在 S3 逐个跟进
- * ——注册表与弹窗都按多 tab 写好，加 tab 不动这里。
+ * specs 永远是全量的 REPORT_TABS：tab 栏要画出全部五栏，落点只决定初始高亮。
+ * context 上没接数据源的 tab 会在切过去时显示失败空态（tab() 的 catch 分支），
+ * 所以各命令的宿主应当把用得到的 getter 都接上。
  */
 export function openReport(ui: TUI, tabId: string, context: ReportContext): Promise<void> {
 	return new Promise((resolve) => {
-		const specs = [findReportTab(tabId)];
+		findReportTab(tabId); // 落点 id 未注册时在这里炸清楚，而不是渲染出一个高亮丢失的空弹窗
 		const maxHeight: SizeValue = '75%';
-		const dialog = new ReportDialog(specs, tabId, context, () => rowBudget(ui, maxHeight));
+		const dialog = new ReportDialog(REPORT_TABS, tabId, context, () => rowBudget(ui, maxHeight));
 		const handle: OverlayHandle = ui.showOverlay(dialog, {
 			width: '60%',
 			maxWidth: 120,

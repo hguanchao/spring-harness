@@ -60,24 +60,6 @@ const SELECT_SCROLL_HINT = '↑↓ scroll · Tab select · Enter confirm · Esc 
 /** 正文挤占列表行数时，列表至少要留下的可见行数。 */
 const LIST_RESERVE_ROWS = 3;
 
-/** 键位段的首词：紧凑档只保留这些段，动词让位。 */
-const HINT_KEYS = ['↑↓', 'Tab', 'Enter', 'Esc', 'PgDn', 'PgUp', 'Home', 'End', 'shift+tab', 'ctrl+c'];
-
-/**
- * 页脚提示的紧凑档：`↑↓ select · Enter confirm · Esc cancel` → `↑↓ · Enter · Esc`。
- *
- * 窄终端下省略号会从尾部盲切，最先吃掉的恰好是 `Esc cancel`——关不掉的弹窗比没有提示
- * 更糟。紧凑档保证 Esc 永远在场；仍放不下时才交给 renderRoundedBox 的省略号兜底。
- */
-function compactHint(hint: string): string {
-	return hint
-		.split(' · ')
-		.map((segment) => segment.trim())
-		.filter((segment) => HINT_KEYS.some((key) => segment === key || segment.startsWith(`${key} `)))
-		.map((segment) => segment.split(' ')[0]!)
-		.join(' · ');
-}
-
 /** 浮层高度预算（行）：与 overlayOptions 里的 maxHeight 同源，每帧按终端尺寸重算。报告弹窗（report/dialog.ts）与四类弹窗共用同一份算法——预算和浮层选项各算各的就会互相打架。 */
 export function rowBudget(tui: TUI, maxHeight: SizeValue): number {
 	const rows = Math.max(1, tui.terminal.rows);
@@ -283,8 +265,9 @@ class ScrollableTextBody extends DialogBody {
 	override footerText(budget?: number): string {
 		const full = this.scrollableNow ? `${SCROLL_HINT} · ${this.hint}` : this.hint;
 		if (budget === undefined || visibleWidth(full) <= budget) return full;
-		// 可滚时 PgDn 让位（↑↓ 能到的地方多按几下就到），Esc 永远保留。
-		return this.scrollableNow ? '↑↓ · Esc' : compactHint(this.hint);
+		// 可滚时 PgDn 让位（↑↓ 能到的地方多按几下就到）；窄档只保 Esc——关不掉的弹窗比
+		// 没有提示更糟。报告弹窗的按键提示由 action 声明按 dropPriority 裁剪，不走这里。
+		return this.scrollableNow ? '↑↓ · Esc' : 'Esc';
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -413,7 +396,8 @@ class SelectBody extends DialogBody {
 	override footerText(budget?: number): string {
 		const full = this.scrollableNow ? SELECT_SCROLL_HINT : this.hint;
 		if (budget === undefined || visibleWidth(full) <= budget) return full;
-		return this.scrollableNow ? '↑↓ · Tab · Enter · Esc' : compactHint(this.hint);
+		// 窄档只保选择框真正的三件事：翻、选、退。Esc 压轴。
+		return this.scrollableNow ? '↑↓ · Tab · Enter · Esc' : '↑↓ · Enter · Esc';
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -473,7 +457,8 @@ class InputBody extends DialogBody {
 
 	override footerText(budget?: number): string {
 		if (budget === undefined || visibleWidth(this.hint) <= budget) return this.hint;
-		return compactHint(this.hint);
+		// 输入框的提示有的是纯说明（没有键位段），窄档下统一保真正的两个键：确认与退出。
+		return 'Enter · Esc';
 	}
 
 	protected override renderContent(width: number): string[] {
@@ -669,30 +654,30 @@ function overlayOptions(
 	priority = 0,
 	width?: SizeValue,
 	maxWidth?: number,
+	row?: SizeValue,
 ): {
 	width: SizeValue;
 	maxHeight: SizeValue;
 	maxWidth: number;
 	priority: number;
-	anchor: 'center';
 	margin: number;
 	padX: number;
-	row?: SizeValue;
-	punchSpaces?: boolean;
-} {
+} & ({ anchor: 'center'; row?: undefined } | { row: SizeValue; anchor?: undefined }) {
 	const layout = DIALOG_LAYOUTS[kind];
-	return {
+	const base = {
 		// width 原先是个死选项：签名里有、没往下传，调用方传了也不生效。
 		width: width ?? layout.width,
 		maxHeight,
 		maxWidth: maxWidth ?? layout.maxWidth,
 		priority,
-		anchor: 'center',
 		margin: 1,
 		// 弹窗两侧各留两列空白：浮层只盖自己的列区间，不留白的话底稿文字会直接
 		// 贴着边框，看起来像穿透了弹窗。
 		padX: 2,
 	};
+	// 垂直定位二者只给其一：row 是「就地展开」的绝对落点，anchor 是屏幕居中。
+	// 同时给的时候 tui 以 row 为准，anchor 成了骗人的死配置——类型上直接表达成不可能。
+	return row === undefined ? { ...base, anchor: 'center' as const } : { ...base, row };
 }
 
 /**
@@ -1002,8 +987,7 @@ export function showMessageDialog(
 			options.transparent === true,
 			options.termColumns === true,
 		);
-		const overlay = overlayOptions('document', maxHeight, options.priority, options.width, options.maxWidth);
-		if (options.row !== undefined) overlay.row = options.row;
+		const overlay = overlayOptions('document', maxHeight, options.priority, options.width, options.maxWidth, options.row);
 		const handle = tui.showOverlay(dialog, overlay);
 		const finish = settleOnce<void>(handle, resolve);
 		dialog.setCloseHandler(() => finish());

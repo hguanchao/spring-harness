@@ -10,7 +10,8 @@ import { API_PROTOCOLS, type ApiProtocol } from '@/config/load.js';
 import { NOTIFY_SETTINGS, type NotifySetting } from '@/config/primitives.js';
 import type { NotificationChannel } from '@/tui/terminal/terminal-image.js';
 import { NOTIFY_HINTS } from '@/plugins/sph-tui/notify.js';
-import { renderPermissionsReport } from '@/plugins/sph-tui/commands/reports.js';
+import { openReport } from '@/plugins/sph-tui/report/dialog.js';
+import type { ReportContext } from '@/plugins/sph-tui/report/registry.js';
 import { appendModelDeclaration, type ProviderDeclaration } from '@/config/registry.js';
 import { sphModelsPath } from '@/home.js';
 import { displayNameForModel, listAvailableModels } from '@/plugins/sph-llm/models.js';
@@ -20,8 +21,7 @@ import { errorMessage } from '@/util.js';
 import { primaryColumnWidthFor } from '@/plugins/sph-tui/commands/index.js';
 import type { TUI, SelectItem } from '@/tui/index.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
-import { commandPanelOptions, showInputDialog, showLoadingDialog, showMessageDialog } from '@/plugins/sph-tui/dialogs.js';
-import { theme } from '@/plugins/sph-tui/theme/theme.js';
+import { showInputDialog, showLoadingDialog } from '@/plugins/sph-tui/dialogs.js';
 import { visibleWidth } from '@/tui/text/utils.js';
 import type { CustomEditor } from '@/plugins/sph-tui/input/custom-editor.js';
 
@@ -44,6 +44,8 @@ export interface SettingsCommandHost {
   /** 把协议写到该模型的声明上（覆盖 provider 默认）并立刻重建 client。 */
   applyApi(api: ApiProtocol, provider: ProviderDeclaration, modelId: string): void;
   applyApproval(mode: ApprovalMode): void;
+  /** 报告弹窗的取数环境（`/permissions` 走它落到 Permissions tab）。 */
+  reportContext(): ReportContext;
   /** `/notify`：完成提醒的当前档位、探测到的桌面通道，以及切换后的落盘。 */
   currentNotify(): NotifySetting;
   notificationChannel(): NotificationChannel;
@@ -289,32 +291,10 @@ const MODE_HINTS: Record<ApprovalMode, string> = {
  *
  * 规则是安全边界的输入，而「我写的那条到底生效没有」在只有配置文件的年代只能靠试。
  * 这里把每一条规则的来源连文件名一起列出来，再说明项目级 allow 是否被信任门丢掉了。
+ * 取数环境由宿主的 reportContext 提供（permissions getter），落到报告弹窗的 Permissions tab。
  */
 export async function commandPermissions(host: SettingsCommandHost): Promise<void> {
-  const { deps } = host;
-  const layers = deps.permission.layers();
-  const sandbox = deps.permission.sandbox();
-  const grants = deps.permission.grants();
-  const text = renderPermissionsReport({
-    approval: host.currentApproval(),
-    sandboxMode: sandbox.mode,
-    sandboxAutoAllow: sandbox.autoAllow,
-    layers,
-    userSourceDir: layers.user?.sourceDir ?? '',
-    projectPath: deps.permission.projectPath(),
-    projectAllowDropped: deps.permission.projectAllowDropped(),
-    approved: grants.load(),
-    grantsPath: grants.path,
-  });
-  const grantWarning = grants.warning();
-  await showMessageDialog(host.ui, {
-    title: 'Permissions',
-    text: grantWarning === undefined ? text : `${text}\n\n${theme.fg('warning', grantWarning)}`,
-    hint: 'Esc close',
-    // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
-    termColumns: true,
-    ...commandPanelOptions(host.ui),
-  });
+  await openReport(host.ui, 'permissions', host.reportContext());
 }
 
 export async function commandPermission(host: SettingsCommandHost, argument = ''): Promise<void> {

@@ -5,25 +5,51 @@
  * 新增一类报告 = 这里加一项，弹窗代码一行不动。
  *
  * build 是**懒**的，openReport 只调落点那个，`Tab` 切到谁才建谁：各数据源的成本差得远
- * （扫技能目录要读文件头、插件报告走插件宿主），打开时全建等于每次 `/skills` 都顺带做完
- * 所有 IO。缓存只在本次打开内有效，关闭即丢——数据必须反映打开这一刻的真实状态。
+ * （扫技能目录要读文件头、插件报告走插件宿主、权限要读规则与授权文件），打开时全建等于
+ * 每次 `/skills` 都顺带做完所有 IO。缓存只在本次打开内有效，关闭即丢——数据必须反映
+ * 打开这一刻的真实状态。
  */
 
 import { scanSkills, skillRootGroups } from '@/plugins/sph-skills/scan.js';
 import type { SkillRoot } from '@/plugins/sph-skills/scan.js';
+import type { LoadedPlugin } from '@/plugins/host.js';
+import type { PluginLoadFailure } from '@/plugins/loader.js';
 import type { ReportTab } from './doc.js';
 import { skillsTab } from './sources/skills.js';
+import { pluginsTab } from './sources/plugins.js';
+import { permissionsTab, type PermissionsTabInput } from './sources/permissions.js';
+import { commandsTab, keysTab, type HelpTabsInput } from './sources/help.js';
 
 /** 建一块报告所需的环境。数据源只拿自己要的，不接触 TUI。 */
 export interface ReportContext {
 	/** 工作区根：技能扫描按它定根清单。 */
 	workspaceRoot: string;
+	/**
+	 * `/plugins` 落点：插件宿主的当下摘要。getter 而不是值——切到该 tab 才取，
+	 * 而且每次打开报告都要取「现在」的，不吃快照。
+	 */
+	plugins?: () => {
+		plugins: readonly LoadedPlugin[];
+		failures: readonly PluginLoadFailure[];
+		shadowed: readonly string[];
+		pinned?: readonly string[];
+	};
+	/** `/permissions` 落点：权限运行时的当下状态。切到该 tab 才取。 */
+	permissions?: () => PermissionsTabInput;
+	/** `/help` 落点：命令清单、别名与键位注册表。切到该 tab 才取。 */
+	help?: () => HelpTabsInput;
 }
 
 export interface ReportTabSpec {
 	id: string;
 	label: string;
 	build(context: ReportContext): ReportTab;
+}
+
+/** getter 缺席是装配错误（宿主忘了给某个 tab 接数据源），宁可在这里炸清楚。 */
+function required<T>(value: T | undefined, tab: string): T {
+	if (value === undefined) throw new Error(`Report tab "${tab}" has no data source on ReportContext`);
+	return value;
 }
 
 /** 一次技能扫描的缓存：目录与根清单要来自同一遍扫描，各取各的就会扫两遍。 */
@@ -37,7 +63,7 @@ function ensureScan(root: string): { catalog: ReturnType<typeof scanSkills>['cat
 	return lastScan;
 }
 
-/** 一期只接 /skills 灰度跑通；plugins / permissions / commands / keys 依次跟进（S3）。 */
+/** 顺序即 tab 栏顺序：Skills / Plugins 是清单，Permissions 是安全面，Commands / Keys 是用法。 */
 export const REPORT_TABS: readonly ReportTabSpec[] = [
 	{
 		id: 'skills',
@@ -46,6 +72,26 @@ export const REPORT_TABS: readonly ReportTabSpec[] = [
 			const { catalog, warnings, roots } = ensureScan(context.workspaceRoot);
 			return skillsTab({ catalog, warnings, roots });
 		},
+	},
+	{
+		id: 'plugins',
+		label: 'Plugins',
+		build: (context) => pluginsTab(required(context.plugins?.(), 'plugins')),
+	},
+	{
+		id: 'permissions',
+		label: 'Permissions',
+		build: (context) => permissionsTab(required(context.permissions?.(), 'permissions')),
+	},
+	{
+		id: 'commands',
+		label: 'Commands',
+		build: (context) => commandsTab(required(context.help?.(), 'commands')),
+	},
+	{
+		id: 'keys',
+		label: 'Keys',
+		build: (context) => keysTab(required(context.help?.(), 'keys')),
 	},
 ];
 

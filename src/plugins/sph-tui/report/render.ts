@@ -45,6 +45,18 @@ export function paintRich(text: RichText): string {
 	return text.map(paintSegment).join('');
 }
 
+/**
+ * 富文本 → 上色串，没标语气的分段落回 muted。
+ *
+ * 说明与注脚默认退到灰——它们是「核对时才看」的次级信息；但分段可以点名别的语气，
+ * 插件的加载警告要橙、权限被丢弃的说明也要橙，灰底里那一小段颜色才是要一眼扫到的。
+ */
+function paintMuted(text: RichText): string {
+	if (typeof text === 'string') return theme.fg('muted', text);
+	const segments = 'text' in text ? [text] : text;
+	return segments.map((segment) => paintSegment({ ...segment, tone: segment.tone ?? 'muted' })).join('');
+}
+
 /** 条目整行的语气色：危险红、警告橙；红黄是安全语义，不用在装饰上。 */
 function itemTone(item: ReportItem): ((text: string) => string) | undefined {
 	if (item.tone === 'danger') return (text) => theme.fg('error', text);
@@ -56,7 +68,7 @@ function itemTone(item: ReportItem): ((text: string) => string) | undefined {
 function itemRows(item: ReportItem, indent: number, expanded: boolean): GroupRow[] {
 	const tone = itemTone(item);
 	const label = paintRich(item.label);
-	const description = item.description === undefined ? '' : paintRich({ text: plainText(item.description), tone: 'muted' });
+	const description = item.description === undefined ? '' : paintMuted(item.description);
 	const main: GroupRow = {
 		key: item.key,
 		kind: 'item',
@@ -73,7 +85,7 @@ function itemRows(item: ReportItem, indent: number, expanded: boolean): GroupRow
 	if (!expanded || item.notes === undefined || item.notes.length === 0) return [main];
 	return [
 		main,
-		...item.notes.map((note): GroupRow => ({ key: `${item.key}::note`, kind: 'note', indent: indent + 1, text: paintRich({ text: plainText(note), tone: 'muted' }), disabled: true })),
+		...item.notes.map((note): GroupRow => ({ key: `${item.key}::note`, kind: 'note', indent: indent + 1, text: paintMuted(note), disabled: true })),
 	];
 }
 
@@ -90,12 +102,13 @@ function groupRow(group: ReportGroup, hit: number, total: number, expanded: bool
 }
 
 /** prose / code 块 → 若干灰注脚行。Markdown 渲染后再逐行接入（它自己管换行与上色）。 */
-function proseRows(block: Extract<ReportBlock, { kind: 'prose' | 'code' }>, width: number): GroupRow[] {
+function proseRows(block: Extract<ReportBlock, { kind: 'prose' | 'code' }>, width: number, blockIndex: number): GroupRow[] {
 	const body = block.kind === 'code' ? '```' + (block.language ?? '') + '\n' + block.text + '\n```' : block.text;
 	const rendered = new Markdown(body, 0, 0, getMarkdownTheme(), {
 		color: (content: string) => theme.fg('mdText', content),
 	}).render(Math.max(1, width));
-	return rendered.map((line, index): GroupRow => ({ key: `::prose-${index}`, kind: 'note', text: line, disabled: true }));
+	// key 带上块序号：多个散文块的行号各自从 0 数起，不带块号会撞 key。
+	return rendered.map((line, index): GroupRow => ({ key: `::prose-${blockIndex}-${index}`, kind: 'note', text: line, disabled: true }));
 }
 
 /**
@@ -115,13 +128,13 @@ export function projectReport(
 	}
 
 	const rows: GroupRow[] = [];
-	for (const block of filtered.blocks) {
+	for (const [blockIndex, block] of filtered.blocks.entries()) {
 		if (block.kind === 'caption') {
-			rows.push({ key: `::caption-${rows.length}`, kind: 'note', text: theme.fg('muted', plainText(block.text)), disabled: true });
+			rows.push({ key: `::caption-${blockIndex}`, kind: 'note', text: paintMuted(block.text), disabled: true });
 			continue;
 		}
 		if (block.kind === 'prose' || block.kind === 'code') {
-			if (!filtered.filtering) rows.push(...proseRows(block, width));
+			if (!filtered.filtering) rows.push(...proseRows(block, width, blockIndex));
 			continue;
 		}
 		const group = block.group;

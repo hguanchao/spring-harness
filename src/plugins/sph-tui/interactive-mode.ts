@@ -88,9 +88,9 @@ import { clipboardFailureHint, copyToClipboard as writeClipboard } from '@/plugi
 import { formatElapsed, notificationBytes } from '@/plugins/sph-tui/notify.js';
 import { APP_KEYBINDINGS, matchesAppKey } from '@/plugins/sph-tui/input/app-keybindings.js';
 import { InteractiveApprover, type ApprovalChoice, type ApprovalUi } from '@/plugins/sph-tui/trust/permission.js';
-import { APPROVAL_OVERLAY_PRIORITY, commandPanelOptions, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
-import { renderHelpReport, renderPluginsReport } from '@/plugins/sph-tui/commands/reports.js';
+import { APPROVAL_OVERLAY_PRIORITY, commandPanelOptions, showInputDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
 import { openReport } from '@/plugins/sph-tui/report/dialog.js';
+import type { ReportContext } from '@/plugins/sph-tui/report/registry.js';
 import { readGitBranch } from '@/plugins/sph-tui/footer/git.js';
 import { IdleStatus, WorkingLabel, WorkingStatusIndicator, DynamicBorder, formatWorkingWarning, keyHint, workingWarningKey } from '@/plugins/sph-tui/interaction/index.js';
 import { clearedHoverNeedsRepaint, clearHoverHighlight } from '@/plugins/sph-tui/interaction/hover-highlight.js';
@@ -1577,25 +1577,14 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
-   * `/help`：命令表报告。命令按注册表的 group 分段、键位按生效上下文分段，全部从注册表取数
-   * ——新加一条命令、一个键位，帮助自动跟上。
+   * `/help`：报告弹窗的 Commands tab。命令按注册表的 group 分组、键位在 Keys tab（`Tab`
+   * 键到达），全部从注册表取数——新加一条命令、一个键位，帮助自动跟上。
    *
    * 这里是报告而不是可点选的面板：命令本来就靠敲（`/name`）、靠 `/` 补全，把「看清单」和
-   * 「执行」拆开之后，键盘焦点与滚动手感都和 `/skills`、`/plugins` 一致了。
+   * 「执行」拆开之后，键盘焦点与滚动手感都和 `/skills`、`/plugins` 一致。
    */
   private async commandHelp(): Promise<void> {
-    await showMessageDialog(this.ui, {
-      title: 'Help',
-      text: renderHelpReport({
-        commands: this.commandItems(),
-        aliases: COMMAND_ALIASES,
-        keybindings: Object.values(APP_KEYBINDINGS),
-      }),
-      hint: 'Esc close',
-      // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
-      termColumns: true,
-      ...commandPanelOptions(this.ui),
-    });
+    await openReport(this.ui, 'commands', this.reportContext());
   }
 
   /**
@@ -1605,26 +1594,55 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
    * 恰恰是在改了配置、下次启动之后才被注意到的，状态必须来自当下这份报告而不是快照。
    */
   private async commandPlugins(): Promise<void> {
-    const report = this.deps.pluginReport();
-    await showMessageDialog(this.ui, {
-      title: 'Plugins',
-      text: renderPluginsReport(report),
-      hint: 'Esc close',
-      // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
-      termColumns: true,
-      ...commandPanelOptions(this.ui),
-    });
+    await openReport(this.ui, 'plugins', this.reportContext());
   }
 
   /**
-   * `/skills`：报告弹窗（灰度第一个入口）。
+   * `/skills`：打开报告弹窗并停在 Skills tab。
    *
-   * 数据在弹窗打开时现扫，而不是复用本轮提示词里那份目录：会话中途新建一个 skill 是
-   * 正常用法，当场扫就能立刻看到；代价只是读几个 SKILL.md 的文件头。与当前轮次提示词
+   * 数据在弹窗切到该 tab 时现扫，而不是复用本轮提示词里那份目录：会话中途新建一个 skill
+   * 是正常用法，当场扫就能立刻看到；代价只是读几个 SKILL.md 的文件头。与当前轮次提示词
    * 有分歧时以本弹窗为准——下一轮的提示词就会跟上。
    */
   private async commandSkills(): Promise<void> {
-    await openReport(this.ui, 'skills', { workspaceRoot: this.deps.workspaceRoot });
+    await openReport(this.ui, 'skills', this.reportContext());
+  }
+
+  /**
+   * 报告弹窗的取数环境：五个 tab 的数据源都从这里拿。
+   *
+   * getter 都是懒的——弹窗切到哪个 tab 才取哪份数据，`/skills` 不该顺带读一遍权限文件。
+   * 取数发生在「打开这一刻」，缓存只在弹窗开着的时候有效（report/registry 的约定）。
+   * SettingsCommandHost 也要求它：/permissions 的取数走这里，不另抄一份。
+   */
+  reportContext(): ReportContext {
+    return {
+      workspaceRoot: this.deps.workspaceRoot,
+      plugins: () => this.deps.pluginReport(),
+      permissions: () => {
+        const permission = this.deps.permission;
+        const sandbox = permission.sandbox();
+        const grants = permission.grants();
+        const layers = permission.layers();
+        return {
+          approval: this.currentApproval(),
+          sandboxMode: sandbox.mode,
+          sandboxAutoAllow: sandbox.autoAllow,
+          layers,
+          userSourceDir: layers.user?.sourceDir ?? '',
+          projectPath: permission.projectPath(),
+          projectAllowDropped: permission.projectAllowDropped(),
+          approved: grants.load(),
+          grantsPath: grants.path,
+          grantWarning: grants.warning(),
+        };
+      },
+      help: () => ({
+        commands: this.commandItems(),
+        aliases: COMMAND_ALIASES,
+        keybindings: Object.values(APP_KEYBINDINGS),
+      }),
+    };
   }
 
   // ------------------------------------------------------------------ 会话切换落地

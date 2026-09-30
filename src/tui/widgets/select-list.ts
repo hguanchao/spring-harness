@@ -58,7 +58,7 @@ export interface SelectListLayoutOptions {
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
 	/**
 	 * 行号槽：号列宽按整表算（不是可见行），个位数左补空格而不是补零——补零看起来像 ID，
-	 * 而这里它就是序号。选中条 `❙` 永远在最外，与转录里工具行的选中条同列。
+	 * 而这里它就是序号。选中态由整行底色表达（行首的 `❙` 标记早已移除）。
 	 *
 	 * 只给「名字不可称呼」的表用（会话 id、历史 prompt）：条目本身有名字时号是多余的一列。
 	 */
