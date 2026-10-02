@@ -459,6 +459,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
+	/**
+	 * 最近一帧真正画出去的**合成结果**（每个元素是一整行）。
+	 *
+	 * 断言「屏幕上现在是什么」不必去解析 ANSI 差分字节流：差分是为了少写字节，而帧是渲染的
+	 * 产物，两者之间隔着垂直位移、跳行、行尾擦除等一堆编码细节。帧测试要的是产物本身。
+	 * ANSI 编码那一层由 `paintScreenDiff` 的纯函数用例单独钉。
+	 *
+	 * 与 `render(width)` 的区别：那个是**还没合成**的布局输出（没有浮层、没有闪光、
+	 * 没有滚动条），这个是用户真正看到的那一屏。帧测试要后者。
+	 */
+	frame(): readonly string[] {
+		return this.previousScreen;
+	}
+
 	override render(width: number): string[] {
 		return this.layoutRoot?.render(width) ?? super.render(width);
 	}

@@ -15,12 +15,13 @@
  * 所以这个式子在 chat-completions / responses / anthropic-messages 下含义一致。
  */
 
+import type { ModelCostRates } from './client.js';
+
 /**
  * Anthropic 的默认缓存 TTL。闲置超过它，整段缓存已经过期，下一轮必然整段重算。
  * OpenAI 的自动缓存是 5~10 分钟量级，同一个数量级，所以用它做统一提示阈值。
  */
 export const CACHE_TTL_MS = 5 * 60 * 1000;
-
 /**
  * 断点粒度造成的天然误差下限。
  *
@@ -189,12 +190,71 @@ export class CacheMissTracker {
   get waste(): CacheWaste {
     return { ...this.totals };
   }
+
+  /**
+   * 一次性请求（摘要这类「用完就丢」的前缀）该不该打缓存断点。见
+   * {@link oneOffCachePolicy}。
+   */
+  oneOffCachePolicy(now: number): OneOffCachePolicy {
+    return oneOffCachePolicy(this.previous, now);
+  }
 }
+
+/**
+ * 一次性请求的缓存策略。
+ *
+ * - `reuse`：照常打断点。上一次请求刚命中过、且还在 TTL 内，说明前缀就在缓存里活着——
+ *   断点在已缓存的位置上是**读**（约 0.1 倍价），这一步白拿。
+ * - `avoid-write`：一个断点都不打，整段按原价读（1.0 倍）。
+ *
+ * 为什么「不打」会是更省的：一次性的前缀用完就丢（压缩摘要之后会话就换到新前缀去了），
+ * 没人会再读它。而断点落在**未缓存**的内容上意味着**写**——写入价约 1.25 倍。
+ * 于是「前缀已经不在缓存里」时，打断点等于按 1.25 倍买一份没人读的缓存；
+ * 不打反而只花 1.0 倍。这与「缓存总是越多越好」的直觉相反，但那正是要算的原因。
+ *
+ * 判据用**上一次实际命中率**而不是「距上次多久」单挑：缓存可能是被提供方驱逐的
+ * （路由换了节点），也可能是前缀真的改了，从时间上看不出来。命中率是唯一直接证据，
+ * 时间只用来判 TTL。
+ */
+export function oneOffCachePolicy(previous: CacheSample | undefined, now: number): OneOffCachePolicy {
+  if (previous === undefined || previous.promptTokens <= 0) return 'avoid-write';
+  if (previous.cachedTokens === undefined) return 'avoid-write';
+  if (previous.cachedTokens / previous.promptTokens < ONE_OFF_REUSE_HIT_RATE) return 'avoid-write';
+  if (previous.at === undefined) return 'reuse';
+  return now - previous.at >= CACHE_TTL_MS ? 'avoid-write' : 'reuse';
+}
+
+export type OneOffCachePolicy = 'reuse' | 'avoid-write';
+
+/**
+ * 认为「前缀还活着，值得为它打断点」的命中率下限。
+ *
+ * 取 0.5 而不是更高：断点只影响**断点之前**那一段，而命中率是按整段 prompt 算的，
+ * 末尾（本步新加的工具结果）本来就不该命中。要求 0.9 会让每一次都判成 avoid-write。
+ */
+const ONE_OFF_REUSE_HIT_RATE = 0.5;
 
 /** 命中率（0~1）。没有任何输入时返回 undefined，而不是编一个 0 出来。 */
 export function cacheHitRate(waste: CacheWaste): number | undefined {
   if (waste.promptTokens <= 0) return undefined;
   return waste.cachedTokens / waste.promptTokens;
+}
+
+/**
+ * 一次未命中浪费了多少钱。
+ *
+ * 口径是**差额**，不是这些 token 的全价：missedTokens 本来该按缓存读价计费，实际按了
+ * 未缓存输入价。多付的就是 `input − cacheRead` 这一段。把全价报成「浪费」会让人以为
+ * 关掉缓存能省钱，而事实恰恰相反。
+ *
+ * 没有声明单价时返回 undefined——「不知道价格」与「浪费了 $0」是两回事，报成后者会
+ * 把「你没配 cost」伪装成「一切正常」。
+ */
+export function cacheMissCost(missedTokens: number, rates: ModelCostRates | undefined): number | undefined {
+  if (rates === undefined) return undefined;
+  if (!Number.isFinite(missedTokens) || missedTokens <= 0) return 0;
+  const premium = Math.max(0, rates.input - rates.cacheRead);
+  return (missedTokens * premium) / 1_000_000;
 }
 
 /**

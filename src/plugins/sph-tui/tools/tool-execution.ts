@@ -360,6 +360,10 @@ export function summarizeArgs(toolName: string, args: Record<string, unknown>): 
     case 'bash':
     case 'pwsh':
       return oneLine(pick('command', 'cmd'));
+    case 'run_code':
+      // 程序就是这次调用的全部内容。没有这一条，工具行上只剩一个光秃秃的工具名，
+      // 而「它到底跑了什么」正是用户唯一想从这一行知道的事。
+      return oneLine(pick('code'));
     case 'read':
     case 'write':
     case 'ls':

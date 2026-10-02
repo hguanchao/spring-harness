@@ -1,0 +1,3 @@
+{"type":"message","ts":"2025-01-01T00:00:00.000Z","role":"user","content":"legacy question"}
+{"type":"message","ts":"2025-01-01T00:00:01.000Z","role":"assistant","content":"legacy answer"}
+{"type":"event","ts":"2025-01-01T00:00:02.000Z","kind":"turn_end","data":{"finishReason":"stop"}}

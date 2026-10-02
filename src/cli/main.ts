@@ -362,6 +362,9 @@ async function runHeadless(args: CliArgs, workspaceRoot: string, prompt: string)
         ? async () => ({ approved: true })
         : undefined,
       compactClient,
+      // 缓存未命中的代价要折成美元落盘：token 数看不出严重性，钱可以。没声明 `cost`
+      // 的模型取到 undefined，事件里就不带这个字段。
+      costRates: runtime.resolveModel({ model: config.model, api: args.api ?? config.api }).cost,
       onAuxUsage: recordAuxUsage,
       spill: runtime.plugins.get<StorageService>(STORAGE_SERVICE)?.open(join(sphSpillRoot(), session.id), config.spillThreshold),
       worktrees: runtime.worktrees,

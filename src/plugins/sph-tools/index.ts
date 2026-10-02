@@ -8,6 +8,7 @@ import { skillTool } from './skill.js';
 import { askUserTool } from './ask-user.js';
 import { globTool } from './glob.js';
 import { webFetchTool, webSearchTool } from './web-search.js';
+import { createRunCodeTool } from './run-code.js';
 
 import type { ToolSpec } from '../../tools/types.js';
 import { writeTool } from './write.js';
@@ -37,7 +38,20 @@ export const tools: ToolSpec[] = [
   tagged(askUserTool, { explore: true, planSafe: true }),
   tagged(webSearchTool, { concurrencySafe: true, explore: true, planSafe: true }),
   tagged(webFetchTool, { concurrencySafe: true, explore: true, planSafe: true }),
+  // 代码里批量调工具：中间结果不进上下文。标志见 run-code.ts（独占、可探索、计划模式不放行）。
+  ...(runCodeEnabled() ? [createRunCodeTool()] : []),
 ];
+
+/**
+ * `run_code` 的开关。
+ *
+ * 默认开：它是「工具一多上下文就爆」这个问题的解，而不是可选品味。但它是唯一一个
+ * **会起子进程**的读工具，也是唯一一个模型写代码的地方——把它整个关掉（`SPH_RUN_CODE=off`）
+ * 是排查「是不是它引起的」时的第一手段，比逐个排查调用点快得多。
+ */
+function runCodeEnabled(): boolean {
+  return (process.env.SPH_RUN_CODE ?? '').toLowerCase() !== 'off';
+}
 
 function createDefaultToolRegistry(): ToolRegistry {
   return new ToolRegistry(tools);

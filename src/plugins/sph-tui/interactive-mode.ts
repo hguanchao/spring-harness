@@ -715,6 +715,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         workspaceRoot: this.deps.workspaceRoot,
         client: this.client,
         model: this.model,
+        // 缓存未命中的代价折成美元落盘（见 loop 的 cache_miss 事件）。模型没声明 `cost`
+        // 时取到 undefined，事件里就不带这个字段。
+        costRates: this.deps.resolveModel(this.model, this.provider)?.cost,
         session: this.session,
         tools: this.deps.tools ?? defaultTools,
         sessions: this.deps.sessions

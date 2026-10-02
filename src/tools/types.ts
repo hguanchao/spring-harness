@@ -75,6 +75,24 @@ export interface ToolContext {
   setPlanMode?(active: boolean): void;
   /** 把完整计划呈给用户评审；取消/继续规划时 approved=false。 */
   reviewPlan?(plan: string, title: string): Promise<{ approved: boolean; feedback?: string }>;
+  /**
+   * 本回合模型真正可调用的工具名。
+   *
+   * 与 {@link invokeTool} 判的是**同一个集合**：`run_code` 拿它生成暴露清单，清单与执行
+   * 两侧一旦分叉，模型会看到一份调不通的名单（或更糟：调得通一份它没看到的名单）。
+   */
+  toolNames?: readonly string[];
+  /**
+   * 在同一回合里执行一次工具调用，走**与模型直接调用完全相同的关卡**（允许名单、
+   * 计划模式、路径规则、审批、前后钩子、结果落盘）。
+   *
+   * 存在的理由只有一个：`run_code` 让模型用代码批量调工具，而那些内层调用绝不能有第二条
+   * 路——绕开审批的捷径一旦存在，整个权限模型就只剩名义。所以宿主把同一个执行器**接出来**
+   * 给它用，而不是让工具自己去调 `tool.execute`。
+   *
+   * 实现方负责拒绝不在暴露清单里的名字（含 `run_code` 自身，否则递归无上限）。
+   */
+  invokeTool?(name: string, args: Record<string, unknown>): Promise<ToolResult>;
 }
 
 export interface ToolSpec {

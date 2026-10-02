@@ -4,7 +4,7 @@
  * 实现在 sph-loop。宿主、界面和嵌入方只按这个形状调用，换循环插件不用改调用点。
  */
 import type { AgentListener } from './events.js';
-import type { LlmClient, TokenUsage } from '../llm/client.js';
+import type { LlmClient, ModelCostRates, TokenUsage } from '../llm/client.js';
 import type { Approver, RuleEnv, RuleLayers } from '../permission/policy.js';
 import type { SpillStorePort, TodoService, WorktreePort } from '../plugins/services.js';
 import type { PluginHook, PluginServices } from '../plugins/types.js';
@@ -81,6 +81,13 @@ export interface RunTurnOptions {
   maxTurns?: number;
   /** 压缩摘要专用 client；省略用主 client。 */
   compactClient?: LlmClient;
+  /**
+   * 当前模型的单价（models.json 的 `cost`）。声明了才会把缓存未命中折算成美元落盘。
+   *
+   * 循环本身不折算常规花费（那是 client 出口的事，见 llm/client.ts 的 costUsd），
+   * 但它要**解释**一次未命中的代价——只有它知道少了多少 token。
+   */
+  costRates?: ModelCostRates;
   /** 辅助调用产生的用量。记账，但不参与上下文水位。 */
   onAuxUsage?: (usage: TokenUsage, purpose: string) => void;
   /** 父级发来的消息。每步顶部 drain，不打断当前模型调用。 */

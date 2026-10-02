@@ -3,6 +3,13 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import type { SessionFactory, SessionMessage, SessionPort, SessionRecord } from '../../session/types.js';
+import {
+  asSessionHeader,
+  IMPLICIT_VERSION,
+  migrateRecords,
+  sessionHeader,
+  type SessionHeader,
+} from '../../session/format.js';
 import { lineage, loadTip, messagesOnPath, newEntryId } from './tree.js';
 
 export interface SessionMeta {
@@ -11,14 +18,17 @@ export interface SessionMeta {
   createdAt: string;
 }
 
+/** 一行能解析出来的东西：对话内容，或存储层的头部。 */
+type ParsedLine = SessionRecord | SessionHeader;
+
 /**
- * 逐行解析 JSONL。
+ * 逐行解析。
  *
  * 容错取舍：进程被 kill 时最后一行常是半个 JSON 对象，或用外部工具改坏了某一行。
  * 旧实现一处 JSON.parse 抛错就让整个会话不可读（含后续所有历史），因此这里跳过
  * 无法解析/形状不对的行继续读——会话是可追加日志，部分损坏不应该变成全量失败。
  */
-export function parseSessionLine(line: string): SessionRecord | undefined {
+function parseLine(line: string): ParsedLine | undefined {
   if (line.length === 0) return undefined;
   let record: unknown;
   try {
@@ -26,18 +36,38 @@ export function parseSessionLine(line: string): SessionRecord | undefined {
   } catch {
     return undefined;
   }
+  const header = asSessionHeader(record);
+  if (header) return header;
   if (record === null || typeof record !== 'object') return undefined;
   const type = (record as { type?: unknown }).type;
   return type === 'message' || type === 'event' ? (record as SessionRecord) : undefined;
 }
 
-function parseRecords(text: string): SessionRecord[] {
-  const out: SessionRecord[] = [];
+/** 只认对话内容行：头部与坏行都返回 undefined。列会话、子串预筛的调用方只要内容。 */
+export function parseSessionLine(line: string): SessionRecord | undefined {
+  const parsed = parseLine(line);
+  return parsed !== undefined && parsed.type !== 'session' ? parsed : undefined;
+}
+
+/**
+ * 读出记录并**迁移到当前版本**。
+ *
+ * 迁移放在这里而不是各调用点：读会话的路径不止一条（恢复、导出、子代理继承、语料回放），
+ * 每条各自记得迁移一次是迟早会漏的约定。
+ */
+export function parseRecords(text: string): { records: SessionRecord[]; version: number } {
+  let version = IMPLICIT_VERSION;
+  const records: SessionRecord[] = [];
   for (const line of text.split('\n')) {
-    const record = parseSessionLine(line);
-    if (record) out.push(record);
+    const parsed = parseLine(line);
+    if (parsed === undefined) continue;
+    if (parsed.type === 'session') {
+      version = parsed.version;
+      continue;
+    }
+    records.push(parsed);
   }
-  return out;
+  return { records: migrateRecords(records, version), version };
 }
 
 export class JsonlSession implements SessionPort {
@@ -45,18 +75,31 @@ export class JsonlSession implements SessionPort {
   readonly id: string;
   readonly file: string;
   tip: string | undefined;
+  /**
+   * 首条记录之前要先写头部。构造时定下来，省掉每次 append 一次 stat。
+   *
+   * 不在这里就把文件建起来：打开 TUI / `/new` 但一条消息都没发时，不应留下空话题。
+   * 所以文件连同头部都由第一次 append 建立。
+   */
+  private needsHeader: boolean;
 
   constructor(dir: string, id: string) {
     this.dir = dir;
     this.id = id;
     this.file = join(dir, `${id}.jsonl`);
-    this.tip = existsSync(this.file) ? loadTip(parseRecords(readFileSync(this.file, 'utf8'))) : undefined;
+    this.needsHeader = !existsSync(this.file);
+    this.tip = this.needsHeader ? undefined : loadTip(parseRecords(readFileSync(this.file, 'utf8')).records);
   }
 
   append(record: SessionRecord): void {
     const id = record.id ?? newEntryId();
     const parentId = record.parentId !== undefined ? record.parentId : (this.tip ?? null);
     const row: SessionRecord = { ...record, id, parentId };
+    if (this.needsHeader) {
+      this.needsHeader = false;
+      const header = sessionHeader({ id: this.id, createdAt: new Date().toISOString() });
+      appendFileSync(this.file, `${JSON.stringify(header)}\n`, 'utf8');
+    }
     appendFileSync(this.file, `${JSON.stringify(row)}\n`, 'utf8');
     if (row.type === 'event' && row.kind === 'branch_tip' && typeof row.data.id === 'string') {
       this.tip = row.data.id;
@@ -80,7 +123,7 @@ export class JsonlSession implements SessionPort {
 
   readAll(): SessionRecord[] {
     if (!existsSync(this.file)) return [];
-    return parseRecords(readFileSync(this.file, 'utf8'));
+    return parseRecords(readFileSync(this.file, 'utf8')).records;
   }
 
   /** 当前分支上的记录（含旧线性前缀）。 */

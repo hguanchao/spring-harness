@@ -16,7 +16,7 @@ import { PLAN_MODE_SERVICE, type PlanModeSeam } from '../services.js';
 import { buildSystemPrompt, contextTailMessage, isContextTailMessage, isSessionStateMessage, sessionStateMessage } from './prompt.js';
 import { hashMessage, hashText, observePrefix, type PrefixSnapshot } from './prefix-tracker.js';
 import { runToolBatch } from './tool-run.js';
-import { CacheMissTracker, describeCacheMiss } from '../../llm/cache-stats.js';
+import { CacheMissTracker, cacheMissCost, describeCacheMiss } from '../../llm/cache-stats.js';
 import type { ChatMessage, TokenUsage } from '../../llm/client.js';
 import { EMPTY_TODO, MCP_SERVICE, SCHEDULER_SERVICE, SESSION_SERVICE, SKILLS_SERVICE, SUBAGENT_SERVICE, TODO_SERVICE, todoEventData, type McpService, type SchedulerService, type SessionService, type SkillService, type SubagentCatalog, type TodoService } from '../services.js';
 import { EMPTY_PLUGIN_SERVICES, type PluginServices } from '../types.js';
@@ -697,6 +697,19 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
     sendToSubagent(id, text) {
       return jobs.sendToSubagent(id, text);
     },
+    // 与下面 invokeTool 的判定同源：run_code 的暴露清单不能与真正放行的集合分叉。
+    toolNames: registry.list()
+      .map((tool) => tool.name)
+      .filter((name) => sessionTools === undefined || sessionTools.has(name)),
+    // run_code 的内层调用。名字在这里就被判过一道：不在本回合可见工具表里的直接拒绝，
+    // 含 run_code 自身——否则模型写个递归就是无上限的自我调用。
+    async invokeTool(name, args) {
+      if (!registry.find(name) || (allowed && !allowed.has(name))) {
+        return { ok: false, content: `tool not available in this agent: ${name}` };
+      }
+      if (name === 'run_code') return { ok: false, content: 'run_code cannot call run_code' };
+      return executeGated(name, args, nextEventId('ptc'));
+    },
     planMode: options.planMode,
     sessionDir: active.dir,
     sessionId: active.id,
@@ -762,6 +775,87 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
 
   const allowed = sessionTools;
 
+  /**
+   * 计划模式接缝：声明哪些工具在计划模式下可调用、拦截时给什么理由。
+   *
+   * 提到这里是因为它同时被两条路径读：顶层工具调用，以及 `run_code` 的内层调用
+   * （经 {@link executeGated}）。放在步内声明会让两个读点各取一次，迟早不同步。
+   */
+  const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
+
+  /**
+   * 一次工具调用的全部关卡：允许名单 → 计划模式 → 路径规则 → 审批 → 前后钩子 → 执行 →
+   * 超长结果落盘。
+   *
+   * **顶层调用与 `run_code` 里的内层调用共用这一个函数**，不是各写一份。第二条路一旦存在，
+   * 「把命令包进 run_code」就成了绕开审批的捷径，整个权限模型随之只剩名义。宿主把本函数
+   * 经 `ctx.invokeTool` 接出去，`run_code` 因此没有能力自己造一条路。
+   */
+  const executeGated = async (
+    name: string,
+    args: Record<string, unknown>,
+    id: string,
+    parseError?: string,
+  ): Promise<ToolResult> => {
+    if (parseError) return { ok: false, content: `invalid tool arguments: ${parseError}` };
+    const tool = registry.find(name);
+    const denied = toolDenied(registry, name, args, {
+      allowed,
+      depth,
+      planMode: options.planMode?.active,
+      plan: planSeam,
+    });
+    let result: ToolResult;
+    if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${name}` };
+    else {
+      // 文件类工具默认不问（写权限由沙箱管），所以规则对它们的 deny/ask 要在这里落实，
+      // 否则一条路径规则就是「写了不生效」。只有命中 ask 才走审批，免得不匹配的调用也弹窗。
+      const pathVerdict = pathToolVerdict(options, name, args);
+      if (pathVerdict === 'deny') {
+        result = {
+          ok: false,
+          content: `denied by a permission rule: ${name} ${pathDetail(args)} — do not retry it by another route`,
+        };
+      } else {
+        let blocked: string | undefined;
+        if (pathVerdict === 'ask') {
+          const approved = await ctx.approve(name, pathDetail(args));
+          if (!approved) {
+            blocked = `${name} denied by the approval policy — do not retry it by another route`;
+          }
+        }
+        for (const hook of hooks) {
+          if (blocked !== undefined || !hook.beforeTool) continue;
+          try {
+            blocked = await hook.beforeTool({ name, args });
+          } catch (error) {
+            blocked = errorMessage(error);
+          }
+          if (blocked) break;
+        }
+        result = blocked !== undefined ? { ok: false, content: blocked } : await tool.execute(args, ctx, id);
+        if (blocked === undefined) {
+          for (const hook of hooks) {
+            if (!hook.afterTool) continue;
+            try {
+              const verdict = await hook.afterTool({ name, args }, { ok: result.ok, content: result.content });
+              if (verdict?.deny) result = { ok: false, content: verdict.deny };
+            } catch (error) {
+              result = { ok: false, content: errorMessage(error) };
+            }
+          }
+        }
+      }
+    }
+    // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
+    // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
+    if (options.spill && result.ok && !result.images?.length && !result.documents?.length) {
+      const spilled = options.spill.persist(name, result.content);
+      if (spilled !== undefined) result = { ...result, content: spilled };
+    }
+    return result;
+  };
+
   /** 最近一条非空 assistant 正文。收束步没有新正文时用它。 */
   const latestAssistantText = (): string => {
     for (let i = mirror.length - 1; i >= 0; i--) {
@@ -825,6 +919,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         // 历史中段改写，缓存从切点起全部作废。摘要落地时重置（摘要即新边界）。
         stubFromSession,
         tools: registry.schemas(allowed),
+        // 摘要是一次性请求，用完的前缀随后就被丢掉：还在缓存里就照常打断点，白拿命中；
+        // 已经不在就当一次普通全价请求，别按写入价买一份没人会读的缓存。
+        oneOffCache: cacheTracker.oneOffCachePolicy(Date.now()),
         // 压缩摘要的花费也是真花钱，一样计入预算（未配 onAuxUsage 时也要计）。
         onUsage: (usage: TokenUsage) => {
           chargeTokens(usage.promptTokens, usage.completionTokens);
@@ -992,6 +1089,9 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         ...(options.model === undefined ? {} : { modelKey: options.model }),
       });
       if (miss) {
+        // 折算成钱：token 数看不出严重性，美元可以。没有声明单价时留空——
+        // 「不知道价格」与「浪费了 $0」是两回事。
+        const missedUsd = cacheMissCost(miss.missedTokens, options.costRates);
         active.appendEvent('cache_miss', {
           missedTokens: miss.missedTokens,
           modelChanged: miss.modelChanged,
@@ -999,6 +1099,7 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
           expected: miss.expected,
           ...(miss.reason === undefined ? {} : { reason: miss.reason }),
           ...(miss.idleMs === undefined ? {} : { idleMs: miss.idleMs }),
+          ...(missedUsd === undefined ? {} : { missedUsd }),
           text: describeCacheMiss(miss),
         });
       }
@@ -1118,7 +1219,6 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       ...thinkingReplay,
     });
 
-    const planSeam = services.get<PlanModeSeam>(PLAN_MODE_SERVICE);
     await runToolBatch({
       calls: parsedCalls,
       isParallel: (name) => registry.isConcurrencySafe(name),
@@ -1131,69 +1231,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
         options.listener?.({ type: 'tool_settled', name: call.name, id: call.id, ok: result.ok, content: result.content });
       },
       async execute(call) {
-        const parseError = parseErrors.get(call.id);
-        if (parseError) return { ok: false, content: `invalid tool arguments: ${parseError}` };
-        const tool = registry.find(call.name);
-        const denied = toolDenied(registry, call.name, call.arguments, {
-          allowed,
-          depth,
-          planMode: options.planMode?.active,
-          plan: planSeam,
-        });
-        let result: ToolResult;
-        if (denied || !tool) result = { ok: false, content: denied ?? `unknown tool: ${call.name}` };
-        else {
-          // 文件类工具默认不问（写权限由沙箱管），所以规则对它们的 deny/ask 要在这里落实，
-          // 否则一条路径规则就是「写了不生效」。只有命中 ask 才走审批，免得不匹配的调用也弹窗。
-          const pathVerdict = pathToolVerdict(options, call.name, call.arguments);
-          if (pathVerdict === 'deny') {
-            result = {
-              ok: false,
-              content: `denied by a permission rule: ${call.name} ${pathDetail(call.arguments)} — do not retry it by another route`,
-            };
-          } else {
-            let blocked: string | undefined;
-            if (pathVerdict === 'ask') {
-              const allowed = await ctx.approve(call.name, pathDetail(call.arguments));
-              if (!allowed) {
-                blocked = `${call.name} denied by the approval policy — do not retry it by another route`;
-              }
-            }
-            for (const hook of hooks) {
-              if (blocked !== undefined || !hook.beforeTool) continue;
-              try {
-                blocked = await hook.beforeTool({ name: call.name, args: call.arguments });
-              } catch (error) {
-                blocked = errorMessage(error);
-              }
-              if (blocked) break;
-            }
-            result = blocked !== undefined
-              ? { ok: false, content: blocked }
-              : await tool.execute(call.arguments, ctx, call.id);
-            if (blocked === undefined) {
-              for (const hook of hooks) {
-                if (!hook.afterTool) continue;
-                try {
-                  const verdict = await hook.afterTool(
-                    { name: call.name, args: call.arguments },
-                    { ok: result.ok, content: result.content },
-                  );
-                  if (verdict?.deny) result = { ok: false, content: verdict.deny };
-                } catch (error) {
-                  result = { ok: false, content: errorMessage(error) };
-                }
-              }
-            }
-          }
-        }
-        // 超长结果落盘：上下文里只留头尾预览 + 绝对路径。写盘失败时 persist 返回 undefined，
-        // 此时保留原文——spill 是优化，不能变成结果丢失的原因。
-        if (options.spill && result.ok && !result.images?.length && !result.documents?.length) {
-          const spilled = options.spill.persist(call.name, result.content);
-          if (spilled !== undefined) result = { ...result, content: spilled };
-        }
-        return result;
+        // 与 run_code 的内层调用同源：这条路径上不存在「模型直调」与「代码里调」两套关卡。
+        return executeGated(call.name, call.arguments, call.id, parseErrors.get(call.id));
       },
       onCommit(call, result) {
         appendMessage({

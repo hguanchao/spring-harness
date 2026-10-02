@@ -100,6 +100,24 @@ export interface LlmRetryInfo {
   maxRetries?: number;
 }
 
+/**
+ * 单次调用的行为开关。与连接期配置（`SseClientOptions`）分开：这些是**这一次请求**的性质，
+ * 不是这个客户端的性质。
+ */
+export interface LlmCallOptions {
+  /**
+   * 这次请求写不写提示缓存（默认写）。
+   *
+   * 一次性请求——压缩摘要、辅助评审——的提示词不会被读第二次，写缓存却要按写入价付费
+   * （Anthropic 系约 1.25 倍输入价），写进去就是纯亏。这类请求该显式关掉写入。
+   *
+   * 只对**显式断点**的协议有效（anthropic-messages）。OpenAI 系的前缀缓存是自动的、
+   * 写入不额外收费，所以这项对它们没有意义——也就特意不去动 `prompt_cache_key`，
+   * 那是路由亲和，关掉只会让命中率更差。
+   */
+  cacheWrite?: boolean;
+}
+
 export interface LlmClient {
   complete(
     messages: ChatMessage[],
@@ -107,6 +125,7 @@ export interface LlmClient {
     signal?: AbortSignal,
     onDelta?: (delta: { text?: string; thinking?: string }) => void,
     onRetry?: (info: LlmRetryInfo) => void,
+    options?: LlmCallOptions,
   ): Promise<StreamDelta>;
 }
 

@@ -51,8 +51,8 @@ export function createClient(options: ModelClientOptions): LlmClient {
     return pending;
   };
   return {
-    complete(messages, tools, signal, onDelta, onRetry) {
-      return getInner().then((client) => client.complete(messages, tools, signal, onDelta, onRetry));
+    complete(messages, tools, signal, onDelta, onRetry, callOptions) {
+      return getInner().then((client) => client.complete(messages, tools, signal, onDelta, onRetry, callOptions));
     },
   };
 }

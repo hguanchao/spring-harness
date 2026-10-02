@@ -6,6 +6,7 @@ import {
   type SessionAffinityFormat,
 } from './compat.js';
 import { ContextOverflowError } from './errors.js';
+import type { LlmCallOptions } from '../../llm/client.js';
 import type { ChatMessage, LlmClient, LlmRetryInfo, ModelCostRates, ReasoningEffort, RequestBodyOptions, StreamDelta } from './openai.js';
 import { costUsd, finishStream, isEmptyReply, newSseAcc, toolArgumentsIncomplete, type SseAcc } from './openai.js';
 import { FatalStreamError, postSseStream } from './sse.js';
@@ -68,6 +69,21 @@ export interface SseClientOptions {
  */
 const MAX_DEGRADATIONS = 8;
 
+/**
+ * 单次请求实际生效的能力位。
+ *
+ * 一次性请求（`cacheWrite: false`）关掉缓存断点：提示词不会被读第二次，而写缓存要按
+ * 写入价付费，写进去就是纯亏。只动 `promptCache`，不动 `promptCacheKey` /
+ * `promptCacheRetention`——前者是 OpenAI 系的路由亲和，与写不写缓存无关，
+ * 关掉只会让命中率更差。
+ *
+ * 抽成纯函数是为了能直接断言，不必为它起一个 HTTP 服务。
+ */
+export function callCaps(base: RequestCaps, options: LlmCallOptions | undefined): RequestCaps {
+  if (options?.cacheWrite !== false || !base.promptCache) return base;
+  return { ...base, promptCache: false };
+}
+
 /** 半截里如果夹着没闭合的工具参数，不能交给循环去执行。 */
 function usablePartial(partial: StreamDelta): boolean {
   return !isEmptyReply(partial) && !toolArgumentsIncomplete(partial);
@@ -120,6 +136,7 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
       signal?: AbortSignal,
       onDelta?: (delta: { text?: string; thinking?: string }) => void,
       onRetry?: (info: LlmRetryInfo) => void,
+      callOptions?: LlmCallOptions,
     ): Promise<StreamDelta> {
       let streamed = false;
       const wrapped = onDelta
@@ -179,7 +196,8 @@ export function createSseClient(adapter: ProtocolAdapter, options: SseClientOpti
             sessionId: options.sessionId,
             supportsImages: options.supportsImages,
           },
-          caps,
+          // 降级后的 caps 是基线，单次开关盖在它上面：一次请求的性质不该改动会话级的降级进度。
+          callCaps(caps, callOptions),
         );
         try {
           return await attempt(body);

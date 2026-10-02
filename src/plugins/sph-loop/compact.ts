@@ -2,6 +2,7 @@ import { foldSessionState, sessionEventData } from '../../session/fold.js';
 import type { DocumentAttachment, SessionFactory, SessionMessage, SessionPort } from '../../session/types.js';
 import { attachmentWireSuffix } from './attachments.js';
 import type { LlmClient, ChatMessage, TokenUsage } from '../../llm/client.js';
+import type { OneOffCachePolicy } from '../../llm/cache-stats.js';
 
 /** 最近 K 轮原文不动。一轮 = 一对 user/assistant（含其间 tool）。 */
 const KEEP_RECENT_TURNS = 4;
@@ -503,6 +504,7 @@ async function summarize(
   signal?: AbortSignal,
   onUsage?: (usage: TokenUsage) => void,
   instructions?: string,
+  oneOffCache?: OneOffCachePolicy,
 ): Promise<string> {
   // 压缩走对话前缀（system + 历史），指令垫在最后一条 user，吃 KV 缓存。
   //
@@ -516,6 +518,11 @@ async function summarize(
     [...prefix, { role: 'user', content: directive }],
     tools,
     signal,
+    undefined,
+    undefined,
+    // 摘要是一次性请求：前缀用完就丢（摘要落地后会话换到新前缀）。前缀还在不在缓存里
+    // 决定打扰不打扰断点——见 cache-stats 的 oneOffCachePolicy，这里是它唯一的用武之地。
+    oneOffCache === undefined ? undefined : { cacheWrite: oneOffCache === 'reuse' },
   );
   if (reply.usage) onUsage?.(reply.usage);
   const text = reply.text?.trim() ?? '';
@@ -589,6 +596,13 @@ export async function projectContext(options: {
    * 只有这一步会卡住数秒，不通知的话状态行会一直停在 Calling model…。
    */
   onCompacting?: () => void;
+  /**
+   * 摘要这次一次性请求对提示缓存的策略；省略保持旧行为（照常打断点）。
+   *
+   * 由调用方的 CacheMissTracker 判定，因为只有它手里有「上一次请求到底命中没有」
+   * 这个直接证据。手动 `/compact` 不传：那是用户按下的，前缀通常刚读过。
+   */
+  oneOffCache?: OneOffCachePolicy;
 }): Promise<ProjectionResult> {
   const { messages, contextWindow, client, signal } = options;
   const compaction = options.compaction;
@@ -629,7 +643,15 @@ export async function projectContext(options: {
     try {
       const prefix = withSystem(toChatMessages(messages.slice(0, rangeFrom + range.length), compaction));
       options.onCompacting?.();
-      const summary = await summarize(client, prefix, options.tools ?? [], signal, options.onUsage, options.instructions);
+      const summary = await summarize(
+        client,
+        prefix,
+        options.tools ?? [],
+        signal,
+        options.onUsage,
+        options.instructions,
+        options.oneOffCache,
+      );
       const covered = rangeFrom + range.length;
       const next: CompactionEvent = { summary, covered };
       const projected = toChatMessages(messages, next);

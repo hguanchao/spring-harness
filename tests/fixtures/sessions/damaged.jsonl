@@ -1,0 +1,6 @@
+{"type":"message","ts":"2026-01-01T00:00:00.000Z","role":"user","content":"first","id":"d1","parentId":null}
+{"type":"mess
+{"type":"message","ts":"2026-01-01T00:00:01.000Z","role":"assistant","content":"second","id":"d2","parentId":"d1"}
+{"type":"unknown-kind","ts":"2026-01-01T00:00:02.000Z"}
+not json at all
+{"type":"message","ts":"2026-01-01T00:00:03.000Z","role":"user","content":"third","id":"d3","parentId":"d2"}
