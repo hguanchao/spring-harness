@@ -1,47 +1,7 @@
-import { type Component, Loader, type TUI, visibleWidth } from "@/tui/index.js";
+import { type Component, Loader, type TUI } from "@/tui/index.js";
 import { appKeyText, type AppKeybinding } from "@/plugins/sph-tui/input/app-keybindings.js";
 import { theme } from "@/plugins/sph-tui/theme/theme.js";
 import { flattenWhitespace } from "@/util.js";
-
-/**
- * 双击识别。
- *
- * 不能直接用框架给的 `event.clickCount`：那个计数来自文本选择路径，只有两次点击落在
- * 同一行的同一个词上才递增，点在块内右侧的空白背景上永远是 1。
- *
- * 这里改用组件自己的坐标系判断——时间窗口内、坐标邻近即算双击。代价是同一个 click
- * 事件必须只送到本组件一次，因此调用方要返回 `{ handled: true }` 阻止事件沿布局
- * box 链继续向上冒泡（否则一次点击会触发多次判定，双击会被自己抵消）。
- */
-export class DoubleClickTracker {
-  private lastAt = 0;
-  private lastX = Number.NaN;
-  private lastY = Number.NaN;
-
-  constructor(
-    private readonly intervalMs = 500,
-    private readonly slopX = 2,
-    private readonly slopY = 1,
-  ) {}
-
-  /** 记录本次点击位置，并返回它是否构成双击。 */
-  accept(x: number, y: number): boolean {
-    const now = Date.now();
-    const isDouble =
-      now - this.lastAt <= this.intervalMs &&
-      Math.abs(x - this.lastX) <= this.slopX &&
-      Math.abs(y - this.lastY) <= this.slopY;
-    this.lastAt = now;
-    this.lastX = x;
-    this.lastY = y;
-    return isDouble;
-  }
-}
-
-/**
- * 随视口宽度伸缩的分隔线：整行填满 "─"，颜色可由调用方注入（默认取 border 色）。
- */
-
 
 export class DynamicBorder implements Component {
   private color: (str: string) => string;
@@ -164,9 +124,10 @@ function classifyRetryHeadline(raw: string): string | undefined {
   }
   const lower = text.toLowerCase();
   if (lower.includes('idle timeout')) return 'Stream stalled';
+  // 只认完整词组：裸 `empty` 会把 shell 结果里的 `stdout: (empty)` 误判成传输故障。
   if (
     lower.includes('no content')
-    || lower.includes('empty')
+    || /empty (?:reply|response|body|message|payload|sse)/.test(lower)
     || lower.includes('missing body')
     || lower.includes('no sse')
   ) {
@@ -193,6 +154,10 @@ export function failureHeadline(raw: string): string {
   const text = flattenWhitespace(raw);
   if (text === '') return 'Failed';
   if (/does not match the HTTP\/1\.1 protocol|invalid eof/i.test(text)) return 'Upstream disconnected';
+  // shell 失败结果是 `exit N` + stdout/stderr 全文（timeout 说明可能在最前）：标题只留退出码，
+  // 全文展开可见；否则会被当成长文本截断，或者被 `stdout: (empty)` 带进传输分类。
+  const shellExit = /(?:^| )exit (\d+|timeout)(?: (?:stdout|stderr)\b|$)/.exec(text);
+  if (shellExit) return `exit ${shellExit[1]}`;
   const retry = classifyRetryHeadline(text);
   if (retry) return retry;
   if (/network error|fetch failed|socket hang up|econnreset|und_err/i.test(text)) return 'Network error';
@@ -253,58 +218,13 @@ export class WorkingStatusIndicator extends StatusIndicator {
   }
 }
 
-/**
- * 空闲占位：固定两行空白，避免状态区高度抖动。
- * 第二行右上角可临时挂一条提示（复制反馈）——空闲时没有 Loader，反馈落在占位行上。
- */
+/** 空闲占位：固定两行空白，避免状态区高度抖动——工作态（转圈 + 文案）也是两行。 */
 export class IdleStatus implements Component {
-  private hint?: string;
-  private hintTimer?: NodeJS.Timeout;
-
-  constructor(private readonly requestRender: () => void) {}
-
-  showHint(text: string, durationMs = 1200): void {
-    this.clearHintTimer();
-    this.hint = text;
-    this.requestRender();
-    this.hintTimer = setTimeout(() => {
-      this.hintTimer = undefined;
-      this.hint = undefined;
-      this.requestRender();
-    }, Math.max(0, durationMs));
-    this.hintTimer.unref();
-  }
-
-  private clearHintTimer(): void {
-    if (this.hintTimer) {
-      clearTimeout(this.hintTimer);
-      this.hintTimer = undefined;
-    }
-  }
-
-  /** 立即撤掉提示并恢复空白占位。 */
-  clearHint(): void {
-    this.clearHintTimer();
-    if (this.hint === undefined) return;
-    this.hint = undefined;
-    this.requestRender();
-  }
-
   invalidate(): void {
     // 无缓存状态。
   }
 
-  render(width: number): string[] {
-    if (this.hint === undefined) {
-      // 空行不要铺空格：铺满的空格在 Windows Terminal 上会显出浅底。
-      return ['', ''];
-    }
-    const text = ` ${this.hint} `;
-    const textW = visibleWidth(text);
-    // 空闲行右侧留 4 列与工作态右缘对齐；窄到放不下就整体省略，不裁一半。
-    if (textW + 4 > width) return ['', ''];
-    const blank = '';
-    const line = `\x1b[${width - 4 - textW + 1}G\x1b[7m${text}\x1b[27m`;
-    return [blank, line];
+  render(): string[] {
+    return ['', ''];
   }
 }

@@ -12,10 +12,20 @@ import { registerPlanCommand } from './command.js';
 import { registerPlanTools } from './tool.js';
 import setupCore from './plan-core.js';
 
-/** 插件入口。宿主按 `src/plugins/sph-plan/` 装载，插件名取目录名。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。宿主按 `src/plugins/sph-plan/` 装载，插件名取目录名。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   // plan-core 的默认导出提供 PlanModeSeam 服务；tool.ts 注册两个工具。
   setupCore(api);
   registerPlanTools(api);
   registerPlanCommand(api);
 }
+
+export default {
+  description: 'Plan mode: read-only planning tools plus the seam the loop reads.',
+  setup,
+};

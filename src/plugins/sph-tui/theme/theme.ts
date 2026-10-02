@@ -33,6 +33,9 @@ function detectColorMode(): ColorMode {
   if ((process.env.SPH_THEME ?? '').toLowerCase() === 'terminal') return 'ansi';
   const colorterm = (process.env.COLORTERM ?? '').toLowerCase();
   if (colorterm.includes('truecolor') || colorterm.includes('24bit')) return 'truecolor';
+  // Windows Terminal 不设 COLORTERM，但一定支持 24 位色——WT_SESSION 是它的专属变量。
+  // 检测不到就会降到 256 档，diff 底色带这类主题色会变成色板近似（#005f00 ≠ #063806）。
+  if (process.env.WT_SESSION) return 'truecolor';
   const term = (process.env.TERM ?? '').toLowerCase();
   if (term.includes('direct')) return 'truecolor';
   return '256color';
@@ -140,6 +143,9 @@ const ANSI_FG: Record<string, string> = {
   scrollbarThumb: '90',
   mdLink: '97', mdCode: '94', plan: '94',
   success: '92', error: '91', warning: '93',
+  // diff 代码块的语法高亮（hex 见 palettes.ts，取自 grok grok-night.tmTheme）：16 色只求语义可辨。
+  syntaxComment: '90', syntaxKeyword: '95', syntaxFunction: '94', syntaxString: '93',
+  syntaxConstant: '91', syntaxOperator: '96', syntaxType: '36',
 };
 
 /**
@@ -155,6 +161,18 @@ const ANSI_BG: Record<string, string> = {
   steerHoverBg: '48;5;236',
   rowHoverBg: '48;5;237',
   rowSelectedBg: '48;5;239',
+};
+
+/**
+ * 256 色档的背景直指定：有些角色的 hex 最近邻会掉进灰阶，把红绿语义抹平——
+ * diffAddBg / diffDelBg 的最近邻是灰 236/237，与底 233 只差一两档灰，增删带就「看不见」了。
+ * 这里与 grok GrokNight 同值同法：#063806/#420e14 特意量化到色块 22（纯绿）/ 52（纯红），
+ * 其源码注释的原话就是 "quantizes to 256-color green, not gray"。真彩档照走 hex，
+ * ansi 档照走 ANSI_BG（回落默认底 → 整行前景色接手）。
+ */
+const BG256: Record<string, string> = {
+  diffAddBg: '48;5;22',
+  diffDelBg: '48;5;52',
 };
 
 function fgAnsi(color: string, mode: ColorMode): string {
@@ -199,7 +217,9 @@ export class Theme {
     }
     for (const [key, value] of Object.entries(palette)) {
       this.fgColors.set(key, fgAnsi(value, mode));
-      this.bgColors.set(key, bgAnsi(value, mode));
+      // 256 档先查直指定（灰阶最近邻会抹平红绿语义，见 BG256），没列的照走最近邻换算。
+      const bg256 = mode === '256color' ? BG256[key] : undefined;
+      this.bgColors.set(key, bg256 !== undefined ? `\x1b[${bg256}m` : bgAnsi(value, mode));
     }
   }
 
@@ -335,14 +355,6 @@ export function getMarkdownTheme(): MarkdownTheme {
     },
     link: (text: string) => theme.underline(theme.fg('mdLink', text)),
     linkUrl: (text: string) => theme.fg('mdLinkUrl', text),
-    // 次要信息（`{{…}}`，报告里的来源、根目录）：与行内码同一档蓝。
-    secondary: (text: string) => theme.fg('mdCode', text),
-    // 弱化信息（`%%…%%`，报告里的技能路径）：中性灰，退到正文之后。
-    muted: (text: string) => theme.fg('muted', text),
-    // 警示信息（`!!…!!`，后果句、warning）：warning 橙。
-    warning: (text: string) => theme.fg('warning', text),
-    // 错误信息（`@@…@@`，加载失败的名字）：error 红。
-    error: (text: string) => theme.fg('error', text),
     // 行内码整段蓝、加粗，不做词法猜测。
     code: (text: string) => theme.bold(theme.fg('mdCode', text)),
     codeBlock: (text: string) => theme.fg('mdCodeBlock', text),
@@ -374,6 +386,8 @@ export function getSelectListTheme(): SelectListTheme {
     hoverBg: (text: string) => `${theme.bgSeq('rowHoverBg')}${text}\x1b[49m`,
     // tone: "danger" 的主文案：删除/拒绝这类破坏性选项，红是安全语义不是装饰。
     danger: (text: string) => theme.fg('error', text),
+    // current: true 的行尾 ✓：「这项正生效」，success 绿。
+    currentMark: (text: string) => theme.fg('success', text),
   };
 }
 

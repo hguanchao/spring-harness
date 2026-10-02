@@ -149,10 +149,18 @@ export interface PluginCommand {
   run(ctx: PluginCommandContext): void | Promise<void>;
 }
 
-/** 对象形式的插件：默认导出 `{ name, setup }`。 */
+/** 对象形式的插件：默认导出 `{ name, description, setup }`。 */
 export interface SphPlugin {
   /** 覆盖插件名；省略则用目录名。 */
   name?: string;
+  /**
+   * 一句话说明这个插件是干什么的，`/plugins` 的明细里显示这一行。
+   *
+   * 与 `name` 同属自述：清单（package.json 的 `sph.description`）也能声明一句，两处都在时
+   * **以这里为准**——插件自己写的那句更贴近它实际做的事，清单只是发现期的静态声明。
+   * 函数形态的插件没有地方挂这句话，要用就换成对象形态。
+   */
+  description?: string;
   setup(api: PluginApi): void | Promise<void>;
 }
 

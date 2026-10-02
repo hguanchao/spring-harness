@@ -445,7 +445,11 @@ export interface LoaderIndicatorOptions {
 	intervalMs?: number;
 }
 
-const DEFAULT_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/**
+ * 转轮帧：**全项目唯一一份**。状态行（Loader）、加载弹窗、子代理面板都从这里取——
+ * 以前三处各抄一份十帧数组，改一个字形要改三个文件。
+ */
+export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEFAULT_INTERVAL_MS = 80;
 
 /**
@@ -465,7 +469,7 @@ export function splitTrailingCount(message: string): { body: string; suffix: str
  * 两个时钟跟转圈共用同一个 interval，避免再开一只定时器。
  */
 export class Loader extends Text {
-	private frames = [...DEFAULT_FRAMES];
+	private frames = [...SPINNER_FRAMES];
 	private intervalMs = DEFAULT_INTERVAL_MS;
 	private currentFrame = 0;
 	private intervalId: NodeJS.Timeout | null = null;
@@ -485,9 +489,6 @@ export class Loader extends Text {
 	private readonly startedAt = Date.now();
 	private phaseStartedAt = Date.now();
 	private tokens?: number;
-	/** 右上角临时提示（复制反馈）：显示期间盖掉耗时/token，到点自动消失。 */
-	private hint?: string;
-	private hintTimer?: NodeJS.Timeout;
 
 	constructor(
 		ui: TUI,
@@ -521,15 +522,10 @@ export class Loader extends Text {
 		const tokenW = visibleWidth(tokenStr);
 		const phaseW = visibleWidth(phaseStr);
 		const gap = 2;
-		// 复制反馈等临时提示占据右上角：提示文案优先，本轮耗时/token 期间让位。
-		const hintChip = this.hint === undefined ? undefined : ` ${truncateToWidth(this.hint, Math.max(1, inner - 2), "…")} `;
 		// 极窄时先丢掉 token，本轮耗时尽量留着；次数 `(N)` 仍不能被省略号吃掉。
 		let right = turnStr + tokenStr;
 		let rightW = turnW + tokenW;
-		if (hintChip !== undefined) {
-			right = hintChip;
-			rightW = visibleWidth(hintChip);
-		} else if (rightW + (suffixW > 0 ? gap : 0) > inner && tokenW > 0) {
+		if (rightW + (suffixW > 0 ? gap : 0) > inner && tokenW > 0) {
 			right = turnStr;
 			rightW = turnW;
 		}
@@ -555,12 +551,7 @@ export class Loader extends Text {
 			+ paintedBody
 			+ (suffix === "" ? "" : this.messageColorFn(suffix))
 			+ (showPhase ? this.timerColorFn(phaseStr) : "");
-		const rightStyled =
-			shownRight === ""
-				? ""
-				: hintChip !== undefined
-					? `\x1b[7m${shownRight}\x1b[27m`
-					: this.timerColorFn(shownRight);
+		const rightStyled = shownRight === "" ? "" : this.timerColorFn(shownRight);
 		const leftPart = `${" ".repeat(leftPad)}${left}`;
 		// 不把空格铺满整行：Windows Terminal 会把这些空格画成一条浅底（滚到底时和转录区 2K 空行对比最明显）。
 		let line = leftPart;
@@ -582,35 +573,6 @@ export class Loader extends Text {
 			clearInterval(this.intervalId);
 			this.intervalId = null;
 		}
-		this.clearHintTimer();
-	}
-
-	/** 右上角临时提示（复制反馈）：与全屏 flash 同语义，但落在输入框正上方的状态行右侧。 */
-	showHint(text: string, durationMs = 1200): void {
-		this.clearHintTimer();
-		this.hint = text;
-		this.updateDisplay();
-		this.hintTimer = setTimeout(() => {
-			this.hintTimer = undefined;
-			this.hint = undefined;
-			this.updateDisplay();
-		}, Math.max(0, durationMs));
-		this.hintTimer.unref();
-	}
-
-	private clearHintTimer(): void {
-		if (this.hintTimer) {
-			clearTimeout(this.hintTimer);
-			this.hintTimer = undefined;
-		}
-	}
-
-	/** 立即撤掉提示，耗时/token 恢复显示。 */
-	clearHint(): void {
-		this.clearHintTimer();
-		if (this.hint === undefined) return;
-		this.hint = undefined;
-		this.updateDisplay();
 	}
 
 	setMessage(message: string): void {
@@ -652,7 +614,7 @@ export class Loader extends Text {
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
 		this.renderIndicatorVerbatim = indicator !== undefined;
-		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
+		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...SPINNER_FRAMES];
 		this.intervalMs = indicator?.intervalMs && indicator.intervalMs > 0 ? indicator.intervalMs : DEFAULT_INTERVAL_MS;
 		this.currentFrame = 0;
 		this.start();

@@ -12,6 +12,20 @@
 /** 行内语气。强调由类型表达，不靠往字符串里塞标记再解析回来。 */
 export type TextTone = 'code' | 'muted' | 'warn' | 'error';
 
+/*
+ * 取色的规则（写数据的人按这条选 tone，别再逐个界面发明）：
+ *
+ * - `code`（蓝）= **能照抄进终端或编辑器的字面量**：命令、键位、路径、`target`、规则动作。
+ *   名字不是字面量——条目主列（技能名、插件名、server 名、工具名）用加粗正文，不用蓝；
+ *   一屏里的蓝越多，蓝就越不值钱。
+ * - 不标 = 正文。表格的行标签（`user`、`Approval mode`）属于这类。
+ * - `muted` = 核对时才看的次级信息：来源层、别名、根前缀。
+ * - `warn` / `error` = 需要动作的告警与失败；红黄是安全语义，不做装饰。
+ *
+ * 字段取值的角色优先由**字段键**回答（见 render.ts 的 FIELD_TONES）：`path`/`target` 这类键
+ * 的取值恒为字面量，写的人不必再标一遍。单条要例外时，在值里写分段（`{ text, tone }`）。
+ */
+
 export interface TextSegment {
   text: string;
   tone?: TextTone;
@@ -30,6 +44,17 @@ export interface TextSegment {
  */
 export type RichText = string | TextSegment | readonly TextSegment[];
 
+/**
+ * 明细里的一项：键（`tools` / `path`）与它的取值。
+ *
+ * 不给 `key` 就是一段**无键的段落**（技能说明就是这种）：它不参与键列对齐，按整行宽度折行——
+ * 键值行与段落行在明细块里可以混排，顺序就是数组顺序。
+ */
+export interface ReportField {
+	key?: RichText;
+	value: RichText;
+}
+
 export interface ReportItem {
 	/** 稳定身份：技能名、插件名、命令 id、键位文本。搜索、选中、测试都按它。 */
 	key: string;
@@ -41,6 +66,14 @@ export interface ReportItem {
 	 */
 	label: RichText;
 	description?: RichText;
+	/**
+	 * 逐项列出的明细（插件的 `tools` / `services` / `commands` 就是这种）。
+	 *
+	 * 与 `description` 的差别是**结构**：一句描述切开就变了意思，明细切开还是一项一项。
+ * 渲染层据此把它排成「键列对齐、取值挂在其右」的明细块（折行的续行也挂在取值列下），
+ * 并且只在条目被点开时挂出来——列表因此能一行一条地扫过去，而不是把每条的明细全铺开。
+	 */
+	fields?: readonly ReportField[];
 	/** 右对齐尾列：来源、别名这类次级信息，放不下时整列舍弃。 */
 	trailing?: RichText;
 	/** 灰注脚（插件的入口路径这类），只在组展开时显示。 */
@@ -57,22 +90,32 @@ export interface ReportGroup {
 	countNoun?: string;
 	/** 缺省可折叠；纯装饰性的分段给 false。 */
 	collapsible?: boolean;
-	/** 打开时是否已展开，缺省 true。 */
+	/** 缺省收起。想让某组一打开就摊开（内容短、且每次都要看）才给 true。 */
 	initiallyExpanded?: boolean;
+	/**
+	 * 附注组：不属于本 tab 的清点对象，检索时整组退场。
+	 *
+	 * caption / prose 天然不参与检索（`filterTab` 只收组），但有些内容得排成「标题 + 若干条」
+	 * 才读得动，又同样是附注性质——空根清单就是：它回答「我放了文件怎么没出现」，不是
+	 * 「有哪些技能」。不给这个标记的话，搜 `slides` 会顺带列出五个空目录，真命中反而被淹掉。
+	 */
+	auxiliary?: boolean;
 	items: readonly ReportItem[];
 }
 
 /**
  * 报告正文的最小单位。
  *
- * `caption` 是一句灰字说明，`prose` / `code` 是原样保留的散文与代码块，`group` 是可折叠的条目组。
- * 四种块按数组顺序渲染，折叠与搜索只作用于 `group`。
+ * `caption` 是一句灰字说明，`prose` / `code` 是原样保留的散文与代码块，`group` 是可折叠的条目组，
+ * `empty` 是「这块没什么可看」的一句话（左右居中、上下各留一段空白，不贴着搜索行）。
+ * 五种块按数组顺序渲染，折叠与搜索只作用于 `group`。
  */
 export type ReportBlock =
 	| { kind: 'caption'; text: RichText }
 	| { kind: 'prose'; text: string }
 	| { kind: 'code'; language?: string; text: string }
-	| { kind: 'group'; group: ReportGroup };
+	| { kind: 'group'; group: ReportGroup }
+	| { kind: 'empty'; text: RichText };
 
 export interface ReportAction {
 	/** 展示用的键名：`f`、`↑↓`、`esc`。 */

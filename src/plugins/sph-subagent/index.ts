@@ -14,8 +14,13 @@ import { ToolRegistry } from '../../tools/registry.js';
 import { registerAgentCommand } from './command.js';
 import { createTaskTool, sendSubagentMessageTool } from './tool.js';
 
-/** 插件入口。宿主按 `src/plugins/sph-subagent/` 装载，插件名取目录名。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。宿主按 `src/plugins/sph-subagent/` 装载，插件名取目录名。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   const agents = () => discoverAgents(api.workspaceRoot, api.host.isWorkspaceTrusted(api.workspaceRoot));
   const catalog: SubagentCatalog = {
     find(name) {
@@ -36,3 +41,8 @@ export default function setup(api: PluginApi): void {
   registerAgentCommand(api);
   api.provide(SUBAGENT_SERVICE, catalog);
 }
+
+export default {
+  description: 'Subagent definitions plus the task and send_subagent_message tools.',
+  setup,
+};

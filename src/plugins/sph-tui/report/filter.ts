@@ -36,11 +36,21 @@ function searchText(item: ReportItem, group: ReportGroup): string {
 		item.key,
 		plainText(item.label),
 		item.description === undefined ? '' : plainText(item.description),
+		// 明细的键也进检索：按「tools」「path」这类词找条目。无键段落只有取值。
+		...(item.fields ?? []).flatMap((field) => [
+			...(field.key === undefined ? [] : [plainText(field.key)]),
+			plainText(field.value),
+		]),
 		item.trailing === undefined ? '' : plainText(item.trailing),
 		...(item.notes ?? []).map(plainText),
 		plainText(group.label),
 	];
-	return parts.filter((part) => part !== '').join(' ');
+	// 排版用的空白不算内容：描述里会带不换行空格（标签与取值之间）与换行（一种能力一行），
+	// 直接拼进可检索文本会让「tools: read」这种带空格的查询匹配不上。压成单空格再拼。
+	return parts
+		.map((part) => part.replace(/\s+/g, ' ').trim())
+		.filter((part) => part !== '')
+		.join(' ');
 }
 
 /**
@@ -68,6 +78,8 @@ export function filterTab(tab: ReportTab, query: string): FilteredTab {
 	let hits = 0;
 	for (const block of groupBlocks) {
 		const group = block.group;
+		// 附注组不参与检索：它跟 caption 是同一性质，只是排成了「标题 + 几条」的样子。
+		if (group.auxiliary === true) continue;
 		const items = [...group.items];
 		const matched = fuzzyFilter(items, trimmed, (item) => searchText(item, group));
 		counts.set(group.key, { hit: matched.length, total: items.length });

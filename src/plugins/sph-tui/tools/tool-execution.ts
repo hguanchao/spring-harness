@@ -5,7 +5,7 @@
  * Shell 预览后再双击一次给全文。Read / List / Grep 点开仍是头尾预览，不把整份
  * 内容塞进转录。edit / write 成功后，组一展开就在行下给出短 diff，双击再放长。
  *
- * 前缀按状态：进行中/完成 `▸`、展开 `▾`、失败 `×`；进行中的标题带 shimmer。
+ * 前缀按状态：进行中/完成 `›`、展开 `✦`、失败 `×`；进行中的标题带 shimmer。
  * 行内不用 braille 转圈——那个字形在 Windows 终端常见字体里缺字，会退化成别的符号。
  * 展开后的详情块整块挂在一条竖轨（`│`）上：轨与标题前缀同列，内容对齐详情缩进，
  * 和 Claude Code / Codex 的工具输出同款——详情看一眼就知道属于上面的哪一行。
@@ -13,6 +13,7 @@
 
 import {
   Container,
+  DoubleClickTracker,
   MouseRegion,
   SUPPRESS_MULTI_CLICK_SELECTION,
   Text,
@@ -23,30 +24,52 @@ import {
 } from '@/tui/index.js';
 import { flattenWhitespace } from '@/util.js';
 import { theme, type ThemeColor } from '@/plugins/sph-tui/theme/theme.js';
-import { DoubleClickTracker, failureHeadline, WorkingLabel } from '@/plugins/sph-tui/interaction/index.js';
+import { failureHeadline, WorkingLabel } from '@/plugins/sph-tui/interaction/index.js';
 import { armHoverHighlight } from '@/plugins/sph-tui/interaction/hover-highlight.js';
 import { rowChromeBg, selectTranscriptRow } from '@/plugins/sph-tui/interaction/row-selection.js';
 import { handleSelectablePress, SELECTABLE_ROW } from '@/plugins/sph-tui/interaction/selectable-row.js';
 import { type SubagentHeadParts } from '@/plugins/sph-tui/tools/subagent-task.js';
+import { languageForDiffHeader, languageForPath, syntaxSpans } from '@/plugins/sph-tui/tools/diff-syntax.js';
 import {
   DIFF_EXPANDED_LINES,
   DIFF_PREVIEW_LINES,
+  DIFF_LINE_NUMBERS,
+  diffLineNumbers,
   fileChangeFromArgs,
+  looksLikeUnifiedDiff,
+  matchLineFromResult,
+  singleLineNumber,
+  unifiedDiffLineKind,
   type FileChange,
+  type UnifiedDiffLineKind,
 } from '@/plugins/sph-tui/tools/tool-diff.js';
 
 type ToolStatus = 'pending' | 'running' | 'success' | 'error';
 
 /**
- * 组头用 `▸` / `▾` 表达开合。成员行完成未展开时用 `▸`，和进行中同字形，靠标题 shimmer 停下来区分；展开后用 `▾`。
+ * 组头/成员行用 `›`（未展开）与 `✦`（展开）表达开合。全项目只有这一对：报告面板的折叠字形
+ * （`FOLD_MARK`）与它是同一对，别处不要再造第三种「开合」。
+ * 成员行完成未展开时用 `›`，和进行中同字形，靠标题 shimmer 停下来区分；展开后用 `✦`。
  * 失败仍用 `×`。
  */
 export const TOOL_MARK = {
-  running: '▸',
-  done: '▸',
-  settled: '▸',
-  expanded: '▾',
+  running: '›',
+  done: '›',
+  settled: '›',
+  expanded: '✦',
   fail: '×',
+} as const;
+
+/**
+ * 思考行前缀：进行中空心 `✧`、收尾实心 `✦`，与 Recap 同态。
+ *
+ * `✦` 在这里与工具行的展开（{@link TOOL_MARK} 的 `expanded`）合流：都读「这一行有结果了、
+ * 内容露出来了」；`✧` 则是全项目唯一的「进行中」。两个字形可见宽度都是 1，折行悬挂缩进不受
+ * 影响（{@link TOOL_MEMBER_INDENT} 按 `X ` 两列算）。
+ */
+export const THOUGHT_MARK = {
+  running: '✧',
+  done: '✦',
 } as const;
 
 export function toolMark(status: ToolStatus, expanded = false): string {
@@ -64,7 +87,7 @@ export const TOOL_MEMBER_INDENT = 5;
 export const TOOL_DETAIL_INDENT = 8;
 
 /**
- * 详情块每行的左缘：竖轨 `│` 落在成员行前缀（`▸`/`▾`）同一列，轨后的空格把内容
+ * 详情块每行的左缘：竖轨 `│` 落在成员行前缀（`›`/`✦`）同一列，轨后的空格把内容
  * 顶到 TOOL_DETAIL_INDENT——可见宽度与纯缩进一致，折行宽度计算不用跟着变。
  */
 function detailRailPad(): string {
@@ -141,22 +164,149 @@ function hangingIndent(raw: string): number {
  * 详情块里那会变成一条只有竖轨的空行；预览行本来就都带内容，空行一律当噪音丢掉。
  */
 function wrapIndented(raw: string, inner: number): string[] {
+  // 空行留着：它是 diff 里的一行（有自己的行号和底色），丢了会读成行号跳号。
+  if (raw.trim() === '') return [raw];
   const indent = Math.min(hangingIndent(raw), Math.max(0, inner - 1));
   const wrapped = wrapTextWithAnsi(raw, Math.max(1, inner - indent)).filter((line) => line !== '');
   if (indent === 0 || wrapped.length <= 1) return wrapped;
   return [wrapped[0]!, ...wrapped.slice(1).map((line) => `${' '.repeat(indent)}${line}`)];
 }
 
-/** 按左缩进折行并上色，行首带详情竖轨；每行单独着色，避免整块 ANSI 跨行把缩进吃掉。 */
-function paintIndented(text: string, width: number, indent: number, paint: (s: string) => string): string {
-  const pad = detailRailPad();
-  const inner = Math.max(1, width - indent);
-  const lines: string[] = [];
-  for (const raw of text.split(/\r\n|\r|\n/)) {
-    for (const wrapped of wrapIndented(raw, inner)) lines.push(`${pad}${paint(wrapped)}`);
-  }
-  return lines.join('\n');
+/**
+ * 行号栏：号码右对齐，后接一个空格进正文。
+ *
+ * 形态由 {@link DIFF_LINE_NUMBERS} 定：**单列**（默认）只显示相关的那一侧——删显旧号、
+ * 加与上下文显新号，省四列；双列（旧|新）无歧义但要宽度。两种形态下栏宽都是定值，
+ * `cell(index)` 返回该行的号码格（含填充，未上色），折行续行与 `… (N more)` 用等宽空格对齐；
+ * 竖轨由调用方另上灰，免得跟着增删色一起红/绿。
+ */
+function lineNumberGutter(entries: readonly { old?: number; new?: number }[]): {
+  cell: (index: number) => string;
+  width: number;
+} {
+  const numbers: { old?: number; new?: number }[] = DIFF_LINE_NUMBERS === 'single'
+    ? entries.map((entry) => ({ new: singleLineNumber(entry) }))
+    : entries.map((entry) => ({ old: entry.old, new: entry.new }));
+  const widest = (pick: (entry: { old?: number; new?: number }) => number | undefined): number =>
+    numbers.reduce((max, entry) => Math.max(max, String(pick(entry) ?? '').length), 0);
+  const oldWidth = DIFF_LINE_NUMBERS === 'single' ? 0 : widest((entry) => entry.old);
+  const newWidth = widest((entry) => entry.new);
+  const numberWidth = oldWidth + newWidth === 0 ? 0 : oldWidth + (oldWidth === 0 ? 0 : 1) + newWidth;
+  // 栏宽 = 号码格 + 一个空格。算错一格，折行与 `… (N more)` 就会错位。
+  const width = numberWidth === 0 ? 0 : numberWidth + 1;
+  const cell = (value: number | undefined, column: number): string => String(value ?? '').padStart(column);
+  return {
+    width,
+    cell: (index: number): string => {
+      if (numberWidth === 0) return '';
+      const entry = numbers[index] ?? {};
+      return oldWidth === 0
+        ? cell(entry.new, newWidth)
+        : `${cell(entry.old, oldWidth)} ${cell(entry.new, newWidth)}`;
+    },
+  };
 }
+
+/** 行首栏：号码按增删/上下文上色，后接一个空格再进正文。栏不铺底色，宽度为 0 时不画栏。 */
+function numberLead(cell: string, color: ThemeColor, gutterWidth: number): string {
+  return gutterWidth === 0 ? '' : `${theme.fg(color, cell)} `;
+}
+
+/** 折行续行与空号行的栏：等宽空格，不上色。 */
+function blankLead(gutterWidth: number): string {
+  return ' '.repeat(gutterWidth);
+}
+
+/**
+ * 一行的内容部分。底色已在行首栏起笔（numberLead / blankLead），这里只负责把正文
+ * 铺到内容区宽度、再补 `49m` 收尾——不收尾底色会渗到下一行（框内的行没有自己的底色）。
+ */
+/** 语法高亮后的行：片段已带前景色（每段自闭合），paintedBody 只负责铺带、垫宽与收尾。 */
+/** prePainted 行的整行组装：底色从**内容区**起笔，行号槽留在画布底（grok 的实际形态）。 */
+function paintedBody(text: string, paint: { band: string; content: ThemeColor }, inner: number, prePainted = false): string {
+  if (prePainted) {
+    if (paint.band === '') return text;
+    return `${paint.band}${text}${' '.repeat(Math.max(0, inner - visibleWidth(text)))}\x1b[49m`;
+  }
+  if (paint.band === '') return theme.fg(paint.content, text);
+  const padded = text + ' '.repeat(Math.max(0, inner - visibleWidth(text)));
+  return `${paint.band}${theme.fg(paint.content, padded)}\x1b[49m`;
+}
+
+/** 一条源行摊成若干可见行：折行的续行保持同一档色与等宽空栏，不掉号也不变灰。 */
+export interface DiffBodyRow {
+  text: string;
+  paint: { band: string; number: ThemeColor; content: ThemeColor };
+  lead: string;
+  /** text 已是语法高亮过的整行（片段自带前景色），paintedBody 不再整行套 fg。 */
+  prePainted?: boolean;
+}
+
+function diffBodyRows(
+  source: string,
+  kind: UnifiedDiffLineKind,
+  index: number,
+  gutter: { cell: (position: number) => string; width: number },
+  inner: number,
+  lang?: string,
+): DiffBodyRow[] {
+  const paint = diffPaint(kind);
+  // 语法高亮在折行**前**做：tokenize 认的是源码，折完的残句会高亮错。
+  // wrapTextWithAnsi 感知 ANSI，折出的续行自动带上仍活跃的前景序列。
+  let painted: string | undefined;
+  if (lang && kind !== 'hunk' && kind !== 'meta' && source.trim() !== '') {
+    const spans = syntaxSpans(source, lang);
+    if (spans.some((span) => span.color !== 'text')) {
+      painted = spans
+        .map(({ text, color, italic }) =>
+          color === 'text' ? text : italic ? `\x1b[3m${theme.fg(color, text)}\x1b[23m` : theme.fg(color, text))
+        .join('');
+    }
+  }
+  return wrapIndented(painted ?? source, inner).map((text, position) => ({
+    text,
+    paint,
+    prePainted: painted !== undefined || undefined,
+    lead:
+      position === 0
+        ? numberLead(gutter.cell(index), paint.number, gutter.width)
+        : blankLead(gutter.width),
+  }));
+}
+
+/** 增删行的两组颜色：底色（空 = 这一档画不出底色）与内容色。 */
+function diffPaint(kind: UnifiedDiffLineKind): { band: string; number: ThemeColor; content: ThemeColor } {
+  if (kind === 'hunk') return { band: '', number: 'primary', content: 'primary' };
+  if (kind === 'meta') return { band: '', number: 'muted', content: 'toolOutput' };
+  const accent: ThemeColor = kind === 'add' ? 'success' : kind === 'del' ? 'error' : 'muted';
+  const role = kind === 'add' ? 'diffAddBg' : kind === 'del' ? 'diffDelBg' : undefined;
+  const band = role === undefined ? '' : theme.bgSeq(role as ThemeColor);
+  // 底色只在真彩/256 档画得出来；ansi 与透明档给的是默认底（和画布底同序列）→ 当作没有。
+  const usable = band !== '' && band !== theme.bgSeq('bg');
+  return {
+    band: usable ? band : '',
+    number: kind === 'ctx' ? 'muted' : accent,
+    // 有底色时内容退回正文色（一块绿底 + 白字比绿底 + 绿字好读）；没有底色就整行走增删色。
+    content: usable ? 'text' : kind === 'ctx' ? 'toolOutput' : accent,
+  };
+}
+
+/**
+ * write 写整份内容：新行号 1..N（旧列留空）。edit 是片段对比：从命中行起算，旧/新各走各的。
+ * 没有起点（replace_all、或工具没报命中行）就返回空表——不画行号。
+ */
+function changeLineNumbers(change: FileChange): { old?: number; new?: number }[] {
+  const base = change.lineBase;
+  if (base === undefined) return [];
+  let oldLine = base;
+  let newLine = base;
+  return change.lines.map((line) => {
+    if (line.kind === 'add') return { new: newLine++ };
+    if (line.kind === 'del') return { old: oldLine++ };
+    return { old: oldLine++, new: newLine++ };
+  });
+}
+
 
 export interface ToolResultInput {
   content: string;
@@ -424,7 +574,7 @@ export class ToolExecutionComponent extends Container {
   /**
    * 双击循环：收起 → 预览 →（bash / subagent）全文 → 收起。
    * Read / List / Grep 停在预览，不把整文件/整份清单打进转录。
-   * edit / write 收起时仍留 8 行 diff，展开后放到 80 行。
+   * edit / write：组内收起只留标题，展开画 diff（上限 80 行）；独立调用常驻预览。
    */
   toggleDetail(): void {
     if (!this.expanded) {
@@ -496,8 +646,8 @@ export class ToolExecutionComponent extends Container {
   /**
    * 前缀颜色跟随行文：非失败行都是 muted，与标题文字同色。
    *
-   * 进行与完成同字形同色（`▸`），靠标题 shimmer 停下来——
-   * 一轮收尾只该静下来，不该整行换色。展开后才换成 `▾`。
+   * 进行与完成同字形同色（`›`），靠标题 shimmer 停下来——
+   * 一轮收尾只该静下来，不该整行换色。展开后才换成 `✦`。
    */
   /** List 折叠行带 `(N entries)`，一行里能看出有多少项。 */
   private listEntrySuffix(): string {
@@ -578,7 +728,9 @@ export class ToolExecutionComponent extends Container {
     if (this.status() !== 'success') return undefined;
     if (this.toolName !== 'edit' && this.toolName !== 'write') return undefined;
     if (this.changeCache?.args === this.args) return this.changeCache.change;
-    const change = fileChangeFromArgs(this.toolName, this.args);
+    // edit 的片段 diff 要真行号：命中行从工具结果里取（格式见 search-replace 的返回）。
+    const matchLine = matchLineFromResult(this.result?.content ?? '');
+    const change = fileChangeFromArgs(this.toolName, this.args, matchLine);
     this.changeCache = { args: this.args, change };
     return change;
   }
@@ -591,6 +743,12 @@ export class ToolExecutionComponent extends Container {
   private updateBody(width: number): void {
     const change = this.fileChange();
     if (change) {
+      // 组内未展开的成员只留标题行——`›` = 收起 = 没有详情，与其它工具同一道闸。
+      // write/edit 的 diff 之前不走这道闸，收起后 diff 还整块挂在标题下面。
+      if (this.compact && !this.expanded) {
+        this.bodyText.setText('');
+        return;
+      }
       this.bodyText.setText(this.paintChange(change, width));
       return;
     }
@@ -600,61 +758,80 @@ export class ToolExecutionComponent extends Container {
       return;
     }
 
-    const paint = (line: string) =>
-      theme.fg(this.result?.isError ? 'error' : 'toolOutput', line);
+    // 输出本身就是统一 diff（`git diff` / `git show` 这类）：文件头/hunk 头/增删/上下文各归各的
+    // 取色，增删行带底色。判定见 looksLikeUnifiedDiff——只认结构标记，不猜内容。
+    const diffBody = this.result?.isError !== true && looksLikeUnifiedDiff(output);
+    const kindOf = (source: string): UnifiedDiffLineKind => (diffBody ? unifiedDiffLineKind(source) : 'meta');
+    const sources = output.split(/\r\n|\r|\n/);
+    // 语言从 diff 头（`+++ b/路径`）里取：原样输出的是已改文件的新代码。
+    const lang = diffBody ? languageForDiffHeader(sources) : undefined;
+    const gutter = lineNumberGutter(diffBody ? diffLineNumbers(sources) : []);
+    const inner = Math.max(1, width - TOOL_DETAIL_INDENT - gutter.width);
+    const pad = detailRailPad();
+    const assemble = ({ text, paint, lead, prePainted }: DiffBodyRow): string =>
+      `${pad}${lead}${paintedBody(text, paint, inner, prePainted)}`;
     if (this.fullDetail || this.result?.isError) {
-      this.bodyText.setText(paintIndented(output, width, TOOL_DETAIL_INDENT, paint));
+      const rows: DiffBodyRow[] = [];
+      sources.forEach((source, index) => rows.push(...diffBodyRows(source, kindOf(source), index, gutter, inner, lang)));
+      // diff 与上下内容都隔一行（非 diff 的普通输出不加）；空行带竖轨（pad），轨才不断。
+      this.bodyText.setText(
+        [diffBody ? pad : undefined, ...rows.map(assemble), diffBody ? pad : undefined]
+          .filter((row) => row !== undefined)
+          .join('\n'),
+      );
       return;
     }
 
     const { first, last } = previewWindow(this.toolName);
-    const inner = Math.max(1, width - TOOL_DETAIL_INDENT);
     const content = previewContentLines(this.toolName, output);
-    const visual: string[] = [];
-    for (const raw of content) {
-      visual.push(...wrapIndented(raw, inner));
-    }
+    const visual: DiffBodyRow[] = [];
+    content.forEach((source, index) => visual.push(...diffBodyRows(source, kindOf(source), index, gutter, inner, lang)));
     const cap = first + last;
-    // 这里不能再走 paintIndented：它会按宽度**再折一次**，而折行已经带过悬挂缩进了，
-    // 第二遍会把缩进叠上去、行也切碎。使用折好的行，直接贴竖轨。
-    const pad = detailRailPad();
     if (visual.length <= cap) {
-      this.bodyText.setText(visual.map((line) => `${pad}${paint(line)}`).join('\n'));
+      this.bodyText.setText(
+        [diffBody ? pad : undefined, ...visual.map(assemble), diffBody ? pad : undefined]
+          .filter((row) => row !== undefined)
+          .join('\n'),
+      );
       return;
     }
     // 省略行数按内容行算，与窗口同一把尺子：用户看到 `… (174 more)` 就知道后文还有多少行正文，
     // 而不是只有裸的 `…` 让人以为折叠点后面没什么东西了。
     const skipped = visual.length - cap;
-    const head = visual.slice(0, first).map((line) => `${pad}${paint(line)}`);
-    const tail = visual.slice(-last).map((line) => `${pad}${paint(line)}`);
+    const head = visual.slice(0, first).map(assemble);
+    const tail = visual.slice(-last).map(assemble);
     // 省略符与折行续行同一缩进：它标的是「正文被折掉的一截」，跟着正文走，不自成一行。
     const markerIndent = hangingIndent(content[0] ?? '');
-    const ellipsis = `${pad}${' '.repeat(markerIndent)}${theme.fg('muted', `… (${skipped} more)`)}`;
-    this.bodyText.setText([...head, ellipsis, ...tail].join('\n'));
+    const ellipsis = `${pad}${' '.repeat(gutter.width + markerIndent)}${theme.fg('muted', `… (${skipped} more)`)}`;
+    this.bodyText.setText(
+      [diffBody ? pad : undefined, ...head, ellipsis, ...tail, diffBody ? pad : undefined]
+        .filter((row) => row !== undefined)
+        .join('\n'),
+    );
   }
 
   /**
-   * 组一展开就画短 diff（这一行此时仍是 compact）。双击后放到更长的上限。
-   * write 的行全是新增，先标明这是写入内容，不是相对旧文件的差异。
+   * 画 write/edit 的文件差异。调用方已保证该画：独立调用（非组内）常驻预览长度，
+   * 组内成员只在双击展开后进来，放到更长的上限。
    */
   private paintChange(change: FileChange, width: number): string {
     const pad = detailRailPad();
-    const inner = Math.max(1, width - TOOL_DETAIL_INDENT);
+    const gutter = lineNumberGutter(changeLineNumbers(change));
+    const inner = Math.max(1, width - TOOL_DETAIL_INDENT - gutter.width);
     const limit = this.expanded || this.fullDetail ? DIFF_EXPANDED_LINES : DIFF_PREVIEW_LINES;
-    const out: string[] = [];
-    const push = (plain: string, color: ThemeColor): void => {
-      for (const wrapped of wrapTextWithAnsi(plain, inner)) out.push(pad + theme.fg(color, wrapped));
-    };
-    if (change.writtenContent) push('written content', 'muted');
+    const lang = languageForPath(change.path ?? '');
+    const rows: DiffBodyRow[] = [];
     const shown = change.lines.slice(0, limit);
-    for (const line of shown) {
-      const prefix = line.kind === 'add' ? '+ ' : line.kind === 'del' ? '- ' : '  ';
-      const color: ThemeColor = line.kind === 'add' ? 'success' : line.kind === 'del' ? 'error' : 'muted';
-      push(prefix + line.text, color);
-    }
+    shown.forEach((line, index) => rows.push(...diffBodyRows(line.text, line.kind, index, gutter, inner, lang)));
+    // `… N more` 是块尾说明行：不带号（index = -1），也不带底色。
     const rest = change.lines.length - shown.length;
-    if (rest > 0) push(`… ${rest} more`, 'muted');
-    return out.join('\n');
+    if (rest > 0) rows.push(...diffBodyRows(`… ${rest} more`, 'meta', -1, gutter, inner));
+    // 块首块尾各留一个空行：diff 与上方标题、下方内容都隔开。空行带竖轨（pad），轨才不断。
+    return [
+      pad,
+      ...rows.map(({ text, paint, lead, prePainted }) => `${pad}${lead}${paintedBody(text, paint, inner, prePainted)}`),
+      pad,
+    ].join('\n');
   }
 
   override render(width: number): string[] {

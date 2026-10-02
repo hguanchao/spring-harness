@@ -105,8 +105,13 @@ class McpPluginService {
   }
 }
 
-/** 插件入口。宿主按 `plugins/sph-mcp/` 目录装载，插件名取目录名。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。宿主按 `plugins/sph-mcp/` 目录装载，插件名取目录名。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   const hub = new McpHub(api.host);
   const service = new McpPluginService(hub, api.host);
 
@@ -116,3 +121,8 @@ export default function setup(api: PluginApi): void {
     service.dispose();
   });
 }
+
+export default {
+  description: 'MCP servers as tools: discovery, lifecycle, config and the mcp tool.',
+  setup,
+};

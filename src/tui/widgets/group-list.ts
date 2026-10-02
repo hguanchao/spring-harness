@@ -9,20 +9,30 @@
  * 注脚，往 SelectList 上叠这些分支会同时改到编辑器补全菜单、内联菜单与浮层选择弹窗，而它是
  * 三套宿主里最不该动的那一个。这里是**新建共用件**：将来另两个宿主改用本组件，改的是宿主。
  *
- * 折叠字形用 `▸` / `▾`，与转录区工具组的开合同一套。同一个屏幕上不该有两种"开合"的表达。
+ * 字形槽只说**开合**（`›` 关着 / `✦` 开着，见 {@link FOLD_MARK}）：组头、条目各按自己的开合画。
+ * 光标在哪不进字形槽——它由整行底色说。两件事各占一个信道，才不会有「字形到底是光标还是开合」
+ * 的含糊（条目开合与光标解耦之后，同一个字形在相邻两行里表示两回事，那是读不出来的）。
  */
 
+import { DoubleClickTracker } from '@/tui/screen/double-click.js';
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@/tui/screen/tui.js';
 import { applyBackgroundToLine, truncateToWidth, visibleWidth } from '@/tui/text/utils.js';
 
-/** 折叠字形。收起指右、展开指下，与工具组的箭头同一套语汇。 */
-export const FOLD_MARK = { collapsed: '▸', expanded: '▾' } as const;
+/**
+ * 开合字形：关着 `›`、开着 `✦`。组头的开合、条目的明细开合、转录区工具组的开合共用这一对——
+ * 「这组开着」和「这条明细开着」是同一句话：这一行开着。宽度都是 1 列（Neutral），
+ * 字形槽固定 2 列，对齐与折行算式不受影响。
+ */
+export const FOLD_MARK = { collapsed: '›', expanded: '✦' } as const;
 
-/** 每层缩进的列数。 */
-const INDENT = 2;
+/** 每层缩进的列数。导出给宿主：折行续行要按列算对齐，不能靠猜。 */
+export const GROUP_INDENT = 2;
 
-/** 折叠字形占的列数（字形 1 列 + 其后 1 个空格）。非分组行留同宽空槽，标签才会对齐。 */
-const GUTTER = 2;
+/** 折叠字形占的列数（字形 1 列 + 其后 1 个空格）。缩进过的非分组行留同宽空槽，标签才会对齐。 */
+export const GROUP_GUTTER = 2;
+
+const INDENT = GROUP_INDENT;
+const GUTTER = GROUP_GUTTER;
 
 export type GroupRowKind = 'group' | 'item' | 'note';
 
@@ -32,8 +42,22 @@ export interface GroupRow {
 	kind: GroupRowKind;
 	/** 缩进层数，每层 2 列。 */
 	indent?: number;
-	/** 分组头是否展开，决定画 `▸` 还是 `▾`；非分组行忽略。 */
+	/**
+	 * 正文前的额外列数（**不是**层数）。
+	 *
+	 * 折行的续行要跟上一行的正文**字段**取齐，而那个列宽不是一个 2 列的整数倍——它等于
+	 * 条目缩进 + 折叠字形空槽 + 标签宽 + 间隔。用层数表达不了，所以续行给绝对列数。
+	 */
+	textIndent?: number;
+	/** 这一行开着没开（组头=开合，条目=明细），决定画 `›` 还是 `✦`；其余行忽略。 */
 	expanded?: boolean;
+	/** 分组头是否可开合。false 时不画折叠字形——画一个点了没反应的控件比不画更糟。 */
+	foldable?: boolean;
+	/**
+	 * 条目展开后有没有内容（点开时挂出来的灰明细块）。false 时不画开合字形，理由与
+	 * {@link foldable} 同款：画一个「能展开」的字形却不给内容，展开的承诺就是空的。非条目行忽略。
+	 */
+	expandable?: boolean;
 	/** 主文本，**已上色**。列表按剩余宽度截断。 */
 	text: string;
 	/** 右对齐尾列，**已上色**；放不下时整列舍弃，不挤占主文本。 */
@@ -49,6 +73,13 @@ export interface GroupListTheme {
 	hoverBg: (text: string) => string;
 	/** 折叠字形着色。 */
 	fold: (text: string) => string;
+}
+
+/** 这一行的字形槽画不画开合字形：组头看能不能开合，条目看有没有明细，其余行不画。 */
+function openable(row: GroupRow): boolean {
+	if (row.kind === 'group') return row.foldable !== false;
+	if (row.kind === 'item') return row.expandable !== false;
+	return false;
 }
 
 /**
@@ -87,8 +118,25 @@ export class GroupList implements Component {
 	/** 悬停行只画预览底色，不动高亮——可视区跟着高亮走，跟悬停走会晕。 */
 	private hovered: number | undefined;
 	private maxVisible: number;
+	/**
+	 * 滚轮滚出来的视口位置（行）。`undefined` = 视口跟着高亮走（键盘语义）。
+	 *
+	 * 滚轮和键盘是两种意图：键盘是「选中下一条」（高亮动，视口跟着走，高亮居中）；滚轮是
+	 * 「往下看看」（视口必须先动，高亮只在被滚出可见区时才贴到边上）。从前两者都走「移动高亮」，
+	 * 而视口以高亮居中——于是滚 7 格面板纹丝不动、只有读数在变，第 8 格才猛滚一屏。
+	 */
+	private offset: number | undefined;
+	/** 双击识别：单击只移高亮，双击才激活（见 onActivate）。 */
+	// slopY 取 0：列表里 y 是离散的行号，相邻两行（各点一下）绝不能算双击——
+	// 工具行允许 1 行偏差是因为它判的是行内位置，这里判的是「哪一行」。
+	private readonly doubleClick = new DoubleClickTracker(500, 2, 0);
 
-	/** 确认（Enter）：宿主据此折叠/展开或什么都不做。 */
+	/**
+	 * 激活（**双击**一行，或键盘 Enter）：宿主据此折叠/展开或什么都不做。
+	 *
+	 * 单击只把高亮移过来——与工具行、工具组的展开手势同一套（点一下是「看着它」，
+	 * 点两下才是「打开它」）。Enter 必须留着：双击是鼠标专属，砍掉它键盘就没有开合的办法了。
+	 */
 	onActivate?: (row: GroupRow) => void;
 
 	constructor(rows: readonly GroupRow[], private readonly theme: GroupListTheme, maxVisible = 10) {
@@ -97,7 +145,11 @@ export class GroupList implements Component {
 		this.selected = nearestSelectable(rows, 0, 1, true, true) ?? 0;
 	}
 
-	/** 整表更换（切 tab、检索结果变化）。选中项会重新夹到最近的可选行上。 */
+	/**
+	 * 整表更换（切 tab、检索结果变化）。选中项会重新夹到最近的可选行上。
+	 *
+	 * 视口也交还给高亮：行表都换了，旧的滚动位置对不上新内容。
+	 */
 	setRows(rows: readonly GroupRow[]): void {
 		const anchor = this.selectedRow();
 		this.rows = rows;
@@ -105,6 +157,7 @@ export class GroupList implements Component {
 		const from = kept !== undefined && kept >= 0 ? kept : Math.min(this.selected, rows.length - 1);
 		this.selected = nearestSelectable(rows, Math.max(0, from), 1, true, true) ?? 0;
 		this.hovered = undefined;
+		this.offset = undefined;
 	}
 
 	setMaxVisible(maxVisible: number): void {
@@ -125,50 +178,83 @@ export class GroupList implements Component {
 
 	setSelectedIndex(index: number): void {
 		this.selected = Math.max(0, Math.min(index, this.rows.length - 1));
+		this.offset = undefined;
 	}
 
 	/**
 	 * 移动高亮。
 	 *
-	 * 键盘**回卷**（到底再往下回到开头），滚轮不回卷——滚到边界就停，滚过头会带着可视区
-	 * 一起翻页。两处手感不同是有意的。
+	 * **不回卷**：撞到边界就停。回卷有两个毛病——列表短的时候（分组缺省收起后常常只有几行）
+	 * 一按就绕回去，「我在第几位」的锚点没了；而且它只作用于键盘，跟滚轮、翻页的手感不一致，
+	 * 同一个列表两套边界行为。要回卷的宿主在调用前自己夹住即可，不必做成开关。
 	 */
-	move(delta: 1 | -1, wrap: boolean): boolean {
-		const next = nearestSelectable(this.rows, this.selected, delta, wrap);
+	move(delta: 1 | -1): boolean {
+		const next = nearestSelectable(this.rows, this.selected, delta, false);
 		if (next === undefined || next === this.selected) return false;
 		this.selected = next;
 		this.hovered = undefined;
+		// 视口已被滚轮接管时切换成「最小滚动」：高亮走到哪边就贴哪边。否则会为了重新居中
+		// 把整屏往回抽一下——滚轮刚滚下去的位置全白费。
+		if (this.offset !== undefined) this.scrollIntoView();
 		return true;
 	}
 
-	/** 翻页：朝方向连走 `|delta|` 步，撞到边界就停（不回卷——翻页越过边界会跳回开头，晕）。 */
+	/**
+	 * 滚轮：推视口，高亮只在被滚出可见区时才贴到边上。
+	 *
+	 * 一次滚几行由 `|lines|` 决定（方向看符号），宿主的 `wheelScrollLines` 配了几行就滚几行——
+	 * 从前这里被压成固定 1 行，配 3 行也照走 1 行。
+	 */
+	scrollBy(lines: number): boolean {
+		const maxStart = Math.max(0, this.rows.length - this.maxVisible);
+		const current = this.visibleRange().start;
+		const next = Math.max(0, Math.min(current + lines, maxStart));
+		if (next === current) return false;
+		this.offset = next;
+		this.followSelection();
+		return true;
+	}
+
+	/** 滚轮滚完，把掉出可见区的高亮拉到最近的边上；还在区内就不动——滚轮是「看」，不顺手改选中。 */
+	private followSelection(): void {
+		const { start, end } = this.visibleRange();
+		if (this.selected >= start && this.selected < end) return;
+		const above = this.selected < start;
+		const next = nearestSelectable(this.rows, above ? start : end - 1, above ? 1 : -1, false, true);
+		if (next !== undefined) this.selected = next;
+	}
+
+	/** 视口已由滚轮接管时：高亮走出可见区就最小滚动把它带回来（走到哪边贴哪边，不重排整屏）。 */
+	private scrollIntoView(): void {
+		const { start, end } = this.visibleRange();
+		if (this.selected >= start && this.selected < end) return;
+		const maxStart = Math.max(0, this.rows.length - this.maxVisible);
+		const target = this.selected < start ? this.selected : this.selected - this.maxVisible + 1;
+		this.offset = Math.max(0, Math.min(target, maxStart));
+	}
+
+	/** 翻页：朝方向连走 `|delta|` 步，撞到边界就停。 */
 	page(delta: number): boolean {
 		const step: 1 | -1 = delta >= 0 ? 1 : -1;
 		let moved = false;
 		for (let count = 0; count < Math.abs(delta); count++) {
-			if (!this.move(step, false)) break;
+			if (!this.move(step)) break;
 			moved = true;
 		}
 		return moved;
 	}
 
-	/** 跳到第一个/最后一个可选行。 */
+	/** 跳到第一个/最后一个可选行。显式跳转要把视口交还给高亮，否则滚轮用过之后会跳出行外。 */
 	selectFirst(): void {
 		this.selected = nearestSelectable(this.rows, 0, 1, true, true) ?? 0;
 		this.hovered = undefined;
+		this.offset = undefined;
 	}
 
 	selectLast(): void {
 		this.selected = nearestSelectable(this.rows, this.rows.length - 1, -1, true, true) ?? 0;
 		this.hovered = undefined;
-	}
-
-	/** 底边框右侧的位置读数（`3/12`）；没溢出时为空串。 */
-	getScrollInfo(): string {
-		if (this.rows.length <= this.maxVisible) return '';
-		const ordinal = this.rows.slice(0, this.selected + 1).filter((row) => row.disabled !== true).length;
-		const total = this.rows.filter((row) => row.disabled !== true).length;
-		return `${ordinal}/${total}`;
+		this.offset = undefined;
 	}
 
 	invalidate(): void {}
@@ -189,7 +275,7 @@ export class GroupList implements Component {
 		const { start, end } = this.visibleRange();
 
 		if (event.type === 'wheel' && event.wheelDelta) {
-			const moved = this.move(event.wheelDelta < 0 ? -1 : 1, false);
+			const moved = this.scrollBy(event.wheelDelta);
 			return { handled: true, render: moved };
 		}
 
@@ -209,24 +295,58 @@ export class GroupList implements Component {
 
 		const changed = this.selected !== index;
 		this.selected = index;
-		if (event.type === 'click') this.onActivate?.(row);
+		// 开合走双击：与工具行/工具组同一手势。`handled: true` 顺带保证这次 click 只到这里
+		// 一次——双击判定依赖这个（见 DoubleClickTracker）。
+		if (event.type === 'click' && this.doubleClick.accept(event.x, event.y)) this.onActivate?.(row);
 		return { handled: true, render: changed || event.type === 'click', focus: true };
 	}
 
-	/** 可见区间：高亮居中，贴边时夹住。 */
+	/**
+	 * 可见区间。
+	 *
+	 * 两种驱动各管一段：滚轮滚过之后由 `offset` 说了算（视口跟着滚轮走，高亮只在被滚出
+	 * 可见区时贴边）；否则由高亮说了算——高亮居中，贴边时夹住。
+	 *
+	 * 块末（选中行后面那些不可选行也是它的内容）**只兜底**：块比一屏还长、尾行落在窗口外时，
+	 * 才把窗口往下推到尾行贴底。让块末参与居中会把展开变成一次上跳——明细一挂出来，窗口就跟着
+	 * 块末走 k 行，屏幕上看就是「展开哪条，哪条跳到视口顶上」；收起时又落回中间，一来一回就是
+	 * 上下跳。兜底之后，常见展开（明细几行）屏幕一动不动，长明细的尾行也照样露得出来。
+	 */
 	private visibleRange(): { start: number; end: number } {
 		const total = this.rows.length;
-		const start = Math.max(0, Math.min(this.selected - Math.floor(this.maxVisible / 2), total - this.maxVisible));
+		const maxStart = Math.max(0, total - this.maxVisible);
+		if (this.offset !== undefined) {
+			const start = Math.max(0, Math.min(this.offset, maxStart));
+			return { start, end: Math.min(start + this.maxVisible, total) };
+		}
+		let anchor = this.selected;
+		while (anchor + 1 < total && this.rows[anchor + 1]?.disabled === true) anchor += 1;
+		// 块长 = 选中行 + 它后面那些不可选行（注脚、明细）。只有**整块比一屏还长**时才推窗口：
+		// 那种块怎么摆都看不全，至少让尾行贴底；装得下的块一律不动视口。
+		const blockRows = anchor - this.selected + 1;
+		const centered = Math.max(0, Math.min(this.selected - Math.floor(this.maxVisible / 2), maxStart));
+		const start =
+			blockRows > this.maxVisible
+				? Math.max(centered, Math.min(anchor - this.maxVisible + 1, maxStart))
+				: centered;
 		return { start, end: Math.min(start + this.maxVisible, total) };
 	}
 
 	private renderRow(row: GroupRow, width: number, selected: boolean, hovered: boolean): string {
-		const pad = ' '.repeat((row.indent ?? 0) * INDENT);
+		const depth = row.indent ?? 0;
+		const pad = ' '.repeat(depth * INDENT);
+		// 字形槽（2 列）：能开合的行（可开合的组头、有明细的条目）画 `›`/`✦`，其余留空——
+		// 不可开合的组头、没有明细的条目在字形这一档无话可说，画了就是空承诺；注脚与折行续行
+		// 留空是为了文字不掉出正文列。缩进为 0 的说明行（caption、散文块）不隶属任何条目、不垫：
+		// 它跟组头的字形取齐。
+		const fold = row.expanded === true ? FOLD_MARK.expanded : FOLD_MARK.collapsed;
 		const gutter =
-			row.kind === 'group'
-				? `${this.theme.fold(row.expanded === true ? FOLD_MARK.expanded : FOLD_MARK.collapsed)} `
-				: ' '.repeat(GUTTER);
-		const prefix = pad + gutter;
+			row.kind === 'note' && depth === 0
+				? ''
+				: openable(row)
+					? `${this.theme.fold(fold)} `
+					: ' '.repeat(GUTTER);
+		const prefix = pad + gutter + ' '.repeat(row.textIndent ?? 0);
 
 		const trailing = row.trailing === undefined || row.trailing === '' ? undefined : row.trailing;
 		const trailingWidth = trailing === undefined ? 0 : visibleWidth(trailing);

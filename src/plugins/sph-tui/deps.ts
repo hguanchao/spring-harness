@@ -79,7 +79,7 @@ export interface TuiDeps {
   /** `[ui] notify_after_seconds`：焦点在终端时至少等多久才提醒；0 = 完成就提醒。 */
   notifyAfterSeconds?: number;
   /**
-   * 写系统剪贴板的通路（选区复制与 `/copy` 共用）。
+   * 写系统剪贴板的通路（右键复制用）。
    *
    * 省略用平台工具那条真实路径。做成可注入：测试驱动整条链路时不该去动开发机的剪贴板。
    */

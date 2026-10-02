@@ -18,6 +18,7 @@
 import {
   BLOCK_GAP,
   Container,
+  DoubleClickTracker,
   SELECTION_BLOCK,
   Markdown,
   type MarkdownTheme,
@@ -33,11 +34,11 @@ import {
 } from '@/tui/index.js';
 import { formatDuration } from '@/util.js';
 import { theme, type ThemeColor } from '@/plugins/sph-tui/theme/theme.js';
-import { DoubleClickTracker } from '@/plugins/sph-tui/interaction/index.js';
 import { armHoverHighlight } from '@/plugins/sph-tui/interaction/hover-highlight.js';
 import { rowChromeBg, selectTranscriptRow } from '@/plugins/sph-tui/interaction/row-selection.js';
 import { asSelectableRow, handleSelectablePress } from '@/plugins/sph-tui/interaction/selectable-row.js';
 import {
+  THOUGHT_MARK,
   TOOL_GROUP_INDENT,
   TOOL_MARK,
   TOOL_MEMBER_INDENT,
@@ -46,6 +47,18 @@ import {
 
 /** 扫光心跳周期：与状态行 Loader / 子代理行的转圈帧同拍（80ms）。 */
 const SHIMMER_TICK_MS = 80;
+
+/**
+ * 流式正文重解析的最短间隔。
+ *
+ * 思考正文每帧都在长，而重解析是 **O(全文)**（实测 8K 字 6.6ms、32K 字 64ms、
+ * 82K 字 178ms）。不节流的话，一条长思考展开着就把每帧成本顶到百毫秒级——帧率掉到个位数，
+ * 观感就是「滚不动、像卡死」（`Markdown.setText` 的注释里有同一组数字）。
+ *
+ * 真正的间隔按**上一帧实测耗时 ×3** 自适应放大（见 updateThinking / render），所以长度再涨也只吃
+ * 有界的那部分 CPU（约 1/3），不会一路涨到占满。收尾那一帧不节流：权威全文一定落上去。
+ */
+const STREAM_BODY_MIN_MS = 120;
 
 /** 汇总行用的动词/名词词表。 */
 type VerbKind =
@@ -158,6 +171,9 @@ class ThinkingMember {
   expanded = false;
   /** 正文当前挂的缩进。标题档位变了（纯思考组 / 有汇总行）要重建，Markdown 的 paddingX 建后不可变。 */
   bodyIndent = -1;
+  /** 正文上次重解析的时刻与实测帧耗时：流式期间的节流依据，见 updateThinking。 */
+  bodyRefreshedAt = 0;
+  bodyRefreshCost = 0;
   readonly row = new Text('', 0, 0);
   readonly body = new Container();
   /**
@@ -476,11 +492,11 @@ export class ToolGroupComponent extends VStack {
 
   /**
    * 汇总行：字形颜色与行文同一套——有失败→错误色，否则随文字 toolTitle 灰。
-   * 箭头表达组开合（`▸`/`▾`）。汇总行和它下面的成员行是同一个视觉块，
+   * 字形表达组开合（`›`/`✦`）。汇总行和它下面的成员行是同一个视觉块，
    * 两边配色不一致会让「跑完」看起来像换了半屏颜色。
    */
   private updateHeader(summary: GroupSummary, width: number): void {
-    // 箭头只表达「可展开/已展开」，颜色跟汇总行文字（toolTitle）走；失败仍整行用 error 后缀示警。
+    // 字形只表达「可展开/已展开」，颜色跟汇总行文字（toolTitle）走；失败仍整行用 error 后缀示警。
     const mark = summary.failed > 0 ? TOOL_MARK.fail : this.expanded ? TOOL_MARK.expanded : TOOL_MARK.done;
     const glyphColor: ThemeColor = summary.failed > 0 ? 'error' : 'toolTitle';
     // 超宽时截断而不是折行：汇总行是「一行读一段」，折出来的续行没有字形前缀，读起来像另一条。
@@ -497,13 +513,14 @@ export class ToolGroupComponent extends VStack {
   /** 重算一段思考的行文案；正文只在它自己展开时挂上。 */
   private updateThinking(member: ThinkingMember): void {
     // 收尾文案：`Thinking…`（进行中）→ `Thought for 1.2s`（已完成）。空链不占行。
-    // 前缀用 ✲，不用 ▸：斜体和箭头都会让思考行读成又一条工具。
+    // 前缀用 ✧（进行中）/ ✦（收尾），不用 ›：› 是工具行的字形（无论进行中还是完成），
+    // 思考行借它就会读成又一条工具；✦ 是共用的「有结果了」，两处同形不同事但不会认混。
     const head = member.running ? 'Thinking…' : member.durationMs === undefined ? 'Thought' : 'Thought for';
     const tail = !member.running && member.durationMs !== undefined ? ` ${formatDuration(member.durationMs)}` : '';
     // 组里有汇总行时，思考标题缩进一级，避免和汇总行并排。
-    // 展开的正文和 Thought 这几个字同一列，不跟前面的 ✲ 对齐。
+    // 展开的正文和 Thought 这几个字同一列，不跟前面的 ✧/✦ 对齐。
     const rowIndent = this.tools.length > 0 ? TOOL_MEMBER_INDENT : TOOL_GROUP_INDENT;
-    const mark = '✲ ';
+    const mark = member.running ? `${THOUGHT_MARK.running} ` : `${THOUGHT_MARK.done} `;
     const textColumn = rowIndent + visibleWidth(mark);
     // 展开后只把「Thought for」提成正文色。耗时和详情仍是 muted。
     const painted = member.running
@@ -518,12 +535,23 @@ export class ToolGroupComponent extends VStack {
     if (!member.expanded || detail === '') return;
     if (member.markdown && member.bodyIndent !== textColumn) member.markdown = undefined;
     if (member.markdown) {
-      member.markdown.setText(detail);
+      // 流式期间节流正文重解析（见 STREAM_BODY_MIN_MS）：间隔取「上一帧实测耗时 ×3」，
+      // 于是这一项的 CPU 占用有上界（≈1/3），思考越长越不会把交互顶死。
+      // 收尾（running=false）不节流，最后一帧必定落到权威全文。
+      const now = Date.now();
+      const due = now - member.bodyRefreshedAt >= Math.max(STREAM_BODY_MIN_MS, member.bodyRefreshCost * 3);
+      if (!member.running || due) {
+        member.markdown.setText(detail);
+        member.bodyRefreshedAt = Date.now();
+        // 无条件登记：耗时只能由「上一次重解析那一帧」量出来，先有鸡才有蛋。
+        this.refreshedBodies.push(member);
+      }
     } else {
       member.markdown = new Markdown(detail, textColumn, 0, thinkingMarkdownTheme(), {
         color: (content: string) => theme.fg('muted', content),
       });
       member.bodyIndent = textColumn;
+      member.bodyRefreshedAt = Date.now();
     }
     member.body.addChild(member.markdown);
   }
@@ -571,8 +599,21 @@ export class ToolGroupComponent extends VStack {
       this.lastWidth = width;
       this.rebuild(width);
     }
-    return super.render(width);
+    const startedAt = performance.now();
+    const lines = super.render(width);
+    // 这一帧真有正文重解析过时，把整帧耗时记到它头上。下一次的间隔由它决定（见
+    // STREAM_BODY_MIN_MS）：正文越长这一帧越贵 → 间隔自动拉长 → 占空比有上界。
+    // 必须在 super.render 之后量：`setText` 只是作废缓存，真正的解析发生在渲染里。
+    if (this.refreshedBodies.length > 0) {
+      const cost = performance.now() - startedAt;
+      for (const member of this.refreshedBodies) member.bodyRefreshCost = cost;
+      this.refreshedBodies.length = 0;
+    }
+    return lines;
   }
+
+  /** 本帧重解析过正文的思考段；render 末尾把实测耗时回喂给它们。 */
+  private readonly refreshedBodies: ThinkingMember[] = [];
 
   private isLive(): boolean {
     if (this.tools.some((tool) => {

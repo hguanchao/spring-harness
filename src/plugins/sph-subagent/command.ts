@@ -39,7 +39,8 @@ function runAgentCommand(api: PluginApi, ctx: PluginCommandContext): void {
   }
   const events = ctx.services.get<SessionService>(SESSION_SERVICE)?.events;
   if (events) ctx.session.appendEvent('agent', events.agent(name));
-  ctx.notify(name === '' ? 'Agent cleared. This session uses every tool.' : `Agent is now ${name}. The next turn uses its tools and prompt.`, 'success');
+  // 切成功不出声：footer 的 agent 段当场就是答案（与 Shift+Tab 循环同一套处理）。
+  // 要说的三件事上面都说了——列可选、忙、名字不认识。
 }
 
 function currentAgentName(ctx: PluginCommandContext): string {

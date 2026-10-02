@@ -35,6 +35,11 @@ export interface LoadedPlugin {
   services: string[];
   /** 该插件注册的斜杠命令。 */
   commands: string[];
+  /**
+   * 一句话自述（`/plugins` 的明细里显示）。优先取模块自己声明的那句（对象形态的
+   * `description`），没有才退回清单里声明的（package.json 的 `sph.description`）。
+   */
+  description?: string;
   /** 该插件自己报的问题（api.warn）与宿主判定的问题（重名、setup 抛错）。 */
   warnings: string[];
 }
@@ -53,6 +58,8 @@ interface PluginRecord {
   commands: PluginCommand[];
   hooks: PluginHook[];
   listeners: AgentListener[];
+  /** 模块自己声明的自述（对象形态的 `description`）；清单里那句挂在 candidate 上。 */
+  description?: string;
   warnings: string[];
   disposers: Array<() => void>;
 }
@@ -124,6 +131,12 @@ export class PluginHost implements PluginServices {
       return;
     }
     if (isPluginObject(module)) {
+      // 自述先落地再 setup：setup 抛错的插件更该有一句说明，而那正是它最可能没写成的路径。
+      // 多入口的第一个非空自述胜出——同一个插件的第二条入口不该把第一条的话盖掉。
+      if (record.description === undefined) {
+        const declared = module.description;
+        if (typeof declared === 'string' && declared.trim() !== '') record.description = declared.trim();
+      }
       await module.setup(factory);
       return;
     }
@@ -269,6 +282,8 @@ export class PluginHost implements PluginServices {
         tools: record.tools.map((tool) => tool.name),
         services: [...record.services],
         commands: record.commands.map((command) => command.name),
+        // 模块自己写的那句优先于清单里那句：见 runSetup 上的说明。
+        description: record.description ?? record.candidate.description,
         warnings: [...record.warnings],
       })),
       failures: [...this.failures],

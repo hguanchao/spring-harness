@@ -81,9 +81,15 @@ export const searchReplaceTool: ToolSpec = {
       : text.slice(0, hit.first) + replacement + text.slice(hit.first + needle.length);
     writeFileSync(abs, next, 'utf8');
     ctx.observation?.noteWritten(abs);
+    // 命中行：替换发生在第几行（`hit.first` 是原文件里的字符下标）。报给模型是为了让它知道
+    // 改在哪；界面的 diff 行号也从这句里取（`matchLineFromResult`）——两处共用同一句话，
+    // 格式就是契约。replace_all 命中多处，只报条数不报行号。
+    const line = text.slice(0, hit.first).split('\n').length;
+    const count = replaceAll ? hit.count : 1;
+    const where = replaceAll ? '' : ` at line ${line}`;
     return {
       ok: true,
-      content: `updated ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${replaceAll ? hit.count : 1} replacement)`,
+      content: `updated ${toWorkspaceRelative(ctx.workspaceRoot, abs)} (${count} replacement${count === 1 ? '' : 's'}${where})`,
     };
   },
 };

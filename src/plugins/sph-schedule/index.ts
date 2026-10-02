@@ -11,7 +11,17 @@ const service: SchedulerService = {
   notificationText: jobNotificationText,
 };
 
-/** 插件入口。宿主按 `src/plugins/sph-schedule/` 装载。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。宿主按 `src/plugins/sph-schedule/` 装载。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   api.provide(SCHEDULER_SERVICE, service);
 }
+
+export default {
+  description: 'In-process background jobs, and the notice when one finishes.',
+  setup,
+};

@@ -277,7 +277,7 @@ export class TranscriptProjection {
     this.subagentOrdinal = 0;
   }
 
-  /** 整批展开/收起工具分组（⇧O 循环开关）：以「存在任一展开组」为状态翻转点。 */
+  /** 整批展开/收起工具分组（Ctrl+O 循环开关，见 app-keybindings）：以「存在任一展开组」为状态翻转点。 */
   toggleToolExpansion(): void {
     const expand = !this.toolGroups.some((group) => group.isExpanded());
     for (const group of this.toolGroups) group.setExpanded(expand, false);

@@ -1,9 +1,9 @@
 /**
  * 基于浮层的对话框：选择列表、文本输入、确认、只读长文本。
  *
- * 选择、输入、确认共用一个圆角外壳：浮层自动获得焦点，Esc 取消，Enter 确认，关闭即隐藏。
+ * 选择、输入、确认共用一个方角外壳：浮层自动获得焦点，Esc 取消，Enter 确认，关闭即隐藏。
  *
- * 高度：浮层只能整块渲染，超出的行由 overlay 从顶部裁掉——矮终端下会连圆角底边框和
+ * 高度：浮层只能整块渲染，超出的行由 overlay 从顶部裁掉——矮终端下会连底边框和
  * 页脚一起消失。所以每个弹窗都按 showOverlay 的 maxHeight 领取行预算，在自己的 render
  * 里把内容排进预算内（见 rowBudget / chromeRows），长文本另配滚动视口。
  */
@@ -21,6 +21,7 @@ import {
 	type OverlayHandle,
 	type SizeValue,
 	type TUI,
+	SPINNER_FRAMES,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from '@/tui/index.js';
@@ -54,9 +55,9 @@ export function fillDialogSurface(line: string, width: number, surface: string):
 	return `${out}\x1b[49m`;
 }
 
-const DEFAULT_HINT = '↑↓ select · Enter confirm · Esc cancel';
-const SCROLL_HINT = '↑↓ scroll · PgDn page';
-const SELECT_SCROLL_HINT = '↑↓ scroll · Tab select · Enter confirm · Esc cancel';
+const DEFAULT_HINT = '↑↓ move · Enter confirm · Esc cancel';
+const SCROLL_HINT = '↑↓ move · PgDn page';
+const SELECT_SCROLL_HINT = '↑↓ move · Tab select · Enter confirm · Esc cancel';
 /** 正文挤占列表行数时，列表至少要留下的可见行数。 */
 const LIST_RESERVE_ROWS = 3;
 
@@ -73,7 +74,7 @@ export function rowBudget(tui: TUI, maxHeight: SizeValue): number {
 const PAD_X = 2;
 
 /**
- * 弹窗的圆角边框盒:顶部边框嵌标题,内部竖排子组件,每行包上侧边框。
+ * 弹窗的方角边框盒:顶部边框嵌标题,内部竖排子组件,每行包上侧边框。
  * 边框仍是 borderMuted 灰；标题单独用主色加粗，避免标题和装饰混成一块灰。
  */
 class RoundedDialogBox extends Container {
@@ -145,6 +146,9 @@ class RoundedDialogBox extends Container {
 		});
 		// 透空档铺画布底（truecolor 下即 OSC 11 的 #141414，ansi 下是终端默认 49m），
 		// 空格仍盖住底下的页眉/转录；不打穿，否则标题栏空格会把「Skills」拆开。
+		// 底色两档是**有意**的：短时弹窗铺浮层面（dialogBg），从画布暗底上「浮起来」；
+		// 长驻的报告面板贴画布（bg，见 report/dialog.ts）——它是「看一整页」，不是浮窗。
+		// transparent 也给 bg：浮层里再嵌一层面板时，两层底不能各说各话。
 		const surface = theme.bgSeq(this.transparent ? 'bg' : 'dialogBg');
 		return boxed.map((row) => fillDialogSurface(row, width, surface));
 	}
@@ -289,7 +293,7 @@ class ScrollableTextBody extends DialogBody {
 /** 正文渲染方式。`plain` 原样保留文本——命令、路径这类内容过 Markdown 会被转义改写。 */
 export type DialogBodyFormat = 'markdown' | 'plain';
 
-/** 选择列表正文：把列表可见行数压进预算，矮终端下圆角边框与页脚依然完整。 */
+/** 选择列表正文：把列表可见行数压进预算，矮终端下边框与页脚依然完整。 */
 class SelectBody extends DialogBody {
 	/** 上一次渲染时列表在正文里的起始行与高度，鼠标事件按它换算坐标。 */
 	private listTop = 0;
@@ -466,7 +470,7 @@ class InputBody extends DialogBody {
 	}
 }
 
-/** 带标题与底边框状态文本的对话框外壳;外壳由圆角边框盒绘制。 */
+/** 带标题与底边框状态文本的对话框外壳;外壳由方角边框盒绘制。 */
 class DialogShell extends Container {
 	protected readonly box: RoundedDialogBox;
 	private bottomInfo: () => string = () => '';
@@ -628,7 +632,7 @@ function settleOnce<T>(handle: OverlayHandle, resolve: (value: T) => void): (val
  * 宽度分百分比与上限两部分：百分比让窄终端胜出，上限让宽终端不至于把弹窗拉成整屏
  * （终端 147 列时 72% 的 105 列收到 84 列），否则正文行长失控、标题与选项左右拉散。
  */
-export type DialogKind = 'confirm' | 'select' | 'input' | 'document';
+export type DialogKind = 'confirm' | 'select' | 'input' | 'document' | 'loading';
 
 const DIALOG_LAYOUTS: Record<DialogKind, { width: SizeValue; maxWidth: number; maxHeight: SizeValue }> = {
 	/** 是/否这类两三项：窄一点，别让一句话占满整屏。 */
@@ -639,6 +643,11 @@ const DIALOG_LAYOUTS: Record<DialogKind, { width: SizeValue; maxWidth: number; m
 	input: { width: '64%', maxWidth: 72, maxHeight: '30%' },
 	/** 只读长文本（/help、上报、diff）：高度优先，翻屏次数直接决定好不好用。 */
 	document: { width: '88%', maxWidth: 100, maxHeight: '88%' },
+	/**
+	 * 等待提示：一行转轮 + 一句话，窄档——它不是内容，只是一句「还在等」，
+	 * 不该占 select 档的 72%。以前这组值写在 showLoadingDialog 里，是唯一在档外手填的宽度。
+	 */
+	loading: { width: '54%', maxWidth: 54, maxHeight: '30%' },
 };
 
 export const APPROVAL_OVERLAY_PRIORITY = 100;
@@ -661,8 +670,9 @@ function overlayOptions(
 	maxWidth: number;
 	priority: number;
 	margin: number;
-	padX: number;
-} & ({ anchor: 'center'; row?: undefined } | { row: SizeValue; anchor?: undefined }) {
+		padX: number;
+		onOutsidePress?: () => void;
+	} & ({ anchor: 'center'; row?: undefined } | { row: SizeValue; anchor?: undefined }) {
 	const layout = DIALOG_LAYOUTS[kind];
 	const base = {
 		// width 原先是个死选项：签名里有、没往下传，调用方传了也不生效。
@@ -757,6 +767,8 @@ export function showSelectDialog(
 			termColumns?: boolean;
 			/** 初始焦点行；危险确认把它停在安全项上，Enter 连按不会误删。 */
 			initialIndex?: number;
+			/** 左键点在该浮层外时调用；浮层会拦截本次按下，避免穿透到下层面板。 */
+			onOutsidePress?: () => void;
 		},
 	): Promise<string | undefined> {
 		return new Promise((resolve) => {
@@ -784,10 +796,14 @@ export function showSelectDialog(
 				options.bodyText !== undefined,
 			);
 			const overlay = overlayOptions(kind, maxHeight, options.priority, options.width, maxWidth);
-		if (options.row !== undefined) overlay.row = options.row;
-		const handle = tui.showOverlay(dialog, overlay);
-		const finish = settleOnce(handle, resolve);
-		dialog.onSelect((item) => finish(item.value));
+			if (options.row !== undefined) overlay.row = options.row;
+			const handle = tui.showOverlay(dialog, overlay);
+			const finish = settleOnce(handle, resolve);
+			if (options.onOutsidePress !== undefined) overlay.onOutsidePress = () => {
+				options.onOutsidePress?.();
+				finish(undefined);
+			};
+			dialog.onSelect((item) => finish(item.value));
 		dialog.onCancel(() => finish(undefined));
 	});
 }
@@ -823,11 +839,19 @@ export function showInputDialog(
  * 确认对话框；返回是否确认。
  *
  * `danger: true` 是破坏性确认：确认项标红、焦点初始停在安全项上——Enter 连按不会误删，
- * 破坏性动作必须多按一次 ↓ 才够得着。后果句请由调用方用 `!!…!!` 标记上警示色。
+ * 破坏性动作必须多按一次 ↓ 才够得着。后果句由调用方自己上警示色：正文混色用颜色分段，不要发明字符串标记。
  */
 export async function showConfirmDialog(
 	tui: TUI,
-	options: { title: string; message: string; confirmLabel?: string; cancelLabel?: string; priority?: number; danger?: boolean },
+	options: {
+		title: string;
+		message: string;
+		confirmLabel?: string;
+		cancelLabel?: string;
+		priority?: number;
+		danger?: boolean;
+		onOutsidePress?: () => void;
+	},
 ): Promise<boolean> {
 	const danger = options.danger === true;
 	const items: SelectItem[] = danger
@@ -846,14 +870,14 @@ export async function showConfirmDialog(
 		maxVisible: 2,
 		kind: 'confirm',
 		priority: options.priority,
+		onOutsidePress: options.onOutsidePress,
 		initialIndex: 0,
 	});
 	return selected === 'confirm';
 }
 
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-/** 加载正文：转轮 + 文本 + 右对齐秒表。等待超过几秒时，「画面还在动」比任何文案都重要。 */
+/** 加载正文：转轮 + 文本。等待超过几秒时，「画面还在动」比任何文案都重要。
+ *  秒表读数不在这里——它挂在底边框右槽（见 LoadingDialog），与 select 的 `3/15` 同一个位置。 */
 class LoadingBody extends DialogBody {
 	private frame = 0;
 	private readonly startedAt = Date.now();
@@ -884,19 +908,19 @@ class LoadingBody extends DialogBody {
 
 	override footerText(): string {
 		// 旧版提示是空的，Esc 能关却看不见；这句是它第一次可见。
-		return 'Esc dismiss';
+		// 措辞与其余弹窗一致（`Esc close`）：`Esc dismiss` 曾是全项目唯一一处 dismiss。
+		return 'Esc close';
+	}
+
+	/** 秒表读数（`12s`）：由弹窗挂到底边框右槽，不再在正文里右对齐。 */
+	elapsedText(): string {
+		return `${Math.floor((Date.now() - this.startedAt) / 1000)}s`;
 	}
 
 	protected override renderContent(width: number): string[] {
-		const left = `${SPINNER_FRAMES[this.frame]!} ${this.text}`;
-		const elapsed = `${Math.floor((Date.now() - this.startedAt) / 1000)}s`;
-		const lines = wrapTextWithAnsi(left, Math.max(1, width - visibleWidth(elapsed) - 4));
-		const first = lines[0] ?? '';
-		const pad = ' '.repeat(Math.max(1, width - visibleWidth(first) - visibleWidth(elapsed) - 2));
-		return [
-			theme.fg('mdText', `${first}${pad}${theme.fg('dim', elapsed)}`),
-			...lines.slice(1).map((line) => theme.fg('mdText', line)),
-		];
+		return wrapTextWithAnsi(`${SPINNER_FRAMES[this.frame]!} ${this.text}`, width).map((line) =>
+			theme.fg('mdText', line),
+		);
 	}
 }
 
@@ -907,6 +931,8 @@ class LoadingDialog extends DialogShell {
 		super(title, budget);
 		this.body = new LoadingBody(text, budget, onTick);
 		this.addBody(this.body);
+		// 读数只有一个去处：底边框右槽（与 select 的位置读数、菜单的 `1/21` 同槽）。
+		this.setBottomInfo(() => this.body.elapsedText());
 	}
 
 	/** 停表；closeHandler 与 handle.hide 两条收尾路都会调它。 */
@@ -923,19 +949,18 @@ class LoadingDialog extends DialogShell {
 /**
  * 加载中弹窗：无交互正文，调用方完成后自行 handle.hide() 收掉。
  *
- * 转轮 + 秒表走字，Esc / Enter 提前关（提示写在底边框上）。宽度独立成 ~54 列的窄档——
- * 一句话的等待不该占 select 档的 72%。
+ * 转轮 + 秒表走字，Esc / Enter 提前关（提示写在底边框左槽、读数在右槽）。宽度走 `loading` 档：
+ * 一句话的等待不该占 select 档的 72%（这组值原先写在函数里，是唯一在档外手填的宽度）。
  */
 export function showLoadingDialog(
 	tui: TUI,
 	options: { title: string; text: string; width?: SizeValue; priority?: number },
 ): OverlayHandle {
-	const maxHeight: SizeValue = '30%';
-	const width: SizeValue = options.width ?? '54%';
+	const maxHeight: SizeValue = DIALOG_LAYOUTS.loading.maxHeight;
 	const dialog = new LoadingDialog(options.title, options.text, () => rowBudget(tui, maxHeight), () =>
 		tui.requestRender(),
 	);
-	const raw = tui.showOverlay(dialog, overlayOptions('select', maxHeight, options.priority, width, 54));
+	const raw = tui.showOverlay(dialog, overlayOptions('loading', maxHeight, options.priority, options.width));
 	// 收弹窗的两条路都要停表：调用方 handle.hide()，或用户提前 Esc。
 	dialog.setCloseHandler(() => dialog.stop());
 	const handle: OverlayHandle = {

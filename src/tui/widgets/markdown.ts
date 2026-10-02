@@ -1,7 +1,7 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
 import { getCapabilities, hyperlink } from "@/tui/terminal/terminal-image.js";
 import type { Component } from "@/tui/screen/tui.js";
-import { applyBackgroundToLine, ruleHeadingLine, visibleWidth, wrapTextWithAnsi } from "@/tui/text/utils.js";
+import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "@/tui/text/utils.js";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -48,10 +48,6 @@ function padVisible(text: string, width: number): string {
 	return `${text}${" ".repeat(Math.max(0, width - visibleWidth(text)))}`;
 }
 
-/**
- * h3 及以上画成「─ 标题 ───…」横线，线条铺满内容宽（字形见 ruleHeadingLine）。
- * 源码仍写 `### Skills 5`；井号前缀不进画面。
- */
 function trimPartialClosingFences(tokens: readonly Token[]): void {
 	const token = tokens[tokens.length - 1];
 	if (token?.type === "list") {
@@ -80,90 +76,6 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
-});
-
-/**
- * `{{次要信息}}` 内联标记：来源、根目录这类需要弱化的内容，主题画成蓝色（行内码同一档）。
- * 生成器负责不把 `}{` 放进内容；内容里真有 `}}` 时不匹配，原样输出花括号，无害降级。
- */
-const SECONDARY_REGEX = /^\{\{([^{}\n]+)\}\}/;
-
-/**
- * `%%弱化信息%%` 内联标记：技能路径这类「要看得见、但不该抢话」的内容，主题画成中性灰。
- *
- * 与 `{{…}}` 同一路数：内容**逐字保留**，不再过 markdown 的行内规则，所以路径里的反引号、
- * 下划线、星号都不会被当成标记吃掉——拿斜体承载路径恰好栽在这些字符上（`_a_` 会连下划线
- * 一起吞掉）。代价是内容不能含 `%`：不匹配时原样输出标记本身，无害降级。
- */
-const MUTED_REGEX = /^%%([^%\n]+)%%/;
-
-/**
- * `!!警示信息!!` 内联标记：确认框的后果句、报告里的 warning。主题画成 warning 橙。
- * 内容逐字保留、不过行内规则（与 `%%…%%` 同理）；内容不能含 `!`，不匹配时原样输出，无害降级。
- */
-const WARNING_REGEX = /^!!([^!\n]+)!!/;
-
-/**
- * `@@错误信息@@` 内联标记：加载失败的名字这类 error 级内容。主题画成 error 红。
- * 内容不能含 `@`，其余同上。
- */
-const ERROR_REGEX = /^@@([^@\n]+)@@/;
-
-markdownParser.use({
-	extensions: [
-		{
-			name: "secondary",
-			level: "inline",
-			start(src: string): number | undefined {
-				const index = src.indexOf("{{");
-				return index === -1 ? undefined : index;
-			},
-			tokenizer(src: string): Tokens.Generic | undefined {
-				const match = SECONDARY_REGEX.exec(src);
-				if (!match) return undefined;
-				return { type: "secondary", raw: match[0], text: match[1] };
-			},
-		},
-		{
-			name: "muted",
-			level: "inline",
-			start(src: string): number | undefined {
-				const index = src.indexOf("%%");
-				return index === -1 ? undefined : index;
-			},
-			tokenizer(src: string): Tokens.Generic | undefined {
-				const match = MUTED_REGEX.exec(src);
-				if (!match) return undefined;
-				return { type: "muted", raw: match[0], text: match[1] };
-			},
-		},
-		{
-			name: "warning",
-			level: "inline",
-			start(src: string): number | undefined {
-				const index = src.indexOf("!!");
-				return index === -1 ? undefined : index;
-			},
-			tokenizer(src: string): Tokens.Generic | undefined {
-				const match = WARNING_REGEX.exec(src);
-				if (!match) return undefined;
-				return { type: "warning", raw: match[0], text: match[1] };
-			},
-		},
-		{
-			name: "error",
-			level: "inline",
-			start(src: string): number | undefined {
-				const index = src.indexOf("@@");
-				return index === -1 ? undefined : index;
-			},
-			tokenizer(src: string): Tokens.Generic | undefined {
-				const match = ERROR_REGEX.exec(src);
-				if (!match) return undefined;
-				return { type: "error", raw: match[0], text: match[1] };
-			},
-		},
-	],
 });
 
 /**
@@ -207,17 +119,9 @@ export interface MarkdownTheme {
 	strong?: (text: string) => string;
 	/** 斜体着色；缺省回落到 italic。 */
 	emphasis?: (text: string) => string;
-	/** `{{次要信息}}`：来源、根目录这类要弱化的内容；缺省原样输出（含花括号）。 */
-	secondary?: (text: string) => string;
-	/** `%%弱化信息%%`：技能路径这类要退到背景里的内容；缺省原样输出（含百分号）。 */
-	muted?: (text: string) => string;
-	/** `!!警示信息!!`：后果句、warning；缺省原样输出（含叹号）。 */
-	warning?: (text: string) => string;
-	/** `@@错误信息@@`：加载失败的名字；缺省原样输出（含艾特）。 */
-	error?: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
-	/** 代码块每行的缩进，缺省两个空格。代码一律走 codeBlock，不再按语言上色。 */
+	/** 代码块每行的缩进，缺省两个空格。代码一律走 codeBlock，不按语言上色（含 diff 围栏）。 */
 	codeBlockIndent?: string;
 }
 
@@ -282,7 +186,17 @@ export class Markdown implements Component {
 		this.options = options ? { ...options } : {};
 	}
 
+	/**
+	 * 换文本。**文本没变就是空操作**——这一点是性能前提，不是小优化。
+	 *
+	 * 解析+排版很贵，而且随长度线性涨：实测 4K 字 2.7ms、16K 字 8.5ms、49K 字 69ms、
+	 * 82K 字 111ms，而缓存命中是 0ms。宿主经常会用「同值」来刷新（流式累积值的重放、
+	 * 活得久的分组每帧重建），一律作废缓存就等于每帧把全文重解析一遍——一条 49K 字的
+	 * 思考链展开着，光这一项就能把帧率压到 6fps，看上去像卡死。
+	 * 真需要强制重解析（换主题色之类）走 {@link invalidate}。
+	 */
 	setText(text: string): void {
+		if (text === this.text) return;
 		this.text = text;
 		this.invalidate();
 	}
@@ -455,18 +369,15 @@ export class Markdown implements Component {
 			case "heading": {
 				const headingLevel = token.depth;
 				const headingStyleFn = (text: string) => this.theme.heading(text, headingLevel);
-
-				if (headingLevel >= 3) {
-					const label = token.text.replace(/\s+/g, " ").trim();
-					lines.push(ruleHeadingLine(label, width, headingStyleFn));
-				} else {
-					// h1/h2 保留行内样式；内联码在标题色里复原，不落到默认正文色。
-					const headingStyleContext: InlineStyleContext = {
-						applyText: headingStyleFn,
-						stylePrefix: this.getStylePrefix(headingStyleFn),
-					};
-					lines.push(this.renderInlineTokens(token.tokens || [], headingStyleContext));
-				}
+				// 井号照写（`### 技术栈与构建`），标题只换颜色：正文是模型写的，骨架也该是它的。
+				// 曾经把 h3 及以上画成铺满整行的规则线，那等于替模型重排结构；那条规则线如今只
+				// 留给选择列表的分组标题（`ruleHeadingLine`）。
+				const headingStyleContext: InlineStyleContext = {
+					applyText: headingStyleFn,
+					stylePrefix: this.getStylePrefix(headingStyleFn),
+				};
+				const prefix = headingStyleFn(`${"#".repeat(headingLevel)} `);
+				lines.push(prefix + this.renderInlineTokens(token.tokens || [], headingStyleContext));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
 				}
@@ -635,30 +546,6 @@ export class Markdown implements Component {
 				case "codespan":
 					result += (resolvedStyleContext.codeStyle ?? this.theme.code)(token.text) + stylePrefix;
 					break;
-
-				case "secondary": {
-					// `{{…}}`：次要信息。主题没定义时原样输出（含花括号），不让内容凭空消失。
-					result += (this.theme.secondary ?? (() => token.raw))(token.text) + stylePrefix;
-					break;
-				}
-
-				case "muted": {
-					// `%%…%%`：弱化信息（技能路径）。同上，主题缺席时原样输出，含标记。
-					result += (this.theme.muted ?? (() => token.raw))(token.text) + stylePrefix;
-					break;
-				}
-
-				case "warning": {
-					// `!!…!!`：警示信息（后果句、warning）。主题缺席时原样输出，含标记。
-					result += (this.theme.warning ?? (() => token.raw))(token.text) + stylePrefix;
-					break;
-				}
-
-				case "error": {
-					// `@@…@@`：错误信息（加载失败的名字）。同上。
-					result += (this.theme.error ?? (() => token.raw))(token.text) + stylePrefix;
-					break;
-				}
 
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);

@@ -102,12 +102,12 @@ export function spawnAsUser(
 }
 
 /**
- * 把管道里当前可读的数据全部追加到 chunks。
+ * 把管道里当前可读的数据全部追加到 chunks（原始字节，解码统一走 decodeConsoleOutput）。
  *
  * 必须与等待进程退出交替调用：子进程 stdout 写满管道缓冲区后会阻塞在 write，
  * 若父进程只在 wait 上死等，双方互锁到超时为止（见 backend.run）。
  */
-export function drainHandle(handle: Handle, chunks: string[]): void {
+export function drainHandle(handle: Handle, chunks: Buffer[]): void {
   for (;;) {
     const avail: [number] = [0];
     if (api.peekNamedPipe(handle, null, 0, null, avail, null) === 0) break;
@@ -116,7 +116,24 @@ export function drainHandle(handle: Handle, chunks: string[]): void {
     const read: [number] = [0];
     if (api.readFile(handle, buf, buf.length, read, null) === 0) break;
     if (read[0] === 0) break;
-    chunks.push(buf.subarray(0, read[0]).toString('utf8'));
+    chunks.push(buf.subarray(0, read[0]));
+  }
+}
+
+/**
+ * 控制台输出解码：整段先按 UTF-8 严格解——逐块 `toString('utf8')` 会把跨块的多字节
+ * 字符拆成 U+FFFD，严格解失败再按 GBK 兜底（中文 Windows 的控制台工具如 javac 按
+ * 系统码页输出，硬按 UTF-8 解只会得到一串替换符）。GBK 也不认就退回宽松 UTF-8。
+ */
+export function decodeConsoleOutput(buf: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    try {
+      return new TextDecoder('gbk').decode(buf);
+    } catch {
+      return buf.toString('utf8');
+    }
   }
 }
 

@@ -99,6 +99,21 @@ export function resolveChildTools(registry: ToolRegistry, declared: readonly str
 /** 预算用掉多少就打一条 warn：留出「收尾并交付已有成果」的余地。 */
 const BUDGET_WARN_RATIO = 0.8;
 
+/**
+ * 「流被掐断 → 交回半截 → 循环续写」的连续次数上限，只数**没有进展**的那些。
+ *
+ * 这条路是给瞬时断流准备的（见 stream-client：半截思考已经上屏，续写比重流一遍好），
+ * 所以它本身是对的。问题是它对**稳定掐断**的网关没有上限：实测一轮里网关连着两次在长思考
+ * 中途断流，每次 6 分钟、吐回 40K 字思考、正文与工具调用都为空，循环就一路续写下去
+ * ——用户看到的是「一直 Thinking…、滚动也卡」，而会话文件里只有两个 assistant 行，
+ * 中间是几十分钟、没有任何解释的时间空洞。根会话的 `turnLimit` 是 undefined（见下），
+ * 所以这条路上没有任何别的东西兜底。
+ *
+ * 判据是「进展」而不是「次数」：只要这一步吐了正文或工具调用，就说明续写有效，计数归零。
+ * 3 次是给网关的抖动留的余量——真断流一次之后通常接得上。
+ */
+const MAX_UNFINISHED_RUNS = 3;
+
 /** 路径型工具这次调用的目标路径原文。 */
 function pathDetail(args: Record<string, unknown>): string {
   return typeof args[PATH_ARG] === 'string' ? args[PATH_ARG] : '';
@@ -760,6 +775,8 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
   // 子会话没配时用默认步数，避免一轮探查一直跑到自己停。
   const turnLimit = depth > 0 ? subagentTurnLimit(options.maxTurns) : undefined;
   let windDownSent = false;
+  // 「没有 finish 原因、又没有工具调用」的连续次数。有进展归零，见 MAX_UNFINISHED_RUNS。
+  let unfinishedRuns = 0;
   for (let step = 0; turnLimit === undefined || step < turnLimit; step++) {
     if (options.signal?.aborted) throw new Error('aborted');
     assertBudget();
@@ -1034,8 +1051,34 @@ export async function runTurn(options: RunTurnOptions): Promise<void> {
       const stopped = finish !== undefined && !toolFinish && finish !== 'unknown';
       if (!stopped) {
         // 没有明确 finish 且没有工具，不当成成功空消息。有半截才落盘再续。
+        // 走到这里必无工具调用（上面刚判过），所以「进展」只可能是正文。
+        const progressed = (reply.text ?? '').trim() !== '';
+        unfinishedRuns = progressed ? 0 : unfinishedRuns + 1;
         if (reply.text || reply.thinking || reply.reasoning?.length) {
           appendMessage({ role: 'assistant', content: reply.text ?? '', ...reasoning, ...thinkingReplay });
+        }
+        // 落盘：这条路原先什么都不留，JSONL 里只剩一段几十分钟的时间空洞
+        // ——和 transport 重试要落 stream_retry 是同一个理由（长思考被网关掐断时尤其明显）。
+        active.appendEvent('stream_unfinished', {
+          attempt: unfinishedRuns,
+          finishReason: finish ?? null,
+          textChars: (reply.text ?? '').length,
+          thinkingChars: (reply.thinking ?? '').length,
+          text: `Stream ended without a finish reason (${finish ?? 'none'}) — continuing the turn.`,
+        });
+        if (unfinishedRuns > MAX_UNFINISHED_RUNS) {
+          // 网关稳定掐断时续写是无底洞：每跳几分钟、每次吐回几十 K 字思考、正文始终为空。
+          // 与其静默地一轮烧下去，不如收尾并把原因写进转录（用户能据此换模型或先 /compact）。
+          options.listener?.({
+            type: 'error',
+            text:
+              `Stream ended without a finish reason ${unfinishedRuns} times in a row, with no text and no tool calls` +
+              ` — stopping the turn. The gateway keeps cutting the reply short; try another model, or /compact first.`,
+          });
+          active.appendEvent('turn_end', { depth, finishReason: 'unfinished' });
+          await runTurnEnd('unfinished');
+          options.listener?.({ type: 'done' });
+          return;
         }
         options.listener?.({
           type: 'status',

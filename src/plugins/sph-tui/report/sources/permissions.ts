@@ -15,7 +15,8 @@ export interface PermissionsTabInput {
 	sandboxMode: string;
 	sandboxAutoAllow: boolean;
 	layers: RuleLayers;
-	userSourceDir: string;
+	/** 用户级配置文件的落点（用户级规则写在这里）。 */
+	userConfigPath: string;
 	projectPath: string;
 	projectAllowDropped: boolean;
 	approved: readonly string[];
@@ -46,50 +47,52 @@ export function permissionsTab(input: PermissionsTabInput): ReportTab {
 		},
 	});
 
-	if (compiled.length === 0) {
-		blocks.push({ kind: 'caption', text: 'No rules in either layer.' });
-	} else {
-		const items: ReportItem[] = compiled.map((entry, index): ReportItem => ({
-			key: `rule-${index + 1}`,
-			label: [{ text: `${index + 1}. ` }, { text: entry.action, tone: 'code' }, { text: ` — ${entry.raw}` }],
-			// 来源作右列：核对「这条写在哪个文件」是灰色的次要信息。
-			trailing: { text: entry.layerKey, tone: 'muted' },
-		}));
-		blocks.push({
-			kind: 'group',
-			group: { key: 'rules', label: 'Rules · evaluated in this order', countNoun: 'rules', collapsible: false, items },
-		});
-		if (input.projectAllowDropped) {
-			const dropped = compiled
-				.map((entry, index) => (entry.layerKey === 'project' && entry.action === 'allow' ? index + 1 : 0))
-				.filter((number) => number > 0);
-			if (dropped.length > 0) {
-				// 橙色：这是一条「你写的规则没生效」的诊断，不是普通说明。
-				blocks.push({
-					kind: 'caption',
-					text: {
-						text: `${dropped.map((number) => `#${number}`).join(', ')} ignored — this workspace is not trusted (deny / ask still apply).`,
-						tone: 'warn',
-					},
-				});
-			}
+	// 规则组常驻：没有规则时 `(0 rules)` 本身就是要回答的事——比一句游离的说明明确，
+	// 也与下面 `Approved actions (0 actions)` 同一个读法。
+	const rules: ReportItem[] = compiled.map((entry, index): ReportItem => ({
+		key: `rule-${index + 1}`,
+		label: [{ text: `${index + 1}. ` }, { text: entry.action, tone: 'code' }, { text: ` — ${entry.raw}` }],
+		// 来源作右列：核对「这条写在哪个文件」是灰色的次要信息。
+		trailing: { text: entry.layerKey, tone: 'muted' },
+	}));
+	blocks.push({
+		kind: 'group',
+		group: { key: 'rules', label: 'Rules · evaluated in this order', countNoun: 'rules', collapsible: false, items: rules },
+	});
+	if (input.projectAllowDropped) {
+		const dropped = compiled
+			.map((entry, index) => (entry.layerKey === 'project' && entry.action === 'allow' ? index + 1 : 0))
+			.filter((number) => number > 0);
+		if (dropped.length > 0) {
+			// 橙色：这是一条「你写的规则没生效」的诊断，不是普通说明。
+			blocks.push({
+				kind: 'caption',
+				text: {
+					text: `${dropped.map((number) => `#${number}`).join(', ')} ignored — this workspace is not trusted (deny / ask still apply).`,
+					tone: 'warn',
+				},
+			});
 		}
 	}
 
+	// 这个 tab 读哪些文件：三层同粒度都是**文件路径**（从前用户级给目录、项目级给文件，
+	// grants 还另占一句游离说明）。grants 不是规则层，但它是同一类事实——「东西存在哪」。
 	blocks.push({
 		kind: 'group',
 		group: {
-			key: 'layers',
-			label: 'Layers',
+			key: 'sources',
+			label: 'Sources',
 			collapsible: false,
+			// 键是行标签（正文色，与 Policy 那两行同一个画法），要照抄的是**取值**里的路径 → 蓝。
 			items: [
-				{ key: 'user', label: { text: 'user', tone: 'code' }, description: input.userSourceDir || '(none)' },
-				{ key: 'project', label: { text: 'project', tone: 'code' }, description: input.projectPath },
+				{ key: 'user', label: 'user', description: { text: input.userConfigPath || '(none)', tone: 'code' } },
+				{ key: 'project', label: 'project', description: { text: input.projectPath, tone: 'code' } },
+				{ key: 'grants', label: 'grants', description: { text: input.grantsPath, tone: 'code' } },
 			],
 		},
 	});
 
-	blocks.push({ kind: 'caption', text: `from ${input.grantsPath}` });
+
 	const approved = input.approved.slice(0, 20).map((key): ReportItem => ({ key, label: key }));
 	if (input.approved.length > 20) {
 		approved.push({ key: '::more', label: { text: `… ${input.approved.length - 20} more`, tone: 'muted' } });

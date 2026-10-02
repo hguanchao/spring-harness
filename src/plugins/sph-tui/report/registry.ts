@@ -18,6 +18,7 @@ import type { ReportTab } from './doc.js';
 import { skillsTab } from './sources/skills.js';
 import { pluginsTab } from './sources/plugins.js';
 import { permissionsTab, type PermissionsTabInput } from './sources/permissions.js';
+import { mcpTab, type McpsTabInput } from './sources/mcps.js';
 import { commandsTab, keysTab, type HelpTabsInput } from './sources/help.js';
 
 /** 建一块报告所需的环境。数据源只拿自己要的，不接触 TUI。 */
@@ -36,6 +37,8 @@ export interface ReportContext {
 	};
 	/** `/permissions` 落点：权限运行时的当下状态。切到该 tab 才取。 */
 	permissions?: () => PermissionsTabInput;
+	/** `/mcps` 落点：MCP 服务的当下状态（server 懒重连会改它）。切到该 tab 才取。 */
+	mcp?: () => McpsTabInput;
 	/** `/help` 落点：命令清单、别名与键位注册表。切到该 tab 才取。 */
 	help?: () => HelpTabsInput;
 }
@@ -63,7 +66,7 @@ function ensureScan(root: string): { catalog: ReturnType<typeof scanSkills>['cat
 	return lastScan;
 }
 
-/** 顺序即 tab 栏顺序：Skills / Plugins 是清单，Permissions 是安全面，Commands / Keys 是用法。 */
+/** 顺序即 tab 栏顺序：Skills / Plugins / MCP 是清单，Permissions 是安全面，Commands / Keys 是用法。 */
 export const REPORT_TABS: readonly ReportTabSpec[] = [
 	{
 		id: 'skills',
@@ -77,6 +80,11 @@ export const REPORT_TABS: readonly ReportTabSpec[] = [
 		id: 'plugins',
 		label: 'Plugins',
 		build: (context) => pluginsTab(required(context.plugins?.(), 'plugins')),
+	},
+	{
+		id: 'mcps',
+		label: 'MCP',
+		build: (context) => mcpTab(required(context.mcp?.(), 'mcps')),
 	},
 	{
 		id: 'permissions',

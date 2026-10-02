@@ -197,6 +197,12 @@ export interface OverlayMargin {
 /** Value that can be absolute (number) or percentage (string like "50%") */
 export type SizeValue = number | `${number}%`;
 
+/** 浮层宽度的每帧解析器：锚定「活的」界面件（如输入框）的浮层要跟着它变宽变窄。 */
+export type OverlayWidthResolver = (termWidth: number, termHeight: number) => SizeValue | undefined;
+
+/** 浮层边距的每帧解析器：贴着编辑器头顶悬停的盒子，底距得随输入框长高整体上移。 */
+export type OverlayMarginResolver = (termWidth: number, termHeight: number) => OverlayMargin | number;
+
 /** Parse a SizeValue into absolute value given a reference size */
 function parseSizeValue(value: SizeValue | undefined, referenceSize: number): number | undefined {
 	if (value === undefined) return undefined;
@@ -229,13 +235,32 @@ export function resolveOverlayWidth(
 }
 
 /**
+ * 解析浮层边距规格：数字 → 四边同值，函数 → 以当前终端尺寸求值。
+ * 各边夹到非负。抽成纯函数是为了可测——「每帧跟着别的组件动」的浮层全靠它。
+ */
+export function resolveOverlayMargin(
+	spec: OverlayMargin | number | OverlayMarginResolver | undefined,
+	termWidth: number,
+	termHeight: number,
+): Required<OverlayMargin> {
+	const resolved = typeof spec === "function" ? spec(termWidth, termHeight) : spec;
+	const margin = typeof resolved === "number" ? { top: resolved, right: resolved, bottom: resolved, left: resolved } : (resolved ?? {});
+	return {
+		top: Math.max(0, margin.top ?? 0),
+		right: Math.max(0, margin.right ?? 0),
+		bottom: Math.max(0, margin.bottom ?? 0),
+		left: Math.max(0, margin.left ?? 0),
+	};
+}
+
+/**
  * Options for overlay positioning and sizing.
  * Values can be absolute numbers or percentage strings (e.g., "50%").
  */
 export interface OverlayOptions {
 	// === Sizing ===
-	/** Width in columns, or percentage of terminal width (e.g., "50%") */
-	width?: SizeValue;
+	/** Width in columns, percentage of terminal width (e.g., "50%"), or a per-frame resolver. */
+	width?: SizeValue | OverlayWidthResolver;
 	/** Visual and keyboard priority among overlays. Equal priorities use focus order. */
 	priority?: number;
 	/** Minimum width in columns */
@@ -263,8 +288,8 @@ export interface OverlayOptions {
 	col?: SizeValue;
 
 	// === Margin from terminal edges ===
-	/** Margin from terminal edges. Number applies to all sides. */
-	margin?: OverlayMargin | number;
+	/** Margin from terminal edges. Number applies to all sides; a resolver is evaluated each frame. */
+	margin?: OverlayMargin | number | OverlayMarginResolver;
 
 	/**
 	 * 弹窗两侧各抹掉几列底稿（留白）。浮层只盖自己的列区间,底稿文字会直接贴着
@@ -286,6 +311,12 @@ export interface OverlayOptions {
 	 * 打开后只留下边框和文字，中间露出原来的内容。
 	 */
 	punchSpaces?: boolean;
+	/**
+	 * 弹窗失去焦点自动关闭：浮层可见期间，鼠标按下落在**所有浮层矩形之外**时调用它，
+	 * 这次按下就地吞掉、不再落回底稿。回调方负责自己收尾（hide + 让等待方落地）。
+	 * 不设置保持原样——审批这类弹窗点外面不该有隐含语义。
+	 */
+	onOutsidePress?: () => void;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -478,10 +509,19 @@ export function compositeTuiLine(
 	const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
 	const overlayPad = Math.max(0, overlayWidth - overlay.width);
 	const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
+	// 钉列会**跳过**几格而不写任何字符：底稿比浮层左边界窄时（`paintBox` 明确不把行补满宽度，
+	// 空行、短消息行都是这样），`base.before` 只有十来列宽，pin 却把光标推到第 startCol 列。
+	// 于是合成行里「第 N 个可见列」和「屏幕第 N 列」对不上了——而按列索引的东西全都默认两者相等：
+	// 选区（按下格直接当列号用）、OSC 8 链接命中、行首缩进判定、行尾裁剪。
+	// 症状就是弹窗内拖选：鼠标按在第 21 列，高亮从 21 + (startCol − 底稿宽) 列开始，
+	// 底稿越窄偏得越多（空行能偏十几列），复制出的文本与眼前高亮的位置对不上。
+	// 补上这几格空位（补在 pin 之前，先重置属性，免得继承底稿的行内底色），不变量即恢复。
+	const headPad = Math.max(0, actualBeforeWidth - base.beforeWidth);
 	// 两侧不再补白：浮层只盖自己的列区间，别的列一律保留底稿。补白按可见宽度补，
 	// 盖掉的却是别的组件真写过的格子（浮层右侧的正文、滚条那一格），抹出一块深色空带。
 	const result =
 		base.before +
+		(headPad > 0 ? `${SEGMENT_RESET}${" ".repeat(headPad)}` : "") +
 		pinColumn(actualBeforeWidth) +
 		SEGMENT_RESET +
 		overlay.text +
@@ -631,10 +671,10 @@ export interface ViewportTUI extends TUI {
 	setLayoutRoot(component: Component | undefined): void;
 	/** 只重画视口（滚动、dock 转圈），不使转录内容缓存失效。 */
 	requestViewportRender(): void;
-	/** 屏幕上是否有可复制的选区（键盘复制的生效条件）。 */
-	hasTextSelection(): boolean;
 	/** 复制当前选区；没有选区时返回 undefined，调用方不该报任何反馈。 */
 	copyTextSelection(): Promise<ClipboardCopy | undefined>;
+	/** 当前有没有选区。给键盘复制用：没有选区时该把按键放行给终端自己的复制。 */
+	hasTextSelection(): boolean;
 	/** 终端焦点是否在这个窗口（1004 上报；不上报的终端恒为 true）。 */
 	terminalFocused(): boolean;
 }
@@ -1011,9 +1051,25 @@ export abstract class TuiBase extends Container implements TUI {
 		return this.renderedOverlayLayouts.map(({ row, col, width, height }) => ({ row, col, width, height }));
 	}
 
+	/**
+	 * 点击落在最上层捕获焦点浮层之外时，运行它的 outside handler 并消费该按下。
+	 * 以可见优先级选顶层，而不是按入栈顺序——MCP 管理器叠在报告上时，点到报告区域也
+	 * 必须先关闭管理器，不能把同一次按下穿透给背景报告。
+	 */
+	protected handleOverlayOutsidePress(x: number, y: number): boolean {
+		const entry = this.getTopmostVisibleOverlay();
+		const handler = entry?.options?.onOutsidePress;
+		const bounds = entry?.bounds;
+		if (handler === undefined || bounds === undefined) return false;
+		if (x >= bounds.col && x < bounds.col + bounds.width && y >= bounds.row && y < bounds.row + bounds.height) {
+			return false;
+		}
+		handler();
+		return true;
+	}
+
 	/** Dispatch to the visually topmost overlay under the pointer. */
-	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {
-		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
+	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
 			const layout = this.renderedOverlayLayouts[index]!;
 			if (
 				event.screenX < layout.col ||
@@ -1249,29 +1305,25 @@ export abstract class TuiBase extends Container implements TUI {
 	 * Returns { width, row, col, maxHeight } for rendering.
 	 */
 	private resolveOverlayLayout(
-		options: OverlayOptions | undefined,
-		overlayHeight: number,
-		termWidth: number,
-		termHeight: number,
-	): { width: number; row: number; col: number; maxHeight: number | undefined } {
-		const opt = options ?? {};
+	options: OverlayOptions | undefined,
+	overlayHeight: number,
+	termWidth: number,
+	termHeight: number,
+): { width: number; row: number; col: number; maxHeight: number | undefined } {
+	const opt = options ?? {};
 
-		// Parse margin (clamp to non-negative)
-		const margin =
-			typeof opt.margin === "number"
-				? { top: opt.margin, right: opt.margin, bottom: opt.margin, left: opt.margin }
-				: (opt.margin ?? {});
-		const marginTop = Math.max(0, margin.top ?? 0);
-		const marginRight = Math.max(0, margin.right ?? 0);
-		const marginBottom = Math.max(0, margin.bottom ?? 0);
-		const marginLeft = Math.max(0, margin.left ?? 0);
+	// Available space after margins
+	const margin = resolveOverlayMargin(opt.margin, termWidth, termHeight);
+	const marginTop = margin.top;
+	const marginRight = margin.right;
+	const marginBottom = margin.bottom;
+	const marginLeft = margin.left;
+	const availWidth = Math.max(1, termWidth - marginLeft - marginRight);
+	const availHeight = Math.max(1, termHeight - marginTop - marginBottom);
 
-		// Available space after margins
-		const availWidth = Math.max(1, termWidth - marginLeft - marginRight);
-		const availHeight = Math.max(1, termHeight - marginTop - marginBottom);
-
-		// === Resolve width ===
-		const width = resolveOverlayWidth(opt.width, termWidth, availWidth, opt.minWidth, opt.maxWidth);
+	// === Resolve width ===
+	const widthSpec = typeof opt.width === "function" ? opt.width(termWidth, termHeight) : opt.width;
+	const width = resolveOverlayWidth(widthSpec, termWidth, availWidth, opt.minWidth, opt.maxWidth);
 
 		// === Resolve maxHeight ===
 		let maxHeight = parseSizeValue(opt.maxHeight, termHeight);

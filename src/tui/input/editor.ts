@@ -6,6 +6,7 @@ import {
 	type Component,
 	CURSOR_MARKER,
 	type Focusable,
+	type OverlayHandle,
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -268,6 +269,16 @@ function colorSlice(text: string, start: number, end: number, paint: (value: str
 	return text.slice(0, from) + paint(text.slice(from, to)) + text.slice(to);
 }
 
+/** 菜单弹窗左右内边距：各 1 列，内容不贴竖边框。 */
+const MENU_BOX_PADDING = 1;
+/**
+ * 菜单弹窗上下内边距：0——上下不再空行。盒子贴的是输入框上沿，条目又紧排，
+ * 再插一行空行只是把盒子撑高、把状态行顶得更远。它同时也是「列表可见行数预算」
+ * （见 render 里的 listLineBudget）与「鼠标 y 命中偏移」（见 handleMenuOverlayMouse）
+ * 里要扣掉的那部分，所以单独立一个常量而不是复用左右的。
+ */
+const MENU_BOX_PADDING_Y = 0;
+
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
@@ -333,7 +344,12 @@ export class Editor implements Component, Focusable {
 	// Store last render geometry for cursor navigation and mouse hit-testing.
 	private lastWidth: number = 80;
 	private renderedVisibleLineCount = 1;
-	private renderedAutocompleteHeight = 0;
+	/** 最近一帧编辑器整块（上下边框 + 输入区）的渲染行数；悬浮菜单贴着它上方定位。 */
+	private lastRenderedHeight = 3;
+	/** 最近一帧菜单列表的渲染行数（含行距行）；悬浮盒的鼠标命中换算用它。 */
+	private lastMenuListLines = 0;
+	/** 悬浮菜单层；菜单开着时存在。非捕获层——键盘始终在编辑器手里。 */
+	private menuOverlay?: { component: Component; handle: OverlayHandle };
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -348,7 +364,7 @@ export class Editor implements Component, Focusable {
 	private autocompleteTriggerPattern = buildTriggerPattern(this.autocompleteTriggerCharacters);
 	private autocompleteDebouncePattern = buildDebouncePattern(this.autocompleteTriggerCharacters);
 	private autocompleteList?: SelectList;
-	/** 内联菜单态:命令参数选择器(如 /model、/permission 的二级列表),复用补全菜单的圆角盒渲染。 */
+	/** 内联菜单态:命令参数选择器(如 /model、/permission 的二级列表),复用补全菜单的方角盒渲染。 */
 	private inlineMenu:
 		| {
 				list: SelectList;
@@ -356,15 +372,22 @@ export class Editor implements Component, Focusable {
 				/** 可输入过滤。会话选择器用它接受粘贴的 id。 */
 				filterable: boolean;
 				query: string;
+				/** 提示行里 Esc 的动词（close/skip）；省略 close。 */
+				cancelLabel?: string;
 				resolve: (item: SelectItem | undefined) => void;
 		  }
 		| undefined;
 	/** 补全与内联菜单共用同一盒渲染;内联菜单优先。 */
-	private activeMenu(): { list: SelectList; title: string; filterable: boolean } | undefined {
+	private activeMenu(): { list: SelectList; title: string; filterable: boolean; cancelLabel?: string } | undefined {
 		if (this.inlineMenu) {
 			const query = this.inlineMenu.query;
 			const title = query === '' ? this.inlineMenu.title : `${this.inlineMenu.title}  ${query}`;
-			return { list: this.inlineMenu.list, title, filterable: this.inlineMenu.filterable };
+			return {
+				list: this.inlineMenu.list,
+				title,
+				filterable: this.inlineMenu.filterable,
+				cancelLabel: this.inlineMenu.cancelLabel,
+			};
 		}
 		// 斜杠补全的过滤就是输入框里的 `/xxx` 本身，按键提示里「打字即在筛」是真话。
 		if (this.autocompleteState && this.autocompleteList) {
@@ -586,52 +609,35 @@ export class Editor implements Component, Focusable {
 		// Layout the text
 		const layoutLines = this.layoutText(layoutWidth);
 
-		// 编辑器整块（菜单盒 + 输入框上下边框 + 输入区）必须装进布局分到的行数：装不下时
-		// lineOffset 只保证光标可见，会从顶部把菜单盒连同标题与上边框一起裁掉。布局分配在
-		// 这里拿不到，用终端行数做保守预算——给转录区、状态/待办行与页脚各留 1 行。
+		// 输入框整块（上下边框 + 输入区）必须装进布局分到的行数：装不下时 lineOffset 只保证
+		// 光标可见，会从顶部把边框裁掉。布局分配在这里拿不到，用终端行数做保守预算——
+		// 给转录区、状态/待办行与页脚各留 1 行。
 		const terminalRows = this.tui.terminal.rows;
 		const maxEditorRows = Math.max(3, terminalRows - 3);
 		const maxInputRows = Math.max(5, Math.floor(terminalRows * 0.3));
+		const maxVisibleLines = Math.max(1, Math.min(maxInputRows, maxEditorRows - 2));
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
-		// 斜杠菜单是输入框自己的一套：画在输入区上方，不走 /help 那种居中大弹窗。
-		this.renderedAutocompleteHeight = 0;
-		let menuRows = 0;
+		// 菜单盒悬浮在输入框上方（见 syncMenuOverlay），不再占编辑器行数：开菜单时转录区
+		// 不被顶、输入框不缩；盒子与输入框上边框之间隔 1 行空隙，两条边框不再连成一片。
+		// 列表可见条目数：盒子预算 = 终端高 - 输入框整块 - 页脚 1 行 - 间隙 1 行 - 余量 1 行。
+		// n 条条目 n 行列表，加边框 2 行与四边内边距后落进预算。条目之间不插空行——
+		// 紧排列表配四边内边距，间隙透气交给盒子，不交给条目。
 		const menu = this.activeMenu();
+		let menuVisible = false;
 		if (menu) {
-			const innerWidth = Math.max(1, contentWidth - 2);
-			const listRows = Math.min(this.autocompleteMaxVisible, Math.max(0, maxEditorRows - 5));
-			if (listRows > 0) {
-				menu.list.setMaxVisible(listRows);
-				const listLines = menu.list.render(innerWidth);
-				const scrollInfo = menu.list.getScrollInfo();
-				const boxed = renderRoundedBox({
-					width: contentWidth,
-					title: ` ${menu.title} `,
-					lines: listLines,
-					bottomInfo: scrollInfo,
-					infoWidth: scrollInfo.length,
-					// 底边框左格补按键：这张框挂在输入框上、不像对话框那样自带提示行，
-					// 以前全靠用户猜「Enter 是确认菜单还是提交输入框」。
-					leftInfo: menu.filterable
-						? '↑↓ select · type to filter · Enter choose · Esc cancel'
-						: '↑↓ select · Enter confirm · Esc cancel',
-					leftInfoPaint: (text: string) => (this.theme.menuHint ?? this.theme.borderColor)(text),
-					frame: (text: string) => this.theme.borderColor(text),
-					titlePaint: (text: string) => (this.theme.menuTitle ?? this.theme.borderColor)(text),
-				});
-				for (const line of boxed) {
-					result.push(`${leftPadding}${line}${rightPadding}`);
-				}
-				this.renderedAutocompleteHeight = listLines.length + 2;
-				menuRows = this.renderedAutocompleteHeight;
+			const boxBudget = Math.max(5, terminalRows - (maxVisibleLines + 2) - 3);
+			const listLineBudget = boxBudget - 2 - MENU_BOX_PADDING_Y * 2;
+			const itemRows = Math.min(this.autocompleteMaxVisible, Math.max(0, listLineBudget));
+			if (itemRows > 0) {
+				menu.list.setMaxVisible(itemRows);
+				menuVisible = true;
 			}
 		}
-
-		const maxVisibleLines = Math.max(1, Math.min(maxInputRows, maxEditorRows - menuRows - 2));
+		this.syncMenuOverlay(menuVisible);
 
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
@@ -711,36 +717,20 @@ export class Editor implements Component, Focusable {
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		result.push(this.renderBottomBorder(width, linesBelow));
 
+		// 悬浮菜单的底距跟着这一帧的块高走：多行输入长高，盒子整体上移，永远悬在输入框上方。
+		this.lastRenderedHeight = result.length;
 		return result;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		const menu = this.activeMenu();
-		if (menu && this.renderedAutocompleteHeight >= 2) {
-			const listHeight = this.renderedAutocompleteHeight - 2;
-			if (event.y >= 1 && event.y <= listHeight) {
-				const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
-				const paddingX = Math.min(this.paddingX, maxPadding);
-				const contentWidth = Math.max(1, event.width - paddingX * 2);
-				const result = menu.list.handleMouse?.({
-					...event,
-					x: event.x - paddingX,
-					y: event.y - 1,
-					width: Math.max(1, contentWidth - 2),
-					height: listHeight,
-				});
-				return result ? { ...result, focus: true } : undefined;
-			}
-			if (event.y < this.renderedAutocompleteHeight) return { handled: true, focus: true };
-		}
-
 		// Leave press/drag/release unhandled so the renderer's screen-level text
-		// selection can run over the editor rows (drag to select, release to copy).
+		// selection can run over the editor rows (drag to select).
 		// The renderer synthesizes a click when press and release land on the same
 		// cell without movement, which is the gesture that positions the cursor.
 		if (event.type !== "click" || event.button !== "left") return undefined;
-		// 输入行的行号要扣掉补全区与上边框：boxRow 0 = 上边框，1..N = 输入行。
-		const boxRow = event.y - this.renderedAutocompleteHeight;
+		// 输入行的行号要扣掉上边框：boxRow 0 = 上边框，1..N = 输入行。
+		// （菜单盒已悬浮在编辑器外，由 MenuOverlayComponent 自己接鼠标。）
+		const boxRow = event.y - 1;
 		if (boxRow <= 0 || boxRow > this.renderedVisibleLineCount) return { handled: true, focus: true };
 
 		const visualLines = this.buildVisualLineMap(this.lastWidth);
@@ -797,8 +787,8 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Ctrl+C - let parent handle (exit/clear)
-		if (kb.matches(data, "tui.input.copy")) {
+		// Ctrl+C 交给宿主（打断/退出），编辑器只负责不把它当字符插进去。
+		if (kb.matches(data, "tui.input.interrupt")) {
 			return;
 		}
 
@@ -2363,7 +2353,89 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * 在输入框上方弹出内联选择菜单(与补全菜单同一圆角边框盒),命令参数选择器用。
+	 * 悬浮菜单层的生命周期：菜单开着就挂层，关了就摘。非捕获层——键盘始终在编辑器手里，
+	 * 菜单由输入框的按键驱动（打字过滤、↑↓ 选择），浮层只负责显示与点选。
+	 *
+	 * 定位贴着输入框上方：底距 = 编辑器整块 + 页脚 1 行。盒子和输入框上边框之间的间隙行
+	 * 由浮层自带（见 MenuOverlayComponent.render）——运行状态行正好落在这一行，
+	 * 浮层在场就把它盖掉，不该从盒子底下漏出来。用每帧解析器而不是静态数——
+	 * 多行输入时编辑器长高，盒子整体上移，永远悬在输入框上边框一行之外。
+	 * 宽度通到屏幕两缘：编辑器的上下边框就是整行，盒子窄一列，滚动条和行尾文字
+	 * 就会从右缘的缝隙里漏出来。
+	 */
+	private syncMenuOverlay(show: boolean): void {
+		if (show && !this.menuOverlay) {
+			const component = new MenuOverlayComponent(this);
+			this.menuOverlay = {
+				component,
+				handle: this.tui.showOverlay(component, {
+					nonCapturing: true,
+					// 压过任何对话框的概率为零：对话框（priority 0）永远盖在菜单上面。
+					priority: -10,
+					anchor: "bottom-center",
+					margin: () => ({ bottom: this.lastRenderedHeight + 1 }),
+					width: () => this.tui.terminal.columns,
+				}),
+			};
+		} else if (!show && this.menuOverlay) {
+			this.menuOverlay.handle.hide();
+			this.menuOverlay = undefined;
+		}
+	}
+
+	/**
+	 * 悬浮菜单盒的渲染体：把当前菜单（补全或内联菜单）装回方角盒，末尾再补一行
+	 * 全宽空行——盒子与输入框上边框之间的间隙行也归浮层管，落在这一行的运行状态行
+	 * （spinner / 重试提示 / 计时）在菜单在场时被盖掉，而不是从盒子底下漏出来。
+	 * width 由浮层系统按 options.width 的每帧解析值给出，与编辑器边框同宽（通到两缘）。
+	 */
+	/** @internal 仅供 MenuOverlayComponent 调用，别处别用。 */
+	renderMenuBox(width: number): string[] {
+		const menu = this.activeMenu();
+		if (!menu) return [];
+		const listContentWidth = Math.max(1, width - 2 - MENU_BOX_PADDING * 2);
+		const listLines = menu.list.render(listContentWidth);
+		this.lastMenuListLines = listLines.length;
+		const scrollInfo = menu.list.getScrollInfo();
+		return renderRoundedBox({
+			width,
+			title: ` ${menu.title} `,
+			lines: listLines,
+			bottomInfo: scrollInfo,
+			infoWidth: scrollInfo.length,
+			padding: MENU_BOX_PADDING,
+			paddingY: MENU_BOX_PADDING_Y,
+			// 底边框左格补按键：这张框挂在输入框上、不像对话框那样自带提示行，
+			// 以前全靠用户猜「Enter 是确认菜单还是提交输入框」。
+			leftInfo: menu.filterable
+				? `↑↓ move · Enter select · type to filter · Esc ${menu.cancelLabel ?? 'close'}`
+				: `↑↓ move · Enter select · Esc ${menu.cancelLabel ?? 'close'}`,
+			leftInfoPaint: (text: string) => (this.theme.menuHint ?? this.theme.borderColor)(text),
+			frame: (text: string) => this.theme.borderColor(text),
+			titlePaint: (text: string) => (this.theme.menuTitle ?? this.theme.borderColor)(text),
+		});
+	}
+
+	/**
+	 * 悬浮菜单盒的鼠标分发：滚轮整盒交给列表；其余只有落在列表行上的才进列表，
+	 * 边框/标题/内边距落空（浮层命中即吞掉，不会穿透到底下的转录）。
+	 * 焦点留在编辑器：点菜单不抢键盘——菜单是输入框的延伸，不是独立控件。
+	 */
+	/** @internal 仅供 MenuOverlayComponent 调用，别处别用。 */
+	handleMenuOverlayMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const menu = this.activeMenu();
+		if (!menu) return undefined;
+		if (event.type === "wheel") return menu.list.handleMouse?.(event);
+		const listRow = event.y - 1 - MENU_BOX_PADDING_Y;
+		if (listRow < 0 || listRow >= this.lastMenuListLines) return undefined;
+		const result = menu.list.handleMouse?.({ ...event, y: listRow });
+		if (!result) return undefined;
+		// 只剥 focus：列表点选默认「抢焦点」，这里键盘必须留在输入框里。
+		return { handled: result.handled, capture: result.capture, render: result.render };
+	}
+
+	/**
+	 * 在输入框上方弹出内联选择菜单（与补全菜单同一只悬浮方角盒），命令参数选择器用。
 	 * Promise 化:选中 resolve 该项,Esc/取消 resolve undefined。激活期间以最高优先级
 	 * 接管全部按键——列表键位(↑↓/Enter/Esc)交给菜单,其余键一律吞掉(轻量模态,
 	 * 不可编辑正文);Ctrl+C 退出仍由 UI 层输入监听器处理,不受影响。
@@ -2378,6 +2450,8 @@ export class Editor implements Component, Focusable {
 		filterable?: boolean;
 		/** 行号槽。只给「条目名字不可称呼」的表（会话 id、历史 prompt）。 */
 		numbered?: boolean;
+		/** 提示行里 Esc 的动词（`Esc close` / `Esc skip`）。向导里可跳过的步用 skip。 */
+		cancelLabel?: string;
 	}): Promise<SelectItem | undefined> {
 		this.closeInlineMenu(undefined); // 已有菜单先收:旧的以 undefined 结束
 		const layout: SelectListLayoutOptions = {
@@ -2392,7 +2466,14 @@ export class Editor implements Component, Focusable {
 		const list = new SelectList(options.items, options.maxVisible ?? 10, this.theme.selectList, layout);
 		list.renderScrollInfoLine = false;
 		return new Promise((resolve) => {
-			this.inlineMenu = { list, title: options.title, filterable: options.filterable === true, query: '', resolve };
+			this.inlineMenu = {
+				list,
+				title: options.title,
+				filterable: options.filterable === true,
+				query: '',
+				cancelLabel: options.cancelLabel,
+				resolve,
+			};
 			list.onSelect = (item) => this.closeInlineMenu(item);
 			list.onCancel = () => this.closeInlineMenu(undefined);
 			this.tui.requestViewportRender();
@@ -2462,5 +2543,31 @@ export class Editor implements Component, Focusable {
 	private updateAutocomplete(): void {
 		if (!this.autocompleteState || !this.autocompleteProvider) return;
 		this.requestAutocomplete({ force: this.autocompleteState === "force", explicitTab: false });
+	}
+}
+
+/**
+ * 编辑器菜单的悬浮壳：渲染与点选都转回编辑器自己的状态（activeMenu / SelectList），
+ * 自己不持有任何菜单数据。非捕获层——键盘始终在编辑器手里，菜单只是输入框
+ * 头顶挂着的一块面板，点它不会把焦点从输入框抢走。
+ */
+class MenuOverlayComponent implements Component {
+	constructor(private readonly editor: Editor) {}
+
+	invalidate(): void {
+		// 每帧从编辑器现取菜单状态，无需缓存。
+	}
+
+	render(width: number): string[] {
+		const lines = this.editor.renderMenuBox(width);
+		if (lines.length === 0) return lines;
+		// 尾随 1 行全宽空行：浮层的列区间内空格会覆写底稿。运行状态行正好贴在编辑器
+		// 上边框之上（dock 里状态容器紧挨编辑器），菜单悬浮时这一行就该被盖住。
+		lines.push(" ".repeat(width));
+		return lines;
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		return this.editor.handleMenuOverlayMouse(event);
 	}
 }

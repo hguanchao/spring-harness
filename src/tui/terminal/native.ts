@@ -4,9 +4,9 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * 可选的平台原生助手：剪贴板和修饰键。
+ * 可选的平台原生助手：修饰键（Shift+Enter 的识别）与虚拟终端输入开关。
  *
- * 找不到和本模块放在一起的 .node 就退化（剪贴板不可用，修饰键视为没按下）。
+ * 找不到和本模块放在一起的 .node 就退化（修饰键视为没按下）。
  * 不按别的包名去 node_modules 里搜，否则控件层会绑死在宿主的安装布局上。
  */
 export interface NativeModuleCandidateOptions {
@@ -29,16 +29,7 @@ const cjsRequire = createRequire(import.meta.url);
 
 export type ModifierKey = "shift" | "command" | "control" | "option";
 
-export interface NativeClipboard {
-	/** Undefined means unavailable, null means no text; transfer failures reject. */
-	getText(): Promise<string | null | undefined>;
-	/** Undefined means unavailable, null means no image; transfer failures reject. */
-	getImage(): Promise<Uint8Array | null | undefined>;
-	/** Linux uses command-line tools to retain clipboard ownership instead. */
-	setText?(text: string): Promise<void>;
-}
-
-type NativePlatformHelper = NativeClipboard & {
+type NativePlatformHelper = {
 	enableVirtualTerminalInput?: () => boolean;
 	isModifierPressed?: (name: ModifierKey) => boolean;
 };
@@ -61,7 +52,7 @@ function loadNativePlatformHelper(platform: string, suffix = ""): NativePlatform
 	for (const modulePath of getNativeModuleCandidates(nativePath)) {
 		try {
 			const helper = cjsRequire(modulePath) as Partial<NativePlatformHelper> | null;
-			if (typeof helper?.getText === "function" && typeof helper.getImage === "function") {
+			if (typeof helper?.isModifierPressed === "function") {
 				helpers.set(nativePath, helper as NativePlatformHelper);
 				return helper as NativePlatformHelper;
 			}

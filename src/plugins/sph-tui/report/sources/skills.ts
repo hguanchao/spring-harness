@@ -5,9 +5,8 @@
  * 整个界面就能测，而它恰恰最容易退化成空壳——列表为空、某个根没货、同名技能被两个根广告，
  * 都是真实会遇到、手测很容易漏的分支。
  *
- * 分组与排序沿用原样，因为它们是**覆盖语义**的直接映射：`scanSkills` 按根的顺序扫描，后者覆盖
- * 前者，所以「同名谁赢」这个问题的答案就是根的先后。显示时倒过来数号——`#1` 是会赢的那个，
- * 按全部六个根排号会让「只有一个来源」的机器看到 `#6`，像少了五条。
+ * 分组与排序沿用扫描顺序，因为它是**覆盖语义**的直接映射：`scanSkills` 按根的顺序扫描，后者覆盖
+ * 前者，所以「同名谁赢」这个问题的答案就是先后——所以组按优先级排（会赢的在前），号只写在根上。
  */
 
 import type { SkillEntry } from '@/plugins/services.js';
@@ -25,10 +24,6 @@ export interface SkillsTabInput {
 export function skillsTab(input: SkillsTabInput): ReportTab {
 	const { catalog, warnings, roots } = input;
 	const blocks: ReportBlock[] = [];
-
-	// 说明压成一句 caption：它回答的是「这份清单怎么被用」，读过一次就有数；
-	// 整段的机制讲解只对第一次打开的人有用，不该每次都占住列表上方的位置。
-	blocks.push({ kind: 'caption', text: 'Matched by name+description; SKILL.md loads on use.' });
 
 	const paths = roots.map((root) => root.path);
 	const levelOf = new Map(roots.map((root) => [root.path, root.level]));
@@ -49,66 +44,71 @@ export function skillsTab(input: SkillsTabInput): ReportTab {
 	const ordered = byPriority([...grouped.entries()], (entry) => entry[0]);
 
 	if (catalog.length === 0) {
-		blocks.push({
-			kind: 'prose',
-			text:
-				'No skills found. A skill is a directory holding `SKILL.md` with `name` and `description` ' +
-				'frontmatter — drop one in any root below and it is picked up on the next turn.',
-		});
+		// 空态一句话（投影层会居中并留白）：整段的「技能是什么、放哪」由下面的根清单自己回答。
+		blocks.push({ kind: 'empty', text: 'No skills found.' });
 	}
 
 	// 每个有货的来源都画组标题，哪怕只有一个：它回答的是「这些技能从哪来」——那正是打开这份
 	// 报告要确认的事，不能因为「没有竞争」就省掉。
-	ordered.forEach(([root, skills], index) => {
+	ordered.forEach(([root, skills]) => {
 		const level = levelOf.get(root);
 		const items: ReportItem[] = skills.map((skill): ReportItem => ({
 			key: skill.name,
-			label: { text: skill.name, tone: 'code', bold: true },
-			description: oneLine(skill.description),
+			label: { text: skill.name, bold: true },
+			// 说明与入口路径退成明细：列表因此是一行一个技能名，扫得动；说明那种成段的文字留在列表里
+			// 会把二十来个技能铺成几十行，反而谁也看不见。明细点开就留着，看哪个点哪个。
+			fields: [
+				{ value: oneLine(skill.description) },
+				{
+					// sph 真正会读的字段：决定这个技能是否出现在 `/` 菜单里（interactive-mode 查它）。
+					// SKILL.md 里的 `allowed-tools` 之类**不显示**——`skill` 工具把整个文件原样交给模型，
+					// 宿主不执行任何工具限制，显示出来会被读成「这个技能只能用这些工具」。
+					key: 'user-invocable',
+					value: skill.userInvocable === true ? 'yes' : 'no',
+				},
+				{ key: 'path', value: oneLine(shortenRoot(skill.path)) },
+			],
 		}));
 		blocks.push({
 			kind: 'group',
 			group: {
 				key: root,
-				label: `#${index + 1}  ${level === undefined ? '' : `${level} — `}${shortenRoot(root)}`,
+				// 组名 = 来源 + 数量（`Project Skills (3 skills)`）：路径不进标题，它归下面那份 Sources scanned。
+				// 数量走 countNoun 后缀而不是自己拼：单复数、检索时的 `(命中/总数)` 都归那套规则管。
+				label: level === undefined ? 'Skills' : `${level} Skills`,
 				countNoun: 'skills',
 				items,
 			},
 		});
 	});
 
-	const missed = roots.filter((root) => !grouped.has(root.path));
-	if (catalog.length === 0) {
-		// 空态这份清单和分组那份同一个方向：`1` 是会赢的那个（覆盖顺序里排最后的根）。
-		const rootItems: ReportItem[] = byPriority(roots, (root) => root.path).map(
-			(root, position): ReportItem => ({
-				key: root.path,
-				label: [{ text: `${position + 1}. ` }, { text: `${root.level} — ${root.path}`, tone: 'code' }],
-			}),
-		);
+	if (roots.length > 0) {
+		// 扫过的每个根都列出来（含没货的）——它回答的是「我放了文件怎么没出现」，那要照着路径
+		// 一条条核对。读法与 MCP 的 Sources scanned 一致：可折叠、缺省收起，状态跟在说明列。
 		blocks.push({
 			kind: 'group',
 			group: {
-				key: '__roots',
-				label: 'Roots · the lower number wins a name clash',
-				collapsible: false,
-				items: rootItems,
+				key: 'sources',
+				label: 'Sources scanned',
+				countNoun: 'roots',
+				// 辅助组：根清单不是本 tab 的清点对象（技能才是），检索时整组退场——
+				// 否则搜一个词会把五个空目录一并列出来，真命中反被淹掉。
+				auxiliary: true,
+				items: byPriority(roots, (root) => root.path).map((root): ReportItem => {
+					const found = grouped.get(root.path)?.length ?? 0;
+					return {
+						key: root.path,
+						label: [
+							{ text: `${root.level} — `, tone: 'muted' },
+							// 用户级根一律在主目录下，缩成 `~\.agents\skills`；项目级根写全路径——
+							// 它回答的是「哪个工作区的根」，缩了就答不出。
+							{ text: root.level === 'User' ? shortenRoot(root.path) : root.path, tone: 'code' },
+						],
+						description: found === 0 ? 'empty' : `found — ${found} skill${found === 1 ? '' : 's'}`,
+					};
+				}),
 			},
 		});
-	} else {
-		// 优先级规则收成 caption：组标题带上 # 号之后，它就是「怎么读这些号」的注释，不是正文。
-		if (ordered.length > 1) {
-			blocks.push({ kind: 'caption', text: 'A skill advertised by two roots resolves to the lower #.' });
-			blocks.push({ kind: 'caption', text: 'Later roots override earlier ones.' });
-		}
-		if (missed.length > 0) {
-			// 空根只占一句：它们回答的是「我放了文件怎么没出现」，逐个列出来又会吃掉半屏。
-			const shown = missed.map((root) => shortenRoot(root.path)).join(' · ');
-			blocks.push({
-				kind: 'caption',
-				text: `nothing found in ${missed.length} other root${missed.length === 1 ? '' : 's'}: ${shown}`,
-			});
-		}
 	}
 
 	if (warnings.length > 0) {

@@ -81,6 +81,9 @@ function componentTreeContains(root: Component, target: Component): boolean {
 	return children.some((child) => componentTreeContains(child, target));
 }
 
+/** 框线字形：`renderRoundedBox` 与 markdown 表格共用的一套，用来检出浮层边框。 */
+const FRAME_GLYPHS = "│─┌┐└┘╭╮╰╯├┤┬┴┼";
+
 interface SelectionPoint {
 	row: number;
 	col: number;
@@ -363,6 +366,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionAnchor?: SelectionPoint;
 	/** 这次拖选开始时所在的内容块。选区不跨出这块。 */
 	private selectionBlock?: { start: number; end: number };
+	/**
+	 * 这次拖选开始的浮层矩形（弹窗）。选区不跨出这块。
+	 *
+	 * 没有它的话，弹窗里拖选会顺着**合成后**的整行取文本：合成行是「床底转录 + 弹窗 + 转录」，
+	 * 而横线的取法是「行首到行尾」，行尾在窗外的转录上——于是选弹窗里两行，拷出来的是整屏。
+	 * 高亮同理，会顺着行尾糊到窗外。
+	 */
+	private selectionRect?: { row: number; col: number; width: number; height: number };
 	/** 按下时的原始格（未做词吸附）：松开判定 isClick 用它，而不是被 range 起点顶掉的 anchor。 */
 	private selectionPressCell?: { scrollView?: ScrollView; row: number; col: number };
 	private selectionFocus?: SelectionPoint;
@@ -799,6 +810,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private clearSelectionState(): void {
 		this.selectionAnchor = undefined;
 		this.selectionBlock = undefined;
+		this.selectionRect = undefined;
 		this.selectionPressCell = undefined;
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
@@ -839,32 +851,54 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const target = this.mouseCapture ?? this.mousePressTarget!;
 			// ±1 格内的手抖不算移动：按得准松得偏一格是双击的常态，太严会把 click 吞掉，
 			// 工具行的双击展开/收起就会时好时坏。
-			if (
-				this.mousePressPoint
-				&& (Math.abs(raw.x - this.mousePressPoint.x) > 1 || Math.abs(raw.y - this.mousePressPoint.y) > 1)
-			) {
+			const moved =
+				this.mousePressPoint !== undefined &&
+				(Math.abs(raw.x - this.mousePressPoint.x) > 1 || Math.abs(raw.y - this.mousePressPoint.y) > 1);
+			if (moved) {
 				this.mousePressMoved = true;
 				this.lastComponentClick = undefined;
-			}
-			let render = false;
-			const targetResult = this.dispatchMouseToTarget(event, target);
-			if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
-			if (raw.release) {
-				if (!this.mousePressMoved && this.mousePressPoint) {
-					const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
-						clickCount: this.getComponentClickCount(target, raw.x, raw.y),
-					});
-					const clickResult = this.dispatchMouseClick(clickEvent, () => this.dispatchMouseToTarget(clickEvent, target));
-					if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
+				// **移动即拖选**：按住之后真的拖起来了，这次按下就不是「点一下」，改判给拖选。
+				// 组件在按下那一刻已经按点选处理过（列表高亮落到了按下的那一行），这里撤掉它的手势、
+				// 用记下的按落点补一次「按下」，拖选的锚点便接上；本次事件不再进这个分支，
+				// 继续往下走普通路径交给拖选。
+				// 持有 capture 的组件不改判——拖动本来就是它的语义。
+				if (type === "drag" && this.mouseCapture === undefined && this.mousePressPoint !== undefined) {
+					const pressed = this.mousePressPoint;
+					this.clearComponentMouseGesture();
+					this.handleSelectionMouseEvent({ button: 0, x: pressed.x, y: pressed.y, release: false });
 				}
-				this.clearComponentMouseGesture();
 			}
-			if (render) this.requestViewportRender();
-			return;
+			if (this.mouseCapture !== undefined || this.mousePressTarget !== undefined) {
+				let render = false;
+				const targetResult = this.dispatchMouseToTarget(event, target);
+				if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
+				if (raw.release) {
+					if (!this.mousePressMoved && this.mousePressPoint) {
+						const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
+							clickCount: this.getComponentClickCount(target, raw.x, raw.y),
+						});
+						const clickResult = this.dispatchMouseClick(clickEvent, () => this.dispatchMouseToTarget(clickEvent, target));
+						if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
+					}
+					this.clearComponentMouseGesture();
+				}
+				if (render) this.requestViewportRender();
+				return;
+			}
 		}
 
 		const overlay = this.dispatchMouseToOverlay(event);
 		if (!overlay.hit) {
+			// 顶层浮层的外侧按下由它自己处理并消费：嵌套 MCP 管理器点到报告区域时，
+			// 先只关闭管理器，不能让同一次按下穿透给底层报告。
+			if (
+				type === "press" &&
+				this.decodeMouseButton(raw.button) === "left" &&
+				this.handleOverlayOutsidePress(raw.x, raw.y)
+			) {
+				this.clearTextSelection();
+				return;
+			}
 			if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
 			const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
@@ -898,6 +932,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.chrome?.pressEmpty(boxes.map((box) => box.component))) this.requestViewportRender();
 		}
 		this.handleSelectionMouseEvent(raw);
+	}
+
+	/**
+	 * 右键：复制当前选区。
+	 *
+	 * Windows 上右键默认是粘贴（Windows Terminal 的约定），但那个约定只在「选区归终端所有」
+	 * 时成立。这里的选区是应用内自绘的，右键粘贴等于用系统剪贴板覆盖刚选中的内容。所以这里
+	 * 把右键定为复制：有选区就复制并反馈，没有选区不拦截，交回终端。
+	 */
+	private handleRightClickCopy(event: SgrMouseEvent): boolean {
+		if (event.release || event.button !== 2) return false;
+		if (!this.getSelectionBounds()) return false;
+		void this.copyTextSelection();
+		return true;
 	}
 
 	/** 命中点是否落在当前焦点组件（或其承载容器）上。 */
@@ -975,20 +1023,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			y: Number.parseInt(match[3], 10) - 1,
 			release: match[4] === "m",
 		};
-	}
-
-	/**
-	 * 右键：复制当前选区。
-	 *
-	 * Windows 上右键默认是粘贴（Windows Terminal 的约定），但那个约定只在「选区归终端所有」
-	 * 时成立。这里的选区是应用内自绘的，右键粘贴等于用系统剪贴板覆盖刚选中的内容。所以这里
-	 * 把右键定为复制：有选区就复制并 flash 反馈，没有选区不拦截，交回终端。
-	 */
-	private handleRightClickCopy(event: SgrMouseEvent): boolean {
-		if (event.release || event.button !== 2) return false;
-		if (!this.getSelectionBounds()) return false;
-		void this.copyTextSelection();
-		return true;
 	}
 
 	private handleScrollToEndIndicatorMouseEvent(event: SgrMouseEvent): boolean {
@@ -1112,10 +1146,74 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const point = this.getScrollSelectionPoint(scrollView, event.x, event.y);
 			if (point) return point;
 		}
-		return this.clampSelectionPoint({
-			row: Math.max(0, Math.min(this.terminal.rows - 1, event.y)),
-			col: Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
-		});
+		const point = this.clampToSelectionRect(
+			this.clampSelectionPoint({
+				row: Math.max(0, Math.min(this.terminal.rows - 1, event.y)),
+				col: Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
+			}),
+		);
+		return point;
+	}
+
+	/**
+	 * 抓哪个浮层矩形（取最上面那个）。与 `dispatchMouseToOverlay` 同一套判定与顺序——
+	 * 命中判定和选框不能各算一套，否则会出现「点得中但选不了」。
+	 */
+	private overlayRectAt(x: number, y: number): { row: number; col: number; width: number; height: number } | undefined {
+		const rects = this.renderedOverlayRects();
+		for (let index = rects.length - 1; index >= 0; index--) {
+			const rect = rects[index]!;
+			if (x >= rect.col && x < rect.col + rect.width && y >= rect.row && y < rect.row + rect.height) return rect;
+		}
+		return undefined;
+	}
+
+	/**
+	 * 浮层矩形里真正装内容的那块：四周检出框线时内缩一格。
+	 *
+	 * 不内缩的话，弹窗里拖选拷出来每行都挂着 `│`——你框的是文字，拿到的是框；
+	 * 尾列那个 `│` 还会挡住行尾裁剪，把右边一整条留白也带进剪贴板。这就是「选得不准」。
+	 *
+	 * **检出而不是假定**：浮层不保证是带框的盒子（补全菜单、浮层提示各有各的画法）。
+	 * 检不出就按原矩形来——宁可多带一格框线，也不能凭猜吃掉别人的第一列内容。
+	 */
+	private overlayContentRect(rect: { row: number; col: number; width: number; height: number }): {
+		row: number;
+		col: number;
+		width: number;
+		height: number;
+	} {
+		if (rect.width < 4 || rect.height < 4) return rect;
+		const glyphAt = (row: number, col: number): string =>
+			stripTerminalSequences(sliceByColumn(this.previousScreen[row] ?? "", col, 1, true));
+		for (let row = rect.row; row < rect.row + rect.height; row++) {
+			if (!FRAME_GLYPHS.includes(glyphAt(row, rect.col))) return rect;
+			if (!FRAME_GLYPHS.includes(glyphAt(row, rect.col + rect.width - 1))) return rect;
+		}
+		return { row: rect.row + 1, col: rect.col + 1, width: rect.width - 2, height: rect.height - 2 };
+	}
+
+	/** 浮层内拖选时把屏幕坐标夹进那块矩形：手拖出窗外也不该选到窗外的转录。 */
+	private clampToSelectionRect(point: SelectionPoint): SelectionPoint {
+		const rect = this.selectionRect;
+		if (!rect) return point;
+		return {
+			...point,
+			row: Math.max(rect.row, Math.min(rect.row + rect.height - 1, point.row)),
+			col: Math.max(rect.col, Math.min(rect.col + rect.width - 1, point.col)),
+		};
+	}
+
+	/** 取文本与染色共用的选区边界；浮层选区夹在浮层矩形内，否则不夹。 */
+	private selectionClamp(): { minRow: number; maxRow: number; minColumn: number; maxColumn: number } | undefined {
+		const rect = this.selectionRect;
+		if (!rect) return undefined;
+		return {
+			minRow: rect.row,
+			maxRow: rect.row + rect.height - 1,
+			minColumn: rect.col,
+			maxColumn: rect.col + rect.width,
+		};
 	}
 
 	/**
@@ -1391,7 +1489,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return;
 		}
 		this.stopSelectionAutoScroll();
+		// 有浮层在场时窗外的正文不参与选取：模态的语义就是「先处理这一层」。
+		// 不挡的话，从窗外起手一直拖进弹窗，会把转录和弹窗混成一段拷走——读起来像对话框漏了底。
+		// 非捕获浮层（toast 那类，目前无人使用）也在 overlayStack 里，会一并挡住选取；真要放开，
+		// 判据要换成「存在可捕获的可见浮层」。
+		const onOverlay = this.hasOverlay();
+		const hit = onOverlay ? this.overlayRectAt(event.x, event.y) : undefined;
+		if (onOverlay && hit === undefined) return;
 		this.selectionPressActive = true;
+		// 落点在浮层上就把选区锁进那块矩形（含「点了弹窗但没点在正文上」的空白处），
+		// 并让开框线：拷的是内容，不是框。
+		this.selectionRect = hit === undefined ? undefined : this.overlayContentRect(hit);
 		const scrollView =
 			!this.hasOverlay() && this.currentLayout
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
@@ -1472,38 +1580,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return { start, end };
 	}
 
-	private getActiveSelectionText(): string | undefined {
-		const selection = this.getSelectionBounds();
-		if (!selection) return undefined;
-		let sourceLines: readonly string[] = this.previousScreen;
-		if (selection.start.scrollView) {
-			if (!this.currentLayout) return undefined;
-			const box = getScrollViewBox(this.currentLayout, selection.start.scrollView);
-			if (!box?.scrollContentLines) return undefined;
-			sourceLines = box.scrollContentLines;
-		}
-		const lines: string[] = [];
-		for (let row = selection.start.row; row <= selection.end.row; row++) {
-			const line = sourceLines[row] ?? "";
-			const columns = this.getSelectionColumns(line, row, selection);
-			lines.push(
-				stripTerminalSequences(
-					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
-				).trimEnd(),
-			);
-		}
-		const text = lines.join("\n");
-		return text.trim().length === 0 ? undefined : text;
-	}
-
-	/** 屏幕上是否有可复制的选区（键盘复制的生效条件）。 */
-	hasTextSelection(): boolean {
-		return this.getSelectionBounds() !== undefined;
-	}
-
 	/** 终端焦点在不在这个窗口（1004 上报）。给完成提醒用：正盯着就别响。 */
 	terminalFocused(): boolean {
 		return this.terminalHasFocus;
+	}
+
+	/** 当前有没有选区。键盘复制据此决定是否消耗按键（见 interactive-mode 的 app.copy）。 */
+	hasTextSelection(): boolean {
+		return this.getSelectionBounds() !== undefined;
 	}
 
 	/**
@@ -1532,6 +1616,30 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return;
 		}
 		this.flash(message);
+	}
+
+	private getActiveSelectionText(): string | undefined {
+		const selection = this.getSelectionBounds();
+		if (!selection) return undefined;
+		let sourceLines: readonly string[] = this.previousScreen;
+		if (selection.start.scrollView) {
+			if (!this.currentLayout) return undefined;
+			const box = getScrollViewBox(this.currentLayout, selection.start.scrollView);
+			if (!box?.scrollContentLines) return undefined;
+			sourceLines = box.scrollContentLines;
+		}
+		const lines: string[] = [];
+		for (let row = selection.start.row; row <= selection.end.row; row++) {
+			const line = sourceLines[row] ?? "";
+			const columns = this.getSelectionColumns(line, row, selection);
+			lines.push(
+				stripTerminalSequences(
+					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
+				).trimEnd(),
+			);
+		}
+		const text = lines.join("\n");
+		return text.trim().length === 0 ? undefined : text;
 	}
 
 	/** 把一行的选区段染上高亮；无选区段或整行不在选区内时原样返回。 */
@@ -1563,10 +1671,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!selection || selection.start.scrollView) return screen;
 		const rects = this.renderedOverlayRects();
 		if (rects.length === 0) return screen;
+		const clamp = this.selectionClamp();
 		const result = [...screen];
 		for (let row = selection.start.row; row <= Math.min(selection.end.row, result.length - 1); row++) {
 			if (!rects.some((rect) => row >= rect.row && row < rect.row + rect.height)) continue;
-			result[row] = this.paintSelectionLine(result[row] ?? "", row, selection);
+			result[row] = this.paintSelectionLine(
+				result[row] ?? "",
+				row,
+				selection,
+				clamp?.minColumn ?? 0,
+				clamp?.maxColumn ?? this.terminal.columns,
+			);
 		}
 		return result;
 	}
@@ -1599,6 +1714,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					col: box.rect.x + selection.end.col,
 				},
 			};
+		} else {
+			// 浮层选区：床底转录左右两侧那一块不该跟着染色——选区在窗里，窗外的底色是别人的。
+			const clamp = this.selectionClamp();
+			if (clamp) {
+				minRow = clamp.minRow;
+				maxRow = Math.min(maxRow, clamp.maxRow);
+				minColumn = clamp.minColumn;
+				maxColumn = clamp.maxColumn;
+			}
 		}
 		return screen.map((line, row) => {
 			if (

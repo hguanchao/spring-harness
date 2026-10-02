@@ -1,15 +1,16 @@
 /**
- * `/mcps` 命令域：MCP server 的查看、启停、增删与重载。
+ * MCP server 的启停、增删与重载。
  *
- * 弹窗交互 + 配置写回（config/mcp-write）+ 经宿主重载。宿主只需要提供 ui、deps 与
- * 通知行——这一域不触碰会话与轮次状态，是命令里最独立的一块。
+ * 选择器作为 MCP 报告上方的第二层悬浮面板；配置写回（config/mcp-write）后经宿主重载。
+ * 宿主只需要提供 ui、deps 与通知行——这一域不触碰会话与轮次状态，是命令里最独立的一块。
  */
 
 import { removeSphMcpServer, setSphMcpDisabled, splitCommandLine, upsertSphMcpServer } from '@/config/mcp-write.js';
 import type { TUI } from '@/tui/index.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 import { commandPanelOptions, showConfirmDialog, showInputDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
-import { mcpServerLabel, mcpStateLabel, renderMcpReport, renderMcpTools } from '@/plugins/sph-tui/commands/reports.js';
+import { mcpServerLabel, mcpStateLabel, renderMcpTools } from '@/plugins/sph-tui/commands/reports.js';
+import type { ReportContext } from '@/plugins/sph-tui/report/registry.js';
 import { SERVER_PREFIX } from '@/plugins/sph-tui/commands/index.js';
 
 /** MCP 命令需要的宿主能力。 */
@@ -17,26 +18,28 @@ export interface McpCommandHost {
   ui: TUI;
   deps: TuiDeps;
   addNotice(text: string, level?: 'dim' | 'warn' | 'error' | 'success'): void;
+  /** 「Show full report」落到报告弹窗的 MCP tab；取数环境与 /skills、/plugins 同一份。 */
+  reportContext(): ReportContext;
 }
 
 /**
- * MCP 管理器。
+ * MCP 报告里按 `m` 打开的管理器，浮在报告上方；关闭后报告仍在原处。
  *
  * 「选一次 → 做一件事 → 重新选」的循环，而不是一次性只读弹窗：改完开关要能立刻看到新
- * 状态，否则用户只能反复敲命令来确认刚才那一下到底生效没有。Esc 退出。
- *
- * 每一轮都重新取状态：server 崩溃后的懒重连、以及外部配置的改动都会改变它。
+ * 状态。每一轮都重新取状态：server 崩溃后的懒重连、以及外部配置的改动都会改变它。
  */
-export async function commandMcps(host: McpCommandHost): Promise<void> {
+export async function commandMcpsManager(host: McpCommandHost, managerPriority = 1): Promise<void> {
   const { ui, deps } = host;
+  const childPriority = managerPriority + 1;
   // 服务取一次就够：插件不会在会话中途卸载，每轮迭代都判空只是噪音。
   // 但它**确实可能不存在**（`[plugins] disabled = ["sph-mcp"]`，或插件加载失败），
   // 那种情况必须如实说明——对着空清单说「0 个 server」会让人去查 server 配置，
   // 而真正的原因是提供 MCP 能力的插件根本没装。
   const service = deps.mcp();
   if (!service) {
-    await showMessageDialog(ui, {
-      title: 'MCP plugin not loaded',
+      await showMessageDialog(ui, {
+        priority: childPriority,
+        title: 'MCP plugin not loaded',
       text: [
         'The `sph-mcp` plugin provides MCP support, and it is not loaded.',
         '',
@@ -60,14 +63,13 @@ export async function commandMcps(host: McpCommandHost): Promise<void> {
       // 顶栏只写名字（与 Skills/Help/Plugins 对齐）；数量挂在 Servers 组头上。
       title: 'MCP servers',
       maxVisible: 14,
-      hint: 'Enter act · Esc close',
+      hint: 'Enter act · Esc close · click outside back to report',
       items: [
-        // 动作与清单分组：组头走选择列表的横线标题，与报告的 `### 段名` 同一套字形。
-        { value: 'hdr-actions', kind: 'header' as const, label: 'Actions' },
+        // 动作与清单分组：组头与内联菜单统一显示 `✦ 名称 (数量)`。
+        { value: 'hdr-actions', kind: 'header' as const, label: 'Actions', countNoun: 'actions' },
         { value: 'reload', label: 'Reload from disk', description: 're-read every source and reconnect' },
-        { value: 'report', label: 'Show full report', description: 'sources scanned, warnings, per-server tools' },
         { value: 'add', label: 'Add a server…', description: `append to ${deps.configPath}` },
-        { value: 'hdr-servers', kind: 'header' as const, label: `Servers · ${servers.length}` },
+        { value: 'hdr-servers', kind: 'header' as const, label: 'Servers', countNoun: 'servers' },
         ...servers.map((server) => ({
           value: `server:${server.name}`,
           label: mcpServerLabel(server),
@@ -78,33 +80,20 @@ export async function commandMcps(host: McpCommandHost): Promise<void> {
           ? [{ value: 'no-servers', kind: 'doc' as const, label: 'nothing configured yet — add one with the action above' }]
           : []),
       ],
+      priority: managerPriority,
+      onOutsidePress: () => undefined,
       ...commandPanelOptions(ui),
     });
     if (choice === undefined) return;
-    if (choice === 'report') {
-      await showMessageDialog(ui, {
-        title: 'MCP servers',
-        text: renderMcpReport({
-          servers: service.listServers(),
-          warnings: [...(service.warnings())],
-          sources: [...service.sources()],
-        }),
-        hint: 'Esc close',
-        // 我们自己的清单：条目排成词项列（见 MarkdownOptions.termColumnLists）。
-        termColumns: true,
-        ...commandPanelOptions(ui),
-      });
-      continue;
-    }
     if (choice === 'reload') {
       await reloadMcpWithNotice(host);
       continue;
     }
     if (choice === 'add') {
-      await addMcpServer(host);
+        await addMcpServer(host);
       continue;
     }
-    await manageMcpServer(host, choice.slice(SERVER_PREFIX.length));
+    await manageMcpServer(host, choice.slice(SERVER_PREFIX.length), childPriority);
   }
 }
 
@@ -120,16 +109,16 @@ export async function reloadMcpWithNotice(host: McpCommandHost): Promise<void> {
   if (result.added.length > 0) parts.push(`+ ${result.added.join(', ')}`);
   if (result.restarted.length > 0) parts.push(`~ ${result.restarted.join(', ')}`);
   if (result.removed.length > 0) parts.push(`- ${result.removed.join(', ')}`);
-  host.addNotice(
-    parts.length === 0 ? 'MCP: reloaded, nothing changed' : `MCP: reloaded · ${parts.join(' · ')}`,
-    'dim',
-  );
+  // 没变化就不出声：reload 的预期结果本来就是"什么都没变"，有变化才有值得报的名字。
+  // 出错另有去处——下面那圈 warnings 照发。
+  if (parts.length > 0) host.addNotice(`MCP: reloaded · ${parts.join(' · ')}`, 'dim');
   for (const warning of deps.mcp()?.warnings() ?? []) host.addNotice(warning, 'warn');
 }
 
 async function addMcpServer(host: McpCommandHost): Promise<void> {
   const { ui, deps } = host;
   const rawName = await showInputDialog(ui, {
+    priority: 2,
     title: 'Server name',
     hint: 'letters, digits, - and _ · Esc cancel',
   });
@@ -141,6 +130,7 @@ async function addMcpServer(host: McpCommandHost): Promise<void> {
     return;
   }
   const rawLine = await showInputDialog(ui, {
+    priority: 2,
     title: `Command for ${name}`,
     hint: 'e.g. npx -y @modelcontextprotocol/server-filesystem . · quote paths with spaces',
   });
@@ -164,7 +154,7 @@ async function addMcpServer(host: McpCommandHost): Promise<void> {
   }
 }
 
-async function manageMcpServer(host: McpCommandHost, name: string): Promise<void> {
+async function manageMcpServer(host: McpCommandHost, name: string, childPriority: number): Promise<void> {
   const { ui, deps } = host;
   const server = deps.mcp()?.listServers().find((item) => item.name === name);
   if (server === undefined) return; // 列表是上一轮取的，条目可能已经不在了
@@ -194,6 +184,8 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
     bodyFormat: 'plain',
     items,
     maxVisible: 4,
+    priority: childPriority,
+    onOutsidePress: () => undefined,
     ...commandPanelOptions(ui),
   });
 
@@ -207,6 +199,7 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
   }
   if (action === 'tools') {
     await showMessageDialog(ui, {
+      priority: childPriority + 1,
       title: `${mcpServerLabel(server)} tools`,
       text: renderMcpTools(server),
       hint: 'Esc close',
@@ -217,6 +210,7 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
   if (action === 'remove') {
     // 危险确认：Remove 标红、焦点初始停在 Cancel——Enter 连按不会误删配置。
     const confirmed = await showConfirmDialog(ui, {
+      priority: childPriority + 2,
       title: `Remove ${mcpServerLabel(server)}?`,
       message: `This deletes the entry from ${server.origin.path}. Nothing else is touched.`,
       confirmLabel: 'Remove',
@@ -224,10 +218,8 @@ async function manageMcpServer(host: McpCommandHost, name: string): Promise<void
     });
     if (!confirmed) return;
     const removed = removeSphMcpServer(server.origin.path, server.name);
-    host.addNotice(
-      removed ? `Removed ${server.name} from ${server.origin.path}` : `${server.name} was already gone`,
-      removed ? 'success' : 'warn',
-    );
+    // 「本来就不在」不出声：结果与"删掉了"对用户是同一件事。
+    if (removed) host.addNotice(`Removed ${server.name} from ${server.origin.path}`, 'success');
     await reloadMcpWithNotice(host);
   }
 }

@@ -1,8 +1,8 @@
 /**
- * 底部状态栏：项目、审批、模型、上下文水位。四段都带 emoji。
+ * 底部状态栏：项目（· 分支 · 代理）、模型（· 推理等级）、上下文水位（· 缓存命中）。
+ * 段内逻辑项用 ` · ` 连接，段间用 `|`；emoji 和它的值之间仍是空格。
  *
- * 缓存命中和花费不在这行：百分比贴在水位旁边会被读成「上下文快满了」。
- * 窗口变窄时先丢掉项目，再丢掉模型；审批和水位留到最后。
+ * 窗口变窄时先丢项目，再丢模型；水位段留到最后。
  */
 
 import { type Component, visibleWidth } from '@/tui/index.js';
@@ -22,6 +22,8 @@ export interface FooterData {
   contextWindow: number;
   /** 最近一次请求的上下文 token 数（水位），未知为 undefined。 */
   contextTokens?: number;
+  /** 最近一次请求的提示词缓存命中率（0..1）。提供方没报或还没跑过轮次则省略。 */
+  cacheHit?: number;
 }
 
 export interface ReadonlyFooterDataProvider {
@@ -37,12 +39,6 @@ export function formatTokens(count: number): string {
   return `${Math.round(count / 1000000)}M`;
 }
 
-function approvalColor(mode: ApprovalMode): ThemeColor {
-  if (mode === 'yolo') return 'error';
-  if (mode === 'auto') return 'warning';
-  return 'primary';
-}
-
 export class FooterComponent implements Component {
   constructor(private readonly data: ReadonlyFooterDataProvider) {}
 
@@ -56,12 +52,13 @@ export class FooterComponent implements Component {
     const normalized = data.cwd.replace(/\\/g, '/').replace(/\/+$/, '');
     const projectName = normalized.split('/').pop() || data.cwd;
 
-    const project = ['📁', projectName];
-    if (data.gitBranch) project.push('🌿', data.gitBranch);
-    if (data.agent) project.push('🧩', data.agent);
+    // 段内按「emoji 值」成组，组间用 ` · ` 分隔：`📁 demo · 🌿 main`。
+    const project = [`📁 ${projectName}`];
+    if (data.gitBranch) project.push(`🌿 ${data.gitBranch}`);
+    if (data.agent) project.push(`🧩 ${data.agent}`);
 
-    const model = ['🤖', data.model];
-    if (data.effort) model.push('🧠', data.effort);
+    const model = [`🤖 ${data.model}`];
+    if (data.effort) model.push(`🧠 ${data.effort}`);
 
     const percent =
       data.contextTokens !== undefined && data.contextWindow > 0
@@ -70,13 +67,19 @@ export class FooterComponent implements Component {
     const contextText = `${data.contextTokens !== undefined ? formatTokens(data.contextTokens) : '0.0k'} / ${formatTokens(data.contextWindow)}`;
     const contextColor: ThemeColor = percent === undefined || percent <= 70 ? 'dim' : percent > 90 ? 'error' : 'warning';
 
+    // 缓存命中挂在水位后（`· ⚡ 98%`）：恒定中性灰——它是背景信息不是告警，
+    // 上色反而引人盯。提供方没报就整段缺席（「没上报」≠「命中 0」）。
+    const cacheSuffix =
+      data.cacheHit === undefined
+        ? ''
+        : ` ${theme.fg('dim', `· ⚡ ${Math.round(data.cacheHit * 100)}%`)}`;
+
     // 各段独立上色再拼接：已带色的段外层再套 dim 会被其中的 reset 清掉。
-    // droppable 的段先丢。审批和水位不是，窄到只剩它们才从左再丢。
+    // droppable 的段先丢，窄到只剩水位才从左再丢。
     const segments = [
-      { text: theme.fg('dim', project.join(' ')), droppable: true },
-      { text: theme.fg(approvalColor(data.approval), `🛡️ ${data.approval}`), droppable: false },
-      { text: theme.fg('dim', model.join(' ')), droppable: true },
-      { text: theme.fg(contextColor, `🧮 ${contextText}`), droppable: false },
+      { text: theme.fg('dim', project.join(' · ')), droppable: true },
+      { text: theme.fg('dim', model.join(' · ')), droppable: true },
+      { text: `${theme.fg(contextColor, `🧮 ${contextText}`)}${cacheSuffix}`, droppable: false },
     ];
     return [fitFooter(segments, width)];
   }

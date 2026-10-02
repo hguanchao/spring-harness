@@ -15,6 +15,15 @@ const DIALOG = '#1f1f1f';
 /** 行内码、计划模式输入框。 */
 const SYNTAX = '#5c9cf5';
 
+/**
+ * diff 增删行的底色，取 grok GrokNight 的 GREEN_DARK/RED_DARK（#063806/#420e14）。
+ * grok 源码注释点明了用意：这两个值特意「量化到 256 色立方绿/红而不是灰阶」——
+ * 亮度足够低，让上面的亮色语法高亮成为主角（配色见 syntax* 六个角色）。
+ * 16 色档给不出这种混合，回落整行前景色（grok terminal_default 是同一套降级）。
+ */
+const DIFF_ADD_BG = '#063806';
+const DIFF_DEL_BG = '#420e14';
+
 export const PALETTE = {
   bg: BG,
   primary: PRIMARY,
@@ -72,6 +81,8 @@ export const PALETTE = {
   mdLink: TEXT,
   mdLinkUrl: MUTED,
   mdCode: SYNTAX,
+  diffAddBg: DIFF_ADD_BG,
+  diffDelBg: DIFF_DEL_BG,
   mdCodeBlock: MUTED,
   mdCodeBlockBorder: MUTED,
   mdQuote: MUTED,
@@ -80,11 +91,14 @@ export const PALETTE = {
   // 列表符号与有序序号同用一色：紫，跟标题同一套强调系。
   mdListBullet: PRIMARY,
 
-  syntaxComment: MUTED,
-  syntaxKeyword: SYNTAX,
-  syntaxFunction: SYNTAX,
-  syntaxString: SYNTAX,
-  syntaxAnnotation: SYNTAX,
+  // diff 代码块的语法高亮七角色，取自 grok 的 grok-night.tmTheme（diff-syntax.ts 负责映射）。
+  syntaxComment: '#51597d', // 注释：暗蓝灰，渲染时另加斜体
+  syntaxKeyword: '#bb9af7', // 关键字 / storage（def、for、if、return…）
+  syntaxFunction: '#7aa2f7', // 函数名与内建调用（list、len、range、print…）
+  syntaxString: '#9ece6a', // 字符串（橄榄绿）
+  syntaxConstant: '#ff9e64', // 字面常量：数字、True/False/None
+  syntaxOperator: '#89ddff', // 运算符与转义序列
+  syntaxType: '#0db9d7', // 类型 / 类名 / 装饰器
 } as const;
 
 export type ThemeColor = keyof typeof PALETTE;

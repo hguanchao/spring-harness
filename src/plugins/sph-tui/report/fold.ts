@@ -6,6 +6,8 @@
  *
  * 只记被显式改过的那几组，其余按组的默认值走。这样新增一个分组不必登记任何东西，
  * 也不会出现「默认值改了、存量状态还按老的来」这种只在老用户机器上复现的偏差。
+ *
+ * 默认值是**收起**：「先看有哪几组」是常态，「全摊开」是例外。
  */
 
 import type { ReportGroup } from './doc.js';
@@ -17,6 +19,10 @@ export class FoldState {
 	/**
 	 * 某一组当前是否展开。
 	 *
+	 * 缺省**收起**：报告是「先看有哪几组，再展开要看的那一组」。全展开等于把几屏内容一次倒出来，
+	 * 想找一条还是得翻——这正是这个弹窗当初要解决的问题。要一打开就摊开的组显式给
+	 * `initiallyExpanded: true`。
+	 *
 	 * `forceExpand` 给检索用：命中的条目藏在收起的组里等于没搜到。它**只看不改**——
 	 * 清空查询之后要回到用户自己摆的那个状态，而不是留下一地被搜索撑开的组。
 	 */
@@ -25,7 +31,7 @@ export class FoldState {
 		if (group.collapsible === false) return true;
 		const recorded = this.explicit.get(tabId)?.get(group.key);
 		if (recorded !== undefined) return recorded;
-		return group.initiallyExpanded !== false;
+		return group.initiallyExpanded === true;
 	}
 
 	/** 翻转某一组；返回翻转后的状态。 */

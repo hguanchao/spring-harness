@@ -1,9 +1,18 @@
 import { getKeybindings } from "@/tui/input/keybindings.js";
+import { DoubleClickTracker } from "@/tui/screen/double-click.js";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@/tui/screen/tui.js";
-import { applyBackgroundToLine, ruleHeadingLine, truncateToWidth, visibleWidth } from "@/tui/text/utils.js";
+import { applyBackgroundToLine, truncateToWidth, visibleWidth } from "@/tui/text/utils.js";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
-const PRIMARY_COLUMN_GAP = 2;
+/**
+ * 主列与说明列之间的间隙。主列按「最宽 label + 本值」定宽，所以它既是最宽那行的可视间隙，
+ * 也是 `truncatePrimary` 的截断余量（预算 = 列宽 − 本值，见 renderItem）——两者必须同一个数，
+ * 否则要么最宽 label 被截成 `permissions…`，要么说明列白留一列。
+ *
+ * 这个值只定「最宽那行」的间隙，其余行看着宽是列对齐的结果（列宽由最宽的 label 决定），
+ * 想让它变窄只能让说明列不参与对齐——调小本值只会把最宽 label 逼到截断。
+ */
+export const PRIMARY_COLUMN_GAP = 2;
 const MIN_DESCRIPTION_WIDTH = 10;
 
 const normalizeToSingleLine = (text: string): string => text.replace(/[\r\n]+/g, " ").trim();
@@ -20,19 +29,23 @@ export interface SelectItem {
 	tone?: "danger";
 	/** 右对齐尾列：快捷键、别名这类次级信息，dim 色画在行最右端，放不下整个舍弃。 */
 	trailing?: string;
+	/** 当前生效项：行尾右对齐画 `✓`（currentMark 色），优先于 trailing。 */
+	current?: boolean;
 	/**
-	 * 非可选行：`header` 渲染成内嵌标签的分隔线（`─ Session ───`），`doc` 是与可选行
-	 * 同列对齐的 dim 说明行，`spacer` 是空行。三者都不参与 ↑/↓ 高亮、Enter 确认与点选，
-	 * 也不计入 `(n/m)`。缺省 = 可选项。
+	 * 非可选行：`header` 渲染成组头（`✦ 名字 (数量)`，数量是组内可选项个数，与报告面板
+	 * 同一套句法），`doc` 是与可选行同列对齐的 dim 说明行，`spacer` 是空行。三者都不参与
+	 * ↑/↓ 高亮、Enter 确认与点选，也不计入 `(n/m)`。缺省 = 可选项。
 	 */
 	kind?: "header" | "doc" | "spacer";
+	/** header 的数量单位（`models` → `(2 models)`）；省略只报数字 `(3)`。 */
+	countNoun?: string;
 }
 
 export interface SelectListTheme {
 	description: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
-	/** 选中行左侧标记（`>` 指向符），位置与工具行选中条对齐。 */
+	/** 选中行左侧标记（`›`），与工具行、分组列表的未展开字形（`FOLD_MARK.collapsed`）同源。 */
 	selectedMark: (mark: string) => string;
 	/** 选中行主文案（纯文本，不含标记）。 */
 	selectedRow: (text: string) => string;
@@ -42,6 +55,8 @@ export interface SelectListTheme {
 	hoverBg?: (text: string) => string;
 	/** `tone: "danger"` 的主文案着色；缺省原样输出。 */
 	danger?: (text: string) => string;
+	/** `current: true` 的行尾 `✓` 着色（success 绿）；缺省 dim。 */
+	currentMark?: (text: string) => string;
 }
 
 export interface SelectListTruncatePrimaryContext {
@@ -63,6 +78,11 @@ export interface SelectListLayoutOptions {
 	 * 只给「名字不可称呼」的表用（会话 id、历史 prompt）：条目本身有名字时号是多余的一列。
 	 */
 	numbered?: boolean;
+	/**
+	 * 行间距：相邻渲染行之间插几个空行——每项上下各留白，相邻两项共享一条。
+	 * 缺省 0 保持紧排（对话框列表信息密度优先）；悬浮菜单这类要透气的给 1。
+	 */
+	rowGap?: number;
 }
 
 export class SelectList implements Component {
@@ -75,7 +95,15 @@ export class SelectList implements Component {
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
+	/** 行间距（见 SelectListLayoutOptions.rowGap）。 */
+	private rowGap: number;
+	/** 最近一次 render 的行 → 条目下标映射；间隔行、空行与滚动尾行是 undefined。鼠标命中按它换算。 */
+	private lastRowMap: Array<number | undefined> = [];
+	// slopY 取 0：列表里 y 是离散的渲染行号，「点完上一条马上点下一条」绝不能算双击——
+	// 工具行容忍 1 行偏差是因为它判的是行内位置，这里判的是「哪一条」。
+	private readonly doubleClick = new DoubleClickTracker(500, 2, 0);
 
+	/** 激活（Enter 或**双击**一行）：宿主据此提交、切换或关掉浮层。 */
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
 	public onSelectionChange?: (item: SelectItem) => void;
@@ -88,6 +116,7 @@ export class SelectList implements Component {
 		this.maxVisible = maxVisible;
 		this.theme = theme;
 		this.layout = layout;
+		this.rowGap = Math.max(0, Math.floor(layout.rowGap ?? 0));
 		this.normalizeSelection();
 	}
 
@@ -138,10 +167,21 @@ export class SelectList implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		this.lastRowMap = [];
+
+		// 行进栈统一走这里：非首行前插入行距空行，空行在 rowMap 里没有条目——点上去落空。
+		const pushRow = (text: string, itemIndex: number | undefined): void => {
+			if (lines.length > 0 && this.rowGap > 0) {
+				lines.push("");
+				this.lastRowMap.push(undefined);
+			}
+			lines.push(text);
+			this.lastRowMap.push(itemIndex);
+		};
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
-			lines.push(this.theme.noMatch("  No matches"));
+			pushRow(this.theme.noMatch("  No matches"), undefined);
 			return lines;
 		}
 
@@ -161,28 +201,29 @@ export class SelectList implements Component {
 
 			const isSelected = i === this.selectedIndex;
 			if (item.kind === "header") {
-				lines.push(this.renderHeader(item, width));
+				pushRow(this.renderHeader(item, width, i), i);
 				continue;
 			}
 			if (item.kind === "spacer") {
-				lines.push("");
+				pushRow("", undefined);
 				continue;
 			}
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
 			if (item.kind === "doc") {
 				// 说明行与可选行同列对齐，但整行 dim、无标记、永不选中。
 				const plain = this.renderItem({ ...item, trailing: undefined }, false, width, descriptionSingleLine, primaryColumnWidth, blank, false);
-				lines.push(this.theme.description(plain));
+				pushRow(this.theme.description(plain), i);
 				continue;
 			}
-			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth, numbers.get(i), i === this.hoverIndex));
+			pushRow(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth, numbers.get(i), i === this.hoverIndex), i);
 		}
 
-		// Add scroll indicators if needed
+		// Add scroll indicators if needed（滚动尾行不是条目，不参加行距——它贴着底边框）
 		if ((startIndex > 0 || endIndex < this.filteredItems.length) && this.renderScrollInfoLine) {
 			const scrollText = `  ${this.selectableOrdinal()}/${this.selectableCount()}`;
 			// Truncate if too long for terminal
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
+			this.lastRowMap.push(undefined);
 		}
 
 		return lines;
@@ -198,30 +239,28 @@ export class SelectList implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.filteredItems.length === 0) return undefined;
-		// 滚轮只改高亮（可视区跟着选中项走），不确认。点选同理：确认只走 Enter。
+		// 滚轮只改高亮（可视区跟着选中项走），不确认。单击同理：它只移高亮，确认走 Enter 或双击。
 		if (event.type === "wheel" && event.wheelDelta) {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
 			this.moveSelection(delta, false);
 			return { handled: true, render: this.selectedIndex !== previousIndex };
 		}
+		// 渲染行 → 条目：行距空行、组头/说明行虽在表上但不可选，命中落空。
+		// （有行距时渲染行不再与条目一一对应，必须查表，不能拿 y 直接当条目下标。）
+		const rowIndex = this.lastRowMap[event.y];
 		// 悬停只画预览底色，不动高亮——可视区跟着高亮走，跟悬停走会晕。
 		if (event.type === "move") {
-			const { startIndex, endIndex } = this.getVisibleRange();
-			const row = startIndex + event.y;
-			const target =
-				row >= startIndex && row < endIndex && this.isSelectable(this.filteredItems[row]) ? row : undefined;
+			const target = rowIndex !== undefined && this.isSelectable(this.filteredItems[rowIndex]) ? rowIndex : undefined;
 			if (target === this.hoverIndex) return undefined;
 			this.hoverIndex = target;
 			return { handled: true, render: true };
 		}
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
-		const { startIndex, endIndex } = this.getVisibleRange();
-		const itemIndex = startIndex + event.y;
-		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
-		// 分隔线、说明行不可点选。
-		if (!this.isSelectable(this.filteredItems[itemIndex])) return undefined;
+		// 分隔线、说明行、间隔行不可点选。
+		if (rowIndex === undefined || !this.isSelectable(this.filteredItems[rowIndex])) return undefined;
+		const itemIndex = rowIndex;
 
 		if (event.type === "press") {
 			this.mousePressedIndex = itemIndex;
@@ -237,6 +276,14 @@ export class SelectList implements Component {
 			const changed = this.selectedIndex !== clickedIndex;
 			this.selectedIndex = clickedIndex;
 			if (changed) this.notifySelectionChange();
+			// 双击 = 激活，与 Enter 同源（见 docs/interactions.md）。
+			// 单击必须留给「选中/拖选」，所以激活上移到双击——这跟工具行、报告分组的开合是
+			// 同一套读法：点一下是「看着它」，点两下才是「打开它」。
+			const item = this.filteredItems[clickedIndex];
+			if (item && this.isSelectable(item) && this.doubleClick.accept(event.x, event.y) && this.onSelect) {
+				this.onSelect(item);
+				return { handled: true, render: true };
+			}
 			return { handled: true, render: changed };
 		}
 		return undefined;
@@ -339,7 +386,6 @@ export class SelectList implements Component {
 		return this.filteredItems.reduce((count, item) => (this.isSelectable(item) ? count + 1 : count), 0);
 	}
 
-	/** 分组分隔线：`─ Group ─────…`，标签嵌在横线里，dim 色，整行铺满。 */
 	/**
 	 * 行号槽内容（`index → " 3"`）。没开 `numbered` 时返回空表。
 	 * 宽度按整表条数定，之后不再变——滚过 9→10 那一刻整条轨往右跳一格是最刺眼的抖。
@@ -359,12 +405,24 @@ export class SelectList implements Component {
 		return numbers;
 	}
 
-	private renderHeader(item: SelectItem, width: number): string {
-		// 字形与 markdown 的 h3 横线同一套（ruleHeadingLine），整屏横线只有一种画法。
-		// 着色仍走 description：分组行不是可选项，不该和它们抢注意力。
-		// 窄终端下标签可能比内容宽还长，先截断再上色——着色后截断会切在转义序列中间。
-		const rule = ruleHeadingLine(item.label, width, (text) => text);
-		return this.theme.description(truncateToWidth(rule, width, ""));
+	/** 组内可选项个数：从 header 往下数到下一个 header 为止，只数可选行。 */
+	private headerCount(index: number): number {
+		let count = 0;
+		for (let i = index + 1; i < this.items.length; i++) {
+			const item = this.items[i];
+			if (item === undefined || item.kind === "header") break;
+			if (item.kind === undefined) count += 1;
+		}
+		return count;
+	}
+
+	private renderHeader(item: SelectItem, width: number, index: number): string {
+		// 组头与报告面板同款句法：`✦ 名字 (数量)`。数量是组内可选项个数，countNoun 给单位；
+		// dim 色——组头不是可选项，不该和它们抢注意力。窄终端先截断再上色，防止切在转义序列中间。
+		const count = this.headerCount(index);
+		const suffix = count === 0 || item.countNoun === undefined ? "" : ` (${count} ${item.countNoun})`;
+		const line = ` ✦ ${item.label}${suffix}`;
+		return this.theme.description(truncateToWidth(line, width, ""));
 	}
 
 	private renderItem(
@@ -376,7 +434,7 @@ export class SelectList implements Component {
 		rowNumber?: string,
 		isHovered: boolean = false,
 	): string {
-		const mark = isSelected ? this.theme.selectedMark(">") : " ";
+		const mark = isSelected ? this.theme.selectedMark("›") : " ";
 		// 号槽接在选中条后面：`>` 保持在最外一格，与工具行的选中条对齐。
 		const numberSlot = rowNumber === undefined ? "" : `${this.theme.description(`${rowNumber} `)}`;
 		const prefix = `${mark} ${numberSlot}`;
@@ -389,9 +447,13 @@ export class SelectList implements Component {
 			return text;
 		};
 		// 尾列（快捷键/别名）贴行最右端；空间不够时整列舍弃，不挤占正文。
-		const trailingText = item.trailing ? normalizeToSingleLine(item.trailing) : undefined;
+		// `current` 的行尾画 `✓`（currentMark 色）——它是「这项正生效」的标记，优先于 trailing。
+		const isCurrent = item.current === true;
+		const trailingText = isCurrent ? "✓" : item.trailing ? normalizeToSingleLine(item.trailing) : undefined;
 		const trailingWidth = trailingText ? visibleWidth(trailingText) : 0;
 		const trailingReserve = trailingText ? trailingWidth + 1 : 0;
+		const paintTrailing = (text: string): string =>
+			isCurrent && this.theme.currentMark ? this.theme.currentMark(text) : this.theme.description(text);
 		// 选中/悬停行整行铺底（含尾随空格，末尾复位）；行内的 SGR 只动前景和字重，不会洗掉它。
 		const finishRow = (line: string): string => {
 			const bg = isSelected ? this.theme.selectedBg : isHovered ? this.theme.hoverBg : undefined;
@@ -420,7 +482,7 @@ export class SelectList implements Component {
 				if (trailingText) {
 					const leftEnd = descriptionStart + visibleWidth(truncatedDesc);
 					const pad = " ".repeat(Math.max(1, width - 1 - trailingWidth - leftEnd));
-					line += pad + this.theme.description(trailingText);
+					line += pad + paintTrailing(trailingText);
 				}
 				return finishRow(line);
 			}
@@ -432,7 +494,7 @@ export class SelectList implements Component {
 		if (trailingText) {
 			const leftEnd = prefixWidth + visibleWidth(truncatedValue);
 			const pad = " ".repeat(Math.max(1, width - 1 - trailingWidth - leftEnd));
-			line += pad + this.theme.description(trailingText);
+			line += pad + paintTrailing(trailingText);
 		}
 		return finishRow(line);
 	}

@@ -1,75 +1,23 @@
 /**
- * `/prompts`、`/diff`、`/fork`。
+ * `/diff`、`/fork`。
  *
- * 模板只展开进输入框，不进系统提示。diff 只读 git，不提交。
- * fork 复制当前消息到新会话，原会话只追加一条 session_fork。
+ * diff 只读 git，不提交。fork 复制当前消息到新会话，原会话只追加一条 session_fork。
  */
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { sphHome } from '@/home.js';
 import { foldSessionState, sessionEventData } from '@/session/fold.js';
 import { appendableMessage } from '@/plugins/sph-loop/compact.js';
 import { EMPTY_PLUGIN_SERVICES } from '@/plugins/types.js';
 import { SESSION_SERVICE, type SessionService, type SkillEntry } from '@/plugins/services.js';
 import { sessionService } from '@/plugins/sph-session/index.js';
-import { commandPanelOptions, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
+import { commandPanelOptions, showMessageDialog } from '@/plugins/sph-tui/dialogs.js';
 import type { SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
 
 function sessionsOf(host: SessionCommandHost): SessionService | undefined {
   const found = host.deps.pluginServices.get<SessionService>(SESSION_SERVICE);
   if (found) return found;
   return host.deps.pluginServices === EMPTY_PLUGIN_SERVICES ? sessionService : undefined;
-}
-
-function promptDirs(workspaceRoot: string): string[] {
-  const userHome = process.env.USERPROFILE ?? process.env.HOME ?? '';
-  return [
-    join(userHome, '.sph', 'prompts'),
-    join(sphHome(), 'prompts'),
-    join(workspaceRoot, '.sph', 'prompts'),
-  ];
-}
-
-function readPrompts(workspaceRoot: string): Array<{ name: string; text: string }> {
-  const byName = new Map<string, string>();
-  for (const dir of promptDirs(workspaceRoot)) {
-    if (!existsSync(dir)) continue;
-    let names: string[] = [];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      continue;
-    }
-    for (const file of names) {
-      if (!file.endsWith('.md')) continue;
-      try {
-        byName.set(file.slice(0, -3), readFileSync(join(dir, file), 'utf8').trim());
-      } catch {
-        // 一个读不了的模板不影响其余。
-      }
-    }
-  }
-  return [...byName.entries()].map(([name, text]) => ({ name, text }));
-}
-
-/** 选一个模板，正文放进输入框。 */
-export async function commandPrompts(host: SessionCommandHost): Promise<void> {
-  const prompts = readPrompts(host.deps.workspaceRoot);
-  if (prompts.length === 0) {
-    host.addNotice('No prompt templates. Put a .md file in ~/.sph/prompts or .sph/prompts.', 'dim');
-    return;
-  }
-  const picked = await showSelectDialog(host.ui, {
-    title: 'Prompt templates',
-    items: prompts.map((prompt) => ({ value: prompt.name, label: prompt.name })),
-    maxVisible: 12,
-    ...commandPanelOptions(host.ui),
-  });
-  if (picked === undefined) return;
-  const text = prompts.find((prompt) => prompt.name === picked)?.text ?? '';
-  host.editor.setText(text);
-  host.focusEditor();
 }
 
 /** 只读 git diff。不是 git 仓库或没有改动时说明原因。 */
@@ -94,7 +42,8 @@ export async function commandDiff(host: SessionCommandHost): Promise<void> {
   }
 showMessageDialog(host.ui, {
   title: 'git diff',
-  text: text.length > 12_000 ? `${text.slice(0, 12_000)}\n…` : text,
+  // 包成 diff 围栏：一是按 git 的行首前缀上色，二是别让 `- ` 行被 markdown 当成列表项。
+  text: `\`\`\`diff\n${text.length > 12_000 ? `${text.slice(0, 12_000)}\n…` : text}\n\`\`\``,
   ...commandPanelOptions(host.ui),
 });
 }

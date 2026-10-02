@@ -7,11 +7,7 @@
  */
 
 import { API_PROTOCOLS, type ApiProtocol } from '@/config/load.js';
-import { NOTIFY_SETTINGS, type NotifySetting } from '@/config/primitives.js';
 import type { NotificationChannel } from '@/tui/terminal/terminal-image.js';
-import { NOTIFY_HINTS } from '@/plugins/sph-tui/notify.js';
-import { openReport } from '@/plugins/sph-tui/report/dialog.js';
-import type { ReportContext } from '@/plugins/sph-tui/report/registry.js';
 import { appendModelDeclaration, type ProviderDeclaration } from '@/config/registry.js';
 import { sphModelsPath } from '@/home.js';
 import { displayNameForModel, listAvailableModels } from '@/plugins/sph-llm/models.js';
@@ -44,12 +40,8 @@ export interface SettingsCommandHost {
   /** 把协议写到该模型的声明上（覆盖 provider 默认）并立刻重建 client。 */
   applyApi(api: ApiProtocol, provider: ProviderDeclaration, modelId: string): void;
   applyApproval(mode: ApprovalMode): void;
-  /** 报告弹窗的取数环境（`/permissions` 走它落到 Permissions tab）。 */
-  reportContext(): ReportContext;
-  /** `/notify`：完成提醒的当前档位、探测到的桌面通道，以及切换后的落盘。 */
-  currentNotify(): NotifySetting;
+  /** 完成提醒探测到的桌面通道（设置命令已去掉，运行时提醒仍要它）。 */
   notificationChannel(): NotificationChannel;
-  applyNotify(setting: NotifySetting): void;
 }
 
 export async function commandModel(host: SettingsCommandHost, argument = ''): Promise<void> {
@@ -64,9 +56,7 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
     host.addNotice('No models declared in models.json.', 'warn');
     return;
   }
-  // 分组头即提供商：行里不再重复提供商列；current 状态放行尾右对齐。
-  // 候选只来自 models.json 的声明：模型目录是显式维护的清单，不再从上游拉取缓存——
-  // 上游会新增模型，而拉一次就存住的缓存只会静默地给出旧列表。
+  // 分组头即提供商：行里不再重复提供商列，当前模型用右端 ✓ 标记。
   const widthOf = (text: string): number => visibleWidth(text);
   const labelColumnWidth = Math.max(
     ...providers.flatMap((provider) =>
@@ -74,7 +64,7 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
     ),
   );
   const items: SelectItem[] = providers.flatMap((provider) => [
-    { value: `provider:${provider.name}`, label: provider.name, kind: 'header' as const },
+    { value: `provider:${provider.name}`, label: provider.name, kind: 'header' as const, countNoun: 'models' },
     ...provider.models.map((declared) => {
       // 模型 id 可以含 `/`，菜单值不能再靠斜杠把 provider 和 id 粘在一起。
       const value = `${provider.name}\u001f${declared.id}`;
@@ -83,7 +73,7 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
         value,
         label: declared.name ?? displayNameForModel(declared.id),
         description: declared.id,
-        trailing: isCurrent ? 'current' : undefined,
+        current: isCurrent || undefined,
       };
     }),
   ]);
@@ -117,26 +107,25 @@ export async function commandModel(host: SettingsCommandHost, argument = ''): Pr
  */
 export async function commandProvider(host: SettingsCommandHost, argument = ''): Promise<void> {
   const providers = host.deps.models();
-  // 列对齐基元：两处菜单（provider 选择、模型选择）共用同一套宽与 pad。
   const widthOf = (text: string): number => visibleWidth(text);
-  const padTo = (text: string, width: number): string => `${text}${' '.repeat(width - widthOf(text) + 2)}`;
   let targetName = argument.trim();
   if (targetName === '') {
-    // description 排两段：baseUrl / 状态，各按最宽值对齐，current 不会锯齿。
-    const baseUrlColumnWidth = Math.max(...providers.map((provider) => widthOf(provider.baseUrl)));
-    const items: SelectItem[] = providers.map((provider) => ({
-      value: provider.name,
-      label: provider.name,
-      description: `${padTo(
-        provider.baseUrl,
-        baseUrlColumnWidth,
-      )}${provider.name === host.currentProvider() ? 'current' : ''}`.trimEnd(),
-    }));
+    const items: SelectItem[] = [
+      { value: '', label: 'Providers', kind: 'header' as const, countNoun: 'providers' },
+      ...providers.map((provider) => ({
+        value: provider.name,
+        label: provider.name,
+        description: provider.baseUrl,
+        current: provider.name === host.currentProvider() || undefined,
+      })),
+    ];
+    const selectable = items.filter((item) => item.kind === undefined);
     const selected = await host.editor.showInlineMenu({
-      title: 'Provider',
+      title: 'Provider · step 1/4',
       items,
       maxVisible: 14,
-      primaryColumnWidth: primaryColumnWidthFor(items),
+      primaryColumnWidth: primaryColumnWidthFor(selectable),
+      cancelLabel: 'skip',
     });
     if (!selected) return;
     targetName = selected.value;
@@ -183,24 +172,27 @@ export async function commandProvider(host: SettingsCommandHost, argument = ''):
       .filter((id) => !declaredIds.has(id))
       .map((id) => ({ id, name: undefined })),
   ];
-  // description 列排两段：模型 ID / 状态，各按最宽值 pad（间隙 2），label 列随内容收紧。
-  const idColumnWidth = Math.max(...candidates.map((candidate) => widthOf(candidate.id)));
   const labelColumnWidth = Math.max(
     ...candidates.map((candidate) => widthOf(candidate.name ?? displayNameForModel(candidate.id))),
   );
-  const items: SelectItem[] = candidates.map((candidate) => {
-    const isCurrent = provider.name === host.currentProvider() && candidate.id === host.currentModel();
-    return {
-      value: candidate.id,
-      label: candidate.name ?? displayNameForModel(candidate.id),
-      description: `${padTo(candidate.id, idColumnWidth)}${isCurrent ? 'current' : ''}`.trimEnd(),
-    };
-  });
+  const items: SelectItem[] = [
+    { value: '', label: provider.name, kind: 'header' as const, countNoun: 'models' },
+    ...candidates.map((candidate) => {
+      const isCurrent = provider.name === host.currentProvider() && candidate.id === host.currentModel();
+      return {
+        value: candidate.id,
+        label: candidate.name ?? displayNameForModel(candidate.id),
+        description: candidate.id,
+        current: isCurrent || undefined,
+      };
+    }),
+  ];
   let selected = await host.editor.showInlineMenu({
-    title: `Model @ ${provider.name}`,
+    title: 'Model · step 2/4',
     items,
     maxVisible: 14,
     primaryColumnWidth: labelColumnWidth + 2,
+    cancelLabel: catalogUnavailable ? 'type id' : 'skip',
   });
   if (!selected && catalogUnavailable) {
     // 目录拉不到时的兜底：直接键入网关侧的模型 id，随后照样追加进 models.json。
@@ -223,9 +215,9 @@ export async function commandProvider(host: SettingsCommandHost, argument = ''):
     }
   }
   host.applyModel(modelId, provider.name);
-  const effort = await promptEffort(host);
+  const effort = await promptEffort(host, 3);
   if (effort !== undefined) host.applyEffort(effort);
-  const api = await promptApi(host, host.deps.resolveModel(modelId, provider.name).api);
+  const api = await promptApi(host, host.deps.resolveModel(modelId, provider.name).api, 4);
   if (api !== undefined) host.applyApi(api, provider, modelId);
 }
 
@@ -243,32 +235,41 @@ export async function commandEffort(host: SettingsCommandHost, argument = ''): P
   if (selected !== undefined) host.applyEffort(selected);
 }
 
-async function promptEffort(host: SettingsCommandHost): Promise<ReasoningEffort | undefined> {
+async function promptEffort(
+  host: SettingsCommandHost,
+  step?: number,
+): Promise<ReasoningEffort | undefined> {
   const items: SelectItem[] = REASONING_EFFORTS.map((effort) => ({
     value: effort,
     label: effort,
-    description: effort === host.currentEffort() ? 'current' : undefined,
+    current: effort === host.currentEffort() || undefined,
   }));
   const selected = await host.editor.showInlineMenu({
-    title: 'Reasoning effort',
+    title: step === undefined ? 'Reasoning effort' : `Provider · step ${step}/4 · Reasoning effort`,
     items,
     maxVisible: 6,
     primaryColumnWidth: primaryColumnWidthFor(items),
+    ...(step === undefined ? {} : { cancelLabel: 'skip' }),
   });
   return selected === undefined ? undefined : (selected.value as ReasoningEffort);
 }
 
-async function promptApi(host: SettingsCommandHost, current: ApiProtocol): Promise<ApiProtocol | undefined> {
+async function promptApi(
+  host: SettingsCommandHost,
+  current: ApiProtocol,
+  step?: number,
+): Promise<ApiProtocol | undefined> {
   const items: SelectItem[] = API_PROTOCOLS.map((api) => ({
     value: api,
     label: api,
-    description: api === current ? 'current' : undefined,
+    current: api === current || undefined,
   }));
   const selected = await host.editor.showInlineMenu({
-    title: 'API protocol',
+    title: step === undefined ? 'API protocol' : `Provider · step ${step}/4 · API protocol`,
     items,
     maxVisible: 3,
     primaryColumnWidth: primaryColumnWidthFor(items),
+    ...(step === undefined ? {} : { cancelLabel: 'skip' }),
   });
   return selected === undefined ? undefined : (selected.value as ApiProtocol);
 }
@@ -286,17 +287,6 @@ const MODE_HINTS: Record<ApprovalMode, string> = {
   yolo: 'Approve everything automatically',
 };
 
-/**
- * `/permissions`：把生效中的权限状态一次说清——模式、沙箱、两层规则与授权落点。
- *
- * 规则是安全边界的输入，而「我写的那条到底生效没有」在只有配置文件的年代只能靠试。
- * 这里把每一条规则的来源连文件名一起列出来，再说明项目级 allow 是否被信任门丢掉了。
- * 取数环境由宿主的 reportContext 提供（permissions getter），落到报告弹窗的 Permissions tab。
- */
-export async function commandPermissions(host: SettingsCommandHost): Promise<void> {
-  await openReport(host.ui, 'permissions', host.reportContext());
-}
-
 export async function commandPermission(host: SettingsCommandHost, argument = ''): Promise<void> {
   if (argument !== '') {
     const match = APPROVAL_MODES.find((mode) => mode === argument);
@@ -311,54 +301,11 @@ export async function commandPermission(host: SettingsCommandHost, argument = ''
     value: mode,
     label: mode,
     description: MODE_HINTS[mode],
+    current: mode === host.currentApproval() || undefined,
   }));
   const selected = await host.editor.showInlineMenu({ title: 'Approval mode', items, maxVisible: APPROVAL_MODES.length, primaryColumnWidth: primaryColumnWidthFor(items) });
   if (!selected) return;
   host.applyApproval(selected.value as ApprovalMode);
-}
-
-/**
- * `/notify [mode]`：任务完成时怎么提醒。无参数打开选择器，带参数直接设。
- *
- * 菜单顶部的分隔行写这台终端探测到的桌面通道——`desktop` 一档在接不到通知的终端上等于
- * 什么都不响，与其事后疑惑，不如在选的那一刻说明。落盘走 `[ui] notify`（表体键），
- * 与 `/permission` 的顶层标量不同一条通路。
- */
-export async function commandNotify(host: SettingsCommandHost, argument = ''): Promise<void> {
-  if (argument !== '') {
-    const match = NOTIFY_SETTINGS.find((setting) => setting === argument);
-    if (!match) {
-      host.addNotice(`Unknown notify mode: ${argument} (${NOTIFY_SETTINGS.join(' | ')})`, 'warn');
-      return;
-    }
-    host.applyNotify(match);
-    return;
-  }
-  const channel = host.notificationChannel();
-  const items: SelectItem[] = [
-    {
-      value: 'channel',
-      label:
-        channel === 'none'
-          ? 'no desktop notification channel detected in this terminal'
-          : `desktop channel: ${channel}`,
-      kind: 'header' as const,
-    },
-    ...NOTIFY_SETTINGS.map((setting) => ({
-      value: setting,
-      label: setting,
-      description: NOTIFY_HINTS[setting],
-      trailing: setting === host.currentNotify() ? 'current' : undefined,
-    })),
-  ];
-  const selected = await host.editor.showInlineMenu({
-    title: 'Notifications',
-    items,
-    maxVisible: NOTIFY_SETTINGS.length + 1,
-    primaryColumnWidth: primaryColumnWidthFor(items),
-  });
-  if (!selected) return;
-  host.applyNotify(selected.value as NotifySetting);
 }
 
 /** Shift+Tab：按 APPROVAL_MODES 的顺序循环审批模式（复用 /permission 的应用逻辑）。 */

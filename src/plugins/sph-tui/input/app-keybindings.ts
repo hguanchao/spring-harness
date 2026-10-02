@@ -16,8 +16,8 @@ export type AppKeybinding =
   | 'app.tools.expand'
   | 'app.command'
   | 'app.help'
-  | 'app.followUp'
   | 'app.copy'
+  | 'app.followUp'
   | 'app.approval.cycle'
   | 'app.agent.cycle';
 
@@ -47,20 +47,22 @@ export const APP_KEYBINDINGS: Record<AppKeybinding, AppKeybindingDefinition> = {
   'app.tools.expand': { keys: ['ctrl+o'], description: 'expand tool output', when: 'always' },
   'app.command': { keys: ['ctrl+p'], description: 'commands', when: 'always' },
   'app.help': { keys: ['f1'], description: 'help', when: 'always' },
+  /**
+   * 复制选区。为什么给两个键：`Ctrl+Shift+C` 在 Windows Terminal、iTerm2 上被终端自己
+   * 截走做「复制终端选区」，应用根本收不到；`Alt+C` 是那条通路被占时的备用键。
+   *
+   * 只在**有选区**时才消耗按键——没有选区就放行，终端自身的复制语义才留得下来。
+   * 除键位外还有一条等效通路：`/copy` 命令（键盘可发现，任何终端都能用）。
+   */
+  'app.copy': {
+    keys: ['ctrl+shift+c', 'alt+c'],
+    description: 'copy the selection',
+    when: 'selection active',
+  },
   'app.followUp': {
     keys: ['alt+enter'],
     description: 'queue a follow-up for after this turn',
     when: 'always',
-  },
-  /**
-   * 键盘复制。绑在 `ctrl+shift+c`：贴近终端习惯，但部分终端会先把这个组合自己吃掉
-   * （那时按键到不了这里），所以只在**有选区**时拦下——没选区就原样透传，
-   * 终端的复制/中断语义不受影响。
-   */
-  'app.copy': {
-    keys: ['ctrl+shift+c'],
-    description: 'copy the selection to the system clipboard',
-    when: 'selection',
   },
   'app.approval.cycle': {
     keys: ['shift+tab'],

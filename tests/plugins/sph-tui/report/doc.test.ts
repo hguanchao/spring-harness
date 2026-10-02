@@ -10,6 +10,7 @@ import { describe, it } from 'node:test';
 import { groupCountSuffix, plainText, reportGroups, type ReportGroup, type ReportTab } from '@/plugins/sph-tui/report/doc.js';
 import { filterTab } from '@/plugins/sph-tui/report/filter.js';
 import { FoldState } from '@/plugins/sph-tui/report/fold.js';
+import { ReportDialog } from '@/plugins/sph-tui/report/dialog.js';
 
 function group(key: string, label: string, items: readonly string[]): ReportGroup {
 	return { key, label, items: items.map((name) => ({ key: name, label: name })) };
@@ -26,6 +27,37 @@ function tab(groups: readonly ReportGroup[]): ReportTab {
 		empty: 'Nothing here.',
 	};
 }
+
+describe('report action handoff', () => {
+	it('keeps the report open when an action handler is installed', () => {
+		const reportTab = { ...tab([]), actions: [{ key: 'm', label: 'manage', dropPriority: 0 }] };
+		const spec = { id: 't', label: 'T', build: () => reportTab };
+		const dialog = new ReportDialog([spec], 't', { workspaceRoot: 'E:/workspace' }, () => 20);
+		let closed = false;
+		let action: string | undefined;
+		dialog.onClose = () => {
+			closed = true;
+		};
+		dialog.onAction = (key) => {
+			action = key;
+		};
+		dialog.handleInput('m');
+		assert.equal(action, 'm');
+		assert.equal(closed, false);
+	});
+
+	it('closes with the action when there is no action handler', () => {
+		const reportTab = { ...tab([]), actions: [{ key: 'm', label: 'manage', dropPriority: 0 }] };
+		const spec = { id: 't', label: 'T', build: () => reportTab };
+		const dialog = new ReportDialog([spec], 't', { workspaceRoot: 'E:/workspace' }, () => 20);
+		let action: string | undefined;
+		dialog.onClose = (key) => {
+			action = key;
+		};
+		dialog.handleInput('m');
+		assert.equal(action, 'm');
+	});
+});
 
 describe('plainText', () => {
 	it('拍平分段结构，不解析任何标记', () => {
@@ -100,20 +132,26 @@ describe('filterTab', () => {
 describe('FoldState', () => {
 	const collapsible = group('g', 'G', ['x']);
 
-	it('缺省全展开；翻转会记住；只记被显式改过的组', () => {
+	it('缺省收起；翻转会记住；只记被显式改过的组', () => {
 		const fold = new FoldState();
-		assert.equal(fold.isExpanded('t', collapsible), true);
-		assert.equal(fold.toggle('t', collapsible), false);
 		assert.equal(fold.isExpanded('t', collapsible), false);
+		assert.equal(fold.toggle('t', collapsible), true);
+		assert.equal(fold.isExpanded('t', collapsible), true);
 		// 没动过的组仍按默认值走
-		assert.equal(fold.isExpanded('t', group('h', 'H', ['y'])), true);
+		assert.equal(fold.isExpanded('t', group('h', 'H', ['y'])), false);
+	});
+
+	it('initiallyExpanded: true 的组缺省就是展开的', () => {
+		const fold = new FoldState();
+		const open = { ...group('o', 'O', ['x']), initiallyExpanded: true };
+		assert.equal(fold.isExpanded('t', open), true);
 	});
 
 	it('按 tab 分开存', () => {
 		const fold = new FoldState();
-		fold.set('t1', 'g', false);
-		assert.equal(fold.isExpanded('t1', collapsible), false);
-		assert.equal(fold.isExpanded('t2', collapsible), true);
+		fold.set('t1', 'g', true);
+		assert.equal(fold.isExpanded('t1', collapsible), true);
+		assert.equal(fold.isExpanded('t2', collapsible), false);
 	});
 
 	it('forceExpand 只看不改；不可折叠组永远展开', () => {

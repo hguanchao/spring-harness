@@ -31,7 +31,17 @@ export const sessionService: SessionService = {
   exportHtml,
 };
 
-/** 插件入口。宿主按 `src/plugins/sph-session/` 装载。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。宿主按 `src/plugins/sph-session/` 装载。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   api.provide(SESSION_SERVICE, sessionService);
 }
+
+export default {
+  description: 'JSONL session storage, locking, folding and export.',
+  setup,
+};

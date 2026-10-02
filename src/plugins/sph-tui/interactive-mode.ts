@@ -48,7 +48,7 @@ import { builtinAgents } from '@/plugins/sph-subagent/agents.js';
 import { createLlmClassifier } from '@/permission/auto.js';
 import { HeadlessApprover, visibleTools, type ApprovalMode, type ApprovalRequest, type Approver } from '@/permission/policy.js';
 import type { SandboxMode } from '@/sandbox/types.js';
-import { updateConfigFile, updateConfigTableEntry } from '@/config/save.js';
+import { updateConfigFile } from '@/config/save.js';
 import { upsertModelApi, type ProviderDeclaration } from '@/config/registry.js';
 import type { ApiProtocol } from '@/config/load.js';
 import type { NotifySetting } from '@/config/primitives.js';
@@ -67,7 +67,6 @@ import { defaultTools } from '@/plugins/sph-tools/index.js';
 import {
   BLOCK_GAP,
   CombinedAutocompleteProvider,
-  type ClipboardCopy,
   Container,
   findFdBinary,
   getCapabilities,
@@ -83,6 +82,7 @@ import {
   ProcessTerminal,
   VStack,
   ScrollView,
+  type ClipboardCopy,
 } from '@/tui/index.js';
 import { clipboardFailureHint, copyToClipboard as writeClipboard } from '@/plugins/sph-tui/clipboard.js';
 import { formatElapsed, notificationBytes } from '@/plugins/sph-tui/notify.js';
@@ -101,6 +101,7 @@ import { FooterComponent, type FooterData } from '@/plugins/sph-tui/footer/index
 import { HeaderComponent } from '@/plugins/sph-tui/header/index.js';
 import { UserMessageComponent } from '@/plugins/sph-tui/messages/user-message.js';
 import { userMessageBubbleY } from '@/plugins/sph-tui/messages/sticky-user-message.js';
+import { type NoticeLevel, NoticeComponent } from '@/plugins/sph-tui/messages/notice.js';
 import { RecapMessageComponent } from '@/plugins/sph-tui/messages/recap.js';
 import { generateSessionTitle, TITLE_SOURCE_SAMPLE_CHARS } from '@/plugins/sph-tui/transcript/session-title.js';
 import { productScreenOptions } from '@/plugins/sph-tui/transcript-chrome.js';
@@ -111,10 +112,11 @@ import { COMMANDS, COMMAND_ALIASES, COMMAND_NAMES, primaryColumnWidthFor, type C
 import { SteerBar, type SteerBarHost } from '@/plugins/sph-tui/input/steer-bar.js';
 import { TranscriptProjection, type TranscriptHost } from '@/plugins/sph-tui/transcript/index.js';
 import { restoreSessionInto, type ReplayHost } from '@/plugins/sph-tui/transcript/session-replay.js';
-import { commandMcps } from '@/plugins/sph-tui/commands/mcp-commands.js';
-import { commandHistory, commandNewSession, commandResume, commandExport, commandCopy, type SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
-import { commandDiff, commandFork, commandPrompts, invocableSkillPrompt } from '@/plugins/sph-tui/commands/workspace-commands.js';
-import { commandModel, commandProvider, commandEffort, commandPermission, commandPermissions, commandNotify, cycleApprovalMode, type SettingsCommandHost } from '@/plugins/sph-tui/commands/settings-commands.js';
+import { commandMcpsManager } from '@/plugins/sph-tui/commands/mcp-commands.js';
+import { MCP_MANAGE_ACTION } from '@/plugins/sph-tui/report/sources/mcps.js';
+import { commandHistory, commandNewSession, commandResume, commandExport, type SessionCommandHost } from '@/plugins/sph-tui/commands/session-commands.js';
+import { commandDiff, commandFork, invocableSkillPrompt } from '@/plugins/sph-tui/commands/workspace-commands.js';
+import { commandModel, commandProvider, commandEffort, commandPermission, cycleApprovalMode, type SettingsCommandHost } from '@/plugins/sph-tui/commands/settings-commands.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 
 /** 命令模块和测试从这里拿 TuiDeps。进程入口不再把屏幕类型一起导出。 */
@@ -148,7 +150,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private readonly editorContainer = new Container();
   private readonly footerContainer = new Container();
   private transcriptView: ScrollView | undefined;
-  private readonly idleStatus = new IdleStatus(() => this.ui?.requestRender());
+  private readonly idleStatus = new IdleStatus();
   private readonly footer: FooterComponent;
   private readonly header: HeaderComponent;
 
@@ -228,6 +230,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private agentName = '';
 
   private usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0 };
+  /** 最近一次请求的提示词缓存命中率（cached/prompt，0..1）。提供方没报则 undefined。 */
+  private cacheHit?: number;
   private contextTokens?: number;
 
   /** `[ui] notify` 的当前值；`/notify` 改它并写回 config.toml。 */
@@ -296,14 +300,13 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         })
       : undefined;
 
-    // 复制反馈落输入框右上角（状态行右侧），不走全屏 flash；未注入 deps.ui 的测试路径保持默认。
     // 划词高亮走主题实心块 + 对比字色，跟终端原生拖选同观感；ansi 模式 selectionStyle 为 undefined，退回反显。
+    // 复制反馈走 TuiAltScreen 自带的 flash（onCopyFeedback 缺省时的默认路径）。
     this.ui =
       deps.ui ??
       new TuiAltScreen(deps.terminal ?? new ProcessTerminal(), false, deps.workspaceRoot, {
         ...productScreenOptions(),
         selectionStyle: theme.selectionStyle(),
-        onCopyFeedback: (message) => this.showCopyHint(message),
         copySelection: (text) => this.copyToClipboard(text),
       });
     this.editor = new CustomEditor(this.ui, getEditorTheme(), {
@@ -496,12 +499,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       // 事件，release 同样被 matchesKey 匹配为原键；不过滤会让 Ctrl+C 双击退出退化成
       // 一次按键就退出。焦点组件路径已由框架过滤，这里补齐 UI 层监听器。
       if (isKeyRelease(data)) return undefined;
-      if (matchesAppKey(data, 'app.copy')) {
-        // 有选区才拦。没选区时这个组合多半是终端自己的「复制」，抢过来只会让复制键失灵。
-        if (!isViewportTUI(this.ui) || !this.ui.hasTextSelection()) return undefined;
-        void this.ui.copyTextSelection();
-        return { consume: true };
-      }
+      // 有选区才消耗按键：没有选区时放行，终端自身的复制（Windows Terminal 的 Ctrl+Shift+C）
+      // 才留得下来。放在浮层分支之前——选区在浮层之下仍然存在，复制它不会吓到谁。
+      if (matchesAppKey(data, 'app.copy') && this.copySelection()) return { consume: true };
       if (this.ui.hasOverlay()) {
         // 浮层上的 Ctrl+C 也要计入「再按一次退出」。以前这里只 hideOverlay：
         // 这一下不算退出连按，审批/消息框的 Promise 还不结束，空闲时的两次变成三次。
@@ -548,8 +548,8 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.goal = state.goal;
     this.lastFailure = state.lastFailure;
     this.plan.active = state.planMode;
+    // 回放时不为 agent 发口信：footer 的 agent 段当场就是答案。
     this.agentName = state.agent ?? '';
-    if (state.agent) this.addNotice(`Agent: ${state.agent}`, 'dim');
     this.lastRecapMainTurn = state.lastRecapMainTurn;
     // 持久化深度下限：resume 出的子代理会话不能伪装成顶层继续派生（ds 的 delegationDepth 语义）。
     this.sessionDepth = state.depth;
@@ -905,14 +905,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       const rewind = !this.projection.modelResponded && this.inFlightPrompt !== undefined && composerEmpty;
       this.pendingRewind = rewind ? this.inFlightPrompt : undefined;
       this.abort.abort();
-      this.addNotice(
-        rewind
-          ? 'Cancelled — prompt restored to the input.'
-          : this.projection.modelResponded
-            ? 'Interrupted — output stopped.'
-            : 'Cancelled before the model replied.',
-        'warn',
-      );
+      // 不回口信：中断是用户自己按的，结果在界面上也看得见——回填态的原文已经躺在输入框里、
+      // 中断态的正文就停在半截。真要一条"被截断了"的持久标记，该加在助手消息行尾，
+      // 那是个标记不是一条口信。
       return;
     }
     if (this.ui.hasOverlay()) {
@@ -1108,6 +1103,10 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     if (typeof completion === 'number') this.usage.completionTokens += completion;
     if (typeof cached === 'number') this.usage.cachedTokens += cached;
     if (typeof cost === 'number') this.usage.costUsd += cost;
+    // 缓存命中率按「最近一次请求」算：总量比值会被历史轮次稀释，没有当下含义。
+    if (typeof prompt === 'number' && typeof cached === 'number' && prompt > 0) {
+      this.cacheHit = Math.min(1, cached / prompt);
+    }
     this.currentIndicator?.setTokens(this.contextTokens);
   }
 
@@ -1118,6 +1117,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private refreshCounters(): void {
     const totals = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0 };
     let lastPrompt: number | undefined;
+    let lastRatio: number | undefined;
     for (const record of this.session.readAll()) {
       if (record.type !== 'event' || record.kind !== 'usage') continue;
       const prompt = record.data.promptTokens;
@@ -1131,20 +1131,30 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       if (typeof completion === 'number') totals.completionTokens += completion;
       if (typeof cached === 'number') totals.cachedTokens += cached;
       if (typeof cost === 'number') totals.costUsd += cost;
+      // 命中率取**最后一条**带 prompt+cached 的记录：总量比值会被历史轮次稀释。
+      if (typeof prompt === 'number' && prompt > 0 && typeof cached === 'number') {
+        lastRatio = Math.min(1, cached / prompt);
+      }
     }
     this.usage = totals;
     this.contextTokens = lastPrompt;
+    this.cacheHit = lastRatio;
   }
 
   // ------------------------------------------------------------------ 视图辅助
 
-  public addNotice(text: string, level: 'dim' | 'warn' | 'error' | 'success' = 'dim'): void {
+  /**
+   * 写一条系统口信。排版见 {@link NoticeComponent}（居中提示块，一律中性灰）。
+   *
+   * `_level` 收下但不参与表现：它是插件 API（`api.notify(message, level)`）的一部分，删掉会改
+   * 契约，而当前所有等级长同一个样子。要恢复分等级表现时，这里是唯一的下笔处。
+   */
+  public addNotice(text: string, _level: NoticeLevel = 'dim'): void {
     this.projection.breakToolGroup();
-    const color = level === 'error' ? 'error' : level === 'warn' ? 'warning' : level === 'success' ? 'success' : 'dim';
     // 提示行与用户消息/助手正文/工具汇总共用同一条块间距（BLOCK_GAP）：以前它紧贴上一块，
-    // 是转录里唯一一处 0 行间隔。
+    // 是转录里唯一一处 0 行间隔。排版见 NoticeComponent。
     this.chatContainer.addChild(new Spacer(BLOCK_GAP));
-    this.chatContainer.addChild(new Text(theme.fg(color, ` ${text}`), 0, 0));
+    this.chatContainer.addChild(new NoticeComponent(text, _level));
     // 内联菜单等异步流程经 Promise resolve 恢复时，晚于菜单关闭那次 nextTick 渲染；
     // 这里必须自行触发重渲染，否则新提示与头部数据要等下一次按键才上屏。
     this.paint('transcript');
@@ -1183,12 +1193,41 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
-   * 复制反馈显示在输入框右上角（状态行右侧）：提示文案优先，期间的耗时/token 让位。
-   * 工作态落在 Loader、空闲态落在 IdleStatus 占位行——同一时刻 statusContainer 只挂一个，二选一生效。
+   * 复制当前选区。两条键盘通路共用它：`app.copy` 键位与 `/copy` 命令
+   * （鼠标那条是右键，在控件层，见 tui-alt-screen 的 handleRightClickCopy）。
+   *
+   * 返回「是否真有选区」，两处调用方处理不同：键位在无选区时**放行**，把按键交回终端
+   * 自己的复制；命令则说明一句——命令没有输出就必须说明为什么。
    */
-  private showCopyHint(message: string): void {
-    this.idleStatus.showHint(message);
-    this.currentIndicator?.showHint(message);
+  public copySelection(): boolean {
+    if (!isViewportTUI(this.ui) || !this.ui.hasTextSelection()) return false;
+    void this.ui.copyTextSelection();
+    return true;
+  }
+
+  /**
+   * `/copy`：可发现、且任何终端都能用的复制通路。
+   *
+   * 存在的理由：`app.copy` 的 `Ctrl+Shift+C` 在 Windows Terminal、iTerm2 上被终端自己
+   * 截走做「复制终端选区」，应用收不到；`Alt+C` 是备用键，但它不可发现。命令补上这一格，
+   * 也让 Ctrl+P 命令面板里能搜到它。
+   */
+  private commandCopy(): void {
+    if (!this.copySelection()) this.addNotice('Nothing selected — drag over the transcript first.', 'dim');
+  }
+
+  /**
+   * 写系统剪贴板（右键复制走这一条通路）。
+   *
+   * 状态行只有一格，说不清「为什么没成、该怎么办」，所以失败时往转录补一条 dim 说明。
+   * 返回值仍按通路三档交给控件层去措辞：只有平台工具退出码 0 才配得上 `Copied!`。
+   */
+  public async copyToClipboard(text: string): Promise<ClipboardCopy> {
+    const result = this.deps.clipboard
+      ? await this.deps.clipboard(text)
+      : await writeClipboard(text, { writeOsc52: (sequence) => this.ui.terminal.write(sequence) });
+    if (result === 'failed') this.addNotice(`Copy failed — ${clipboardFailureHint()}`, 'dim');
+    return result;
   }
 
   /**
@@ -1214,20 +1253,6 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   /** 焦点在不在终端。普通（非替代屏幕）界面没有 1004 上报，按一直在跟前处理。 */
   private focusOnTerminal(): boolean {
     return isViewportTUI(this.ui) ? this.ui.terminalFocused() : true;
-  }
-
-  /**
-   * 写系统剪贴板（选区复制与 `/copy` 共用这一条通路）。
-   *
-   * 状态行只有一格，说不清「为什么没成、该怎么办」，所以失败时往转录补一条 dim 说明。
-   * 返回值仍按通路三档交给控件层去措辞：只有平台工具退出码 0 才配得上 `Copied!`。
-   */
-  public async copyToClipboard(text: string): Promise<ClipboardCopy> {
-    const result = this.deps.clipboard
-      ? await this.deps.clipboard(text)
-      : await writeClipboard(text, { writeOsc52: (sequence) => this.ui.terminal.write(sequence) });
-    if (result === 'failed') this.addNotice(`Copy failed — ${clipboardFailureHint()}`, 'dim');
-    return result;
   }
 
   /**
@@ -1273,7 +1298,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       this.lastSigintTimer = undefined;
     }, 1200);
 
-    // 有轮次在跑时，一次 Ctrl+C 即中断，与 Esc 等价（终止提示由 handleInterrupt 给出）。
+    // 有轮次在跑时，一次 Ctrl+C 即中断，与 Esc 等价（中断本身不出声，见 handleInterrupt）。
     // 计时器已在上方记录，所以「中断 + 立刻再按一次」仍可退出。
     if (this.abort) {
       this.handleInterrupt();
@@ -1281,12 +1306,9 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       return;
     }
 
-    if (this.editor.getText() !== '') {
-      this.editor.setText('');
-      this.addNotice('Cleared input — press Ctrl+C again to quit.', 'dim');
-    } else {
-      this.addNotice('Press Ctrl+C again to quit.', 'dim');
-    }
+    // 清空输入是按键的预期结果，不另发口信；要说的只有「再按一次会退出」——那是防误退的说明。
+    if (this.editor.getText() !== '') this.editor.setText('');
+    this.addNotice('Press Ctrl+C again to quit.', 'dim');
   }
 
   private quit(): void {
@@ -1346,6 +1368,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       approval: this.approval,
       contextWindow: this.contextWindow,
       contextTokens: this.contextTokens,
+      cacheHit: this.cacheHit,
     };
   }
 
@@ -1366,7 +1389,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     this.agentName = next;
     const events = this.sessionEvents();
     this.session.appendEvent('agent', events.agent(next));
-    this.addNotice(next === '' ? 'Agent cleared. This session uses every tool.' : `Agent is now ${next}.`, 'success');
+    // 不出声：Shift+Tab 的结果就在 footer 的 agent 段上，切没切、切到谁一眼可见。
   }
 
   approvalMode(): ApprovalMode {
@@ -1530,7 +1553,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
         await this.commandPlugins();
         break;
       case 'mcps':
-        await commandMcps(this);
+        await this.commandMcps();
         break;
       case 'goal':
         await this.commandGoal(argument);
@@ -1550,23 +1573,14 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
       case 'permission':
         await commandPermission(this, argument);
         break;
-      case 'permissions':
-        await commandPermissions(this);
-        break;
-      case 'notify':
-        await commandNotify(this, argument);
-        break;
-      case 'copy':
-        await commandCopy(this, argument);
-        break;
       case 'export':
         await commandExport(this, argument);
         break;
-      case 'prompts':
-        await commandPrompts(this);
-        break;
       case 'diff':
         await commandDiff(this);
+        break;
+      case 'copy':
+        this.commandCopy();
         break;
       case 'fork':
         commandFork(this);
@@ -1598,6 +1612,20 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
+   * `/mcps`：与其他 `/skills`、`/plugins` 一样直接开报告面板的 MCP tab。
+   *
+   * 启停/增删/重载仍在管理器里——那是要写 config.toml、要弹输入框的动作，不是只读面板的活。
+   * 面板里按 `m`（页脚有提示）把它叫出来：先看清单再动手，比一上来就进菜单少一层猜。
+   */
+  private async commandMcps(): Promise<void> {
+    await openReport(this.ui, 'mcps', this.reportContext(), {
+      onAction: (action) => {
+        if (action === MCP_MANAGE_ACTION) return commandMcpsManager(this, 1);
+      },
+    });
+  }
+
+  /**
    * `/skills`：打开报告弹窗并停在 Skills tab。
    *
    * 数据在弹窗切到该 tab 时现扫，而不是复用本轮提示词里那份目录：会话中途新建一个 skill
@@ -1609,7 +1637,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   }
 
   /**
-   * 报告弹窗的取数环境：五个 tab 的数据源都从这里拿。
+   * 报告弹窗的取数环境：各 tab 的数据源都从这里拿。
    *
    * getter 都是懒的——弹窗切到哪个 tab 才取哪份数据，`/skills` 不该顺带读一遍权限文件。
    * 取数发生在「打开这一刻」，缓存只在弹窗开着的时候有效（report/registry 的约定）。
@@ -1629,12 +1657,28 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
           sandboxMode: sandbox.mode,
           sandboxAutoAllow: sandbox.autoAllow,
           layers,
-          userSourceDir: layers.user?.sourceDir ?? '',
+          userConfigPath: this.deps.configPath,
           projectPath: permission.projectPath(),
           projectAllowDropped: permission.projectAllowDropped(),
           approved: grants.load(),
           grantsPath: grants.path,
           grantWarning: grants.warning(),
+        };
+      },
+      mcp: () => {
+        const service = this.deps.mcp();
+        // 插件没装载（`[plugins] disabled = ["sph-mcp"]`，或加载失败）时不能只报「0 个 server」——
+        // 那会让人去查 server 配置，而真正的原因是这个能力根本没装。如实说成一条 warning。
+        if (service === undefined) {
+          return {
+            servers: [],
+            warnings: ['The `sph-mcp` plugin is not loaded — check `[plugins] disabled` in config.toml.'],
+          };
+        }
+        return {
+          servers: service.listServers(),
+          warnings: [...service.warnings()],
+          sources: [...service.sources()],
         };
       },
       help: () => ({
@@ -1747,7 +1791,7 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     }
     const messages = this.session.readMessages();
     if (messages.length === 0) {
-      this.addNotice('Nothing to compact yet.', 'dim');
+      // 空会话没什么可压：不出声——没有输出本身就是"没有可压的内容"。
       return;
     }
 
@@ -2107,28 +2151,13 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
     if (declared) declared.api = api;
     else provider.models.push({ id: modelId, api });
     this.client = this.buildClient();
-    this.addNotice(
-      writeError === undefined ? `API set to ${api}` : `API set to ${api} (models.json write failed: ${writeError})`,
-      writeError === undefined ? 'success' : 'warn',
-    );
-  }
-
-  /** `/notify` 读当前档位与探测到的通道（SettingsCommandHost）。 */
-  public currentNotify(): NotifySetting {
-    return this.notifySetting;
+    // 成功不出声：/provider 的第四步回执不值得占一行。写盘失败仍要说——它是异常，
+    // 而且这条 catch 否则就成了静默吞掉。
+    if (writeError !== undefined) this.addNotice(`API set to ${api} (models.json write failed: ${writeError})`, 'warn');
   }
 
   public notificationChannel(): NotificationChannel {
     return getCapabilities().notifications;
-  }
-
-  public applyNotify(setting: NotifySetting): void {
-    this.notifySetting = setting;
-    const error = this.writeConfigTable('ui', 'notify', setting);
-    this.addNotice(
-      error ? `Notifications set to ${setting} (config write failed: ${error})` : `Notifications set to ${setting}`,
-      error ? 'warn' : 'success',
-    );
   }
 
   public applyApproval(mode: ApprovalMode): void {
@@ -2178,19 +2207,6 @@ class InteractiveMode implements ApprovalUi, SteerBarHost, TranscriptHost, Repla
   private writeConfig(patch: Readonly<Record<string, string | number>>): string | undefined {
     try {
       updateConfigFile(this.deps.configPath, patch);
-      return undefined;
-    } catch (error) {
-      return message(error);
-    }
-  }
-
-  /**
-   * 表体里的键（`[ui] notify`）另写一条通路：updateConfigFile 只认第一个表头**之前**的顶层
-   * 标量，把 `notify` 交给它会追加成 `[permissions]` 表里的键——文件里看着有、顶层读不到。
-   */
-  private writeConfigTable(table: string, key: string, value: string | number): string | undefined {
-    try {
-      updateConfigTableEntry(this.deps.configPath, table, key, value);
       return undefined;
     } catch (error) {
       return message(error);

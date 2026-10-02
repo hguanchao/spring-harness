@@ -7,7 +7,7 @@
  * 转录里的工具行不共用这一套：那里只留 `Subagent N 描述 总耗时`。
  */
 
-import { Container, Text, truncateToWidth, visibleWidth, type TUI } from '@/tui/index.js';
+import { Container, SPINNER_FRAMES, Text, truncateToWidth, visibleWidth, type TUI } from '@/tui/index.js';
 import { theme } from '@/plugins/sph-tui/theme/theme.js';
 import { formatDuration } from '@/util.js';
 
@@ -16,7 +16,6 @@ const DOCK_ROW_INDENT = 5;
 const DOCK_RIGHT_PAD = 4;
 const STATS_GAP = 2;
 /** 与状态行 Loader 同一套 braille 帧；用户指定运行中用 ⠏，转起来才像在跑。 */
-const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPIN_MS = 80;
 
 export function childTypeLabel(childType: string | undefined): string {
@@ -119,7 +118,7 @@ export class SubagentTaskComponent extends Container {
     const statsWidth = visibleWidth(stats);
     const meta =
       this.activity === '' ? '' : theme.fg(this.activityError ? 'error' : 'muted', ` · ${this.activity}`);
-    const frame = SPIN_FRAMES[Math.floor(Date.now() / SPIN_MS) % SPIN_FRAMES.length]!;
+    const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPIN_MS) % SPINNER_FRAMES.length]!;
     const left = `${theme.fg('primary', frame)} ${theme.bold(theme.shimmer(this.head, Date.now()))}${meta}`;
     const inner = Math.max(1, width - DOCK_ROW_INDENT - DOCK_RIGHT_PAD);
     const leftMax = Math.max(1, inner - statsWidth - STATS_GAP);

@@ -54,6 +54,13 @@ export interface PluginCandidate {
   entries: string[];
   /** 装载根，用于诊断输出（区分内置 / 用户 / 项目）。 */
   root: 'bundled' | 'user' | 'project';
+  /**
+   * 清单里声明的自述（`sph.description`）；单文件插件与内置插件没有这一项。
+   *
+   * 只是**发现期的静态声明**，模块加载后若插件自己（对象形态的 `description`）给了一句，
+   * 那句会覆盖它——见 `host.ts` 的 runSetup。
+   */
+  description?: string;
 }
 
 export interface DiscoverPluginsOptions {
@@ -92,7 +99,13 @@ function hasScriptExtension(name: string): boolean {
 /** package.json 里插件声明的字段名：宿主专属段，不污染通用字段。 */
 interface SphManifest {
   name?: string;
-  sph?: { name?: string; plugins?: unknown };
+  sph?: { name?: string; description?: string; plugins?: unknown };
+}
+
+/** 清单里的自述：只认非空字符串，别的类型当成没写。 */
+function manifestDescription(manifest: SphManifest | undefined): string | undefined {
+  const declared = manifest?.sph?.description;
+  return typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : undefined;
 }
 
 function readManifest(dir: string): SphManifest | undefined {
@@ -114,6 +127,7 @@ function resolveEntry(dir: string, root: PluginCandidate['root']): PluginCandida
   const declared = manifest?.sph?.plugins;
   // 显式声明的名字优先于目录名：目录被重命名不该改变插件的身份（禁用列表按名字匹配）。
   const name = manifest?.sph?.name ?? manifest?.name ?? dir.split(/[\\/]/).pop() ?? dir;
+  const description = manifestDescription(manifest);
 
   if (Array.isArray(declared) && declared.length > 0) {
     const entries: string[] = [];
@@ -122,12 +136,12 @@ function resolveEntry(dir: string, root: PluginCandidate['root']): PluginCandida
       const entry = resolve(dir, item);
       if (existsSync(entry)) entries.push(entry);
     }
-    if (entries.length > 0) return { name, entries, root };
+    if (entries.length > 0) return { name, entries, root, ...(description === undefined ? {} : { description }) };
   }
 
   for (const ext of SCRIPT_EXTENSIONS) {
     const entry = join(dir, `index${ext}`);
-    if (existsSync(entry)) return { name, entries: [entry], root };
+    if (existsSync(entry)) return { name, entries: [entry], root, ...(description === undefined ? {} : { description }) };
   }
   return undefined;
 }

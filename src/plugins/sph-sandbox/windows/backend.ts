@@ -5,7 +5,7 @@ import { SandboxError, type SandboxMode, type SandboxStatus } from '@/sandbox/ty
 import { grantWrite, revokeWrite } from './acl.js';
 import { sidBuffer, tempWriteSid, workspaceWriteSid } from './sid.js';
 import { capSpawnOutput } from '@/sandbox/env.js';
-import { drainHandle, readExitCode, spawnAsUser } from './spawn.js';
+import { decodeConsoleOutput, drainHandle, readExitCode, spawnAsUser } from './spawn.js';
 import {
   createFilteredToken,
   createRestrictedToken,
@@ -129,8 +129,8 @@ export class WindowsAclSandbox implements SandboxHandle {
     // 受限档把 TMP/TEMP 指到私有临时目录：pwsh 的程序集探针要写已授权的位置。
     const envExtra = tier === 'restricted' ? { TMP: this.tempDir, TEMP: this.tempDir } : undefined;
     const child = spawnAsUser(token, spawn.command, spawn.args, spawn.cwd, envExtra);
-    const stdout: string[] = [];
-    const stderr: string[] = [];
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
     let exitCode: number | null = null;
     const deadline = Date.now() + spawn.timeoutMs;
     try {
@@ -167,7 +167,11 @@ export class WindowsAclSandbox implements SandboxHandle {
       api.closeHandle(child.thread);
       api.closeHandle(child.process);
     }
-    return { stdout: capSpawnOutput(stdout.join('')), stderr: capSpawnOutput(stderr.join('')), exitCode: exitCode };
+    return {
+      stdout: capSpawnOutput(decodeConsoleOutput(Buffer.concat(stdout))),
+      stderr: capSpawnOutput(decodeConsoleOutput(Buffer.concat(stderr))),
+      exitCode: exitCode,
+    };
   }
 
   dispose(): void {

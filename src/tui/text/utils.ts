@@ -1359,25 +1359,36 @@ export interface RoundedBoxOptions {
 	 */
 	infoWidth?: number;
 	/**
-	 * 四角字形。缺省圆角——这是全屏绝大多数框的观感，方角只有报告面板这类静态阅读面在用。
-	 *
-	 * 存在的理由不是"多一种风格可选"：报告面板要长时间停留、正文是结构化列表，方角更像一块面板；
-	 * 而 markdown 表格早已在用 `┌┐└┘`，方角也谈不上是本项目的新语汇。
+	 * 内边距：左右各 padding 列空格，上下各 padding 行空行。
+	 * 缺省 0——对话框与报告面板保持紧凑，菜单弹窗这类悬浮选择器左右用 1 更透气。
 	 */
-	corners?: 'round' | 'square';
+	padding?: number;
+	/**
+	 * 垂直内边距覆盖：缺省跟 padding 同值。上下不要空行、只要左右留白的盒子
+	 * （菜单弹窗：条目间已有行距，横线内不另留白）单独给 0。
+	 */
+	paddingY?: number;
 }
 
-/** 圆角与方角两套角字，横竖线共用同一套 `─` / `│`。 */
-const BOX_CORNERS = {
-	round: { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯' },
-	square: { topLeft: '┌', topRight: '┐', bottomLeft: '└', bottomRight: '┘' },
-} as const;
+/**
+ * 角字：方角。**全屏只有这一套**——markdown 表格、报告面板、对话框、悬浮菜单用的是同一组
+ * `┌┐└┘`，横竖线也共用同一套 `─` / `│`。圆角那组（`╭╮╰╯`）已随「全屏统一直角」删掉：
+ * 一个没人用的风格变体留在类型里，只会等下一次被谁不小心用上。
+ */
+const BOX_CORNERS = { topLeft: '┌', topRight: '┐', bottomLeft: '└', bottomRight: '┘' } as const;
 
-/** 圆角菜单/对话框外壳：顶边嵌标题，底边可嵌滚动信息。 */
+/**
+ * 方角框外壳：顶边嵌标题，底边可嵌滚动信息。
+ *
+ * 名字沿用历史（早年缺省画圆角）；现在角字只有方角一套，签名也不再收 `corners` 选项。
+ */
 export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 	const { width, title, lines, frame } = options;
-	const corners = BOX_CORNERS[options.corners ?? 'round'];
+	const corners = BOX_CORNERS;
 	const inner = Math.max(1, width - 2);
+	const padding = Math.max(0, options.padding ?? 0);
+	const paddingY = Math.max(0, options.paddingY ?? padding);
+	const contentInner = Math.max(1, inner - padding * 2);
 	const titlePaint = options.titlePaint ?? frame;
 	const top =
 		width >= visibleWidth(`${corners.topLeft}─${title}─${corners.topRight}`)
@@ -1386,9 +1397,19 @@ export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 				frame(`${'─'.repeat(width - visibleWidth(`${corners.topLeft}─${title}${corners.topRight}`))}${corners.topRight}`)
 			: frame(`${corners.topLeft}${'─'.repeat(Math.max(1, inner))}${corners.topRight}`);
 	const result: string[] = [top];
+	// 上内边距
+	for (let i = 0; i < paddingY; i++) {
+		result.push(`${frame("│")}${" ".repeat(inner)}${frame("│")}`);
+	}
 	for (const line of lines) {
-		const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));
-		result.push(`${frame("│")}${line}${pad}${frame("│")}`);
+		const pad = " ".repeat(Math.max(0, contentInner - visibleWidth(line)));
+		const leftPad = " ".repeat(padding);
+		const rightPad = " ".repeat(padding);
+		result.push(`${frame("│")}${leftPad}${line}${pad}${rightPad}${frame("│")}`);
+	}
+	// 下内边距
+	for (let i = 0; i < paddingY; i++) {
+		result.push(`${frame("│")}${" ".repeat(inner)}${frame("│")}`);
 	}
 	const info = options.bottomInfo ?? "";
 	// 右侧状态位两侧各垫一个空格：`── 1-11/21 ─╯`。左侧提示有垫、右侧没有，
@@ -1406,7 +1427,11 @@ export function renderRoundedBox(options: RoundedBoxOptions): string[] {
 		const budget = width - 8 - infoWidth; // 框件(╰─/─╯=4) + 两侧空格(2) + 至少2条横线 + 右侧状态
 		const shown = visibleWidth(left) <= budget ? left : budget >= 1 ? truncateToWidth(left, budget, "…") : "";
 		const shownWidth = shown === "" ? 0 : visibleWidth(shown) + 2;
-		const dashes = width - 4 - shownWidth - infoWidth;
+		// 横线预算：`└─`(2) + ` 提示 `(shownWidth) + 横线 + `┘`(1) 正好把 width 列装齐。
+		// 有读数位时它后面还跟着一根 `─`（infoSlot = 读数宽 + 1），没有读数位那两列都不存在，
+		// 横线得自己吃掉它们——否则整行只有 width - 1 列，底角落在右边框左边一列，右下角开口。
+		const infoSlot = infoWidth > 0 ? infoWidth + 1 : 0;
+		const dashes = width - 3 - shownWidth - infoSlot;
 		if (shownWidth > 0 && dashes >= 2) {
 			bottom =
 				infoWidth > 0
@@ -1464,7 +1489,59 @@ export function ruleHeadingLine(label: string, width: number, style: (text: stri
 	return style(head + dash.repeat(count) + " ".repeat(leftover));
 }
 
+/** 两侧各至少留这么多根线：再短就不像通栏提示，像文字被截断。 */
+const CENTERED_RULE_MIN = 4;
+
+/**
+ * 提示块（线 + 文字 + 线）的宽度占整行的比例：折半。
+ *
+ * 满行一条横线会把转录切成上下两段，读起来像"这里换了一块面板"；半行才像"在这里插一句话"。
+ */
+const CENTERED_RULE_BLOCK_RATIO = 0.5;
+
+/**
+ * 「── 文字 ──」居中提示块：整块只占半行、在行内居中，两侧各一段实线。
+ *
+ * 与 {@link ruleHeadingLine} 是一对，差别在**语义与占位**不在线型：那条是结构分隔（左对齐、
+ * 顶满整行，用来切分章节）；这条是一条**事件**（占半行、整块居中）——系统口信（模型已切换、
+ * 权限改了、启动警告）走它。两条都用实线 `─`：事件与结构的分野交给"占半行 + 居中"，
+ * 全项目因此只有一种横线（边框、页脚、标题线、这里），不必再靠虚线去造第三档。
+ *
+ * **装不下就返回 undefined，不截断也不折行**：一条长警告被居中砍掉尾巴，比不画线更难读。
+ * 那点判断得交给调用方——只有他知道这条备选要不要折行、折几行。
+ *
+ * 奇数余量一律给右侧（块内、行内都是）：文字看起来略偏左，比略偏右稳。
+ */
+export function centeredRuleLine(text: string, width: number, paintRule: (text: string) => string): string | undefined {
+	const body = ` ${text} `;
+	const bodyWidth = visibleWidth(body);
+	// 块宽 = 整行折半；文字本身超过半行时退回「文字 + 两侧最小线」，不硬塞。
+	const blockWidth = Math.max(bodyWidth + CENTERED_RULE_MIN * 2, Math.floor(width * CENTERED_RULE_BLOCK_RATIO));
+	if (blockWidth > width) return undefined;
+	const inner = blockWidth - bodyWidth;
+	const left = Math.floor(inner / 2);
+	const line = paintRule("─".repeat(left)) + body + paintRule("─".repeat(inner - left));
+	// 整块在行内居中；行尾不补空格——右侧本来就是空的。
+	return " ".repeat(Math.floor((width - blockWidth) / 2)) + line;
+}
+
 /** Like sliceByColumn but also returns the actual visible width of the result. */
+/**
+ * 这个 ANSI 码能不能在切片起点「补发」。
+ *
+ * 颜色/粗体这类**状态码**必须补发，否则切片之后的后半段会掉色；OSC/APC 的超链接与光标标记
+ * 同理，它们描述的是「从这里开始的一段」。
+ *
+ * 但列定位、擦除（`ESC [ G` / `H` / `K` / `J`）是**动作码**：它在原行里的位置才是它的语义。
+ * 搬到切片起点会把光标拽回旧列——那正是浮层内拖选整块排版错位的根源：合成后的行里有浮层钉的
+ * 列定位，`paintSelectionLine` 拼 `before + selected + after` 时，`selected` 一开头就被拽回去，
+ * 把 `before` 刚写好的框线覆盖掉。
+ */
+function isCarryOverAnsi(code: string): boolean {
+	if (code.endsWith("m")) return true; // SGR：颜色、粗体、下划线等状态
+	return code.startsWith("\x1b]") || code.startsWith("\x1b_"); // OSC / APC：超链接、光标标记
+}
+
 export function sliceWithWidth(
 	line: string,
 	startCol: number,
@@ -1483,7 +1560,7 @@ export function sliceWithWidth(
 		const ansi = extractAnsiCode(line, i);
 		if (ansi) {
 			if (currentCol >= startCol && currentCol < endCol) result += ansi.code;
-			else if (currentCol < startCol) pendingAnsi += ansi.code;
+			else if (currentCol < startCol && isCarryOverAnsi(ansi.code)) pendingAnsi += ansi.code;
 			i += ansi.length;
 			continue;
 		}

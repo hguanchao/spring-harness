@@ -7,13 +7,7 @@
  */
 
 import { visibleWidth } from '@/tui/text/utils.js';
-import type { SelectItem } from '@/tui/index.js';
-
-export interface CommandItem {
-  id: string;
-  label: string;
-  hint: string;
-}
+import { PRIMARY_COLUMN_GAP, type SelectItem } from '@/tui/index.js';
 
 export interface CommandItem {
   id: string;
@@ -37,12 +31,9 @@ export const COMMANDS: readonly CommandItem[] = [
   { id: 'provider', label: '/provider', hint: 'Switch provider, then model, reasoning effort, and API protocol', group: 'Model & Input' },
   { id: 'effort', label: '/effort', hint: 'Set reasoning effort (written to config.toml)', group: 'Model & Input' },
   { id: 'permission', label: '/permission', hint: 'Set the approval mode: ask | auto | yolo', group: 'Model & Input' },
-  { id: 'permissions', label: '/permissions', hint: 'Show effective rules, their sources, sandbox, and approved actions', group: 'Model & Input' },
-  { id: 'notify', label: '/notify', hint: 'Set how sph reminds you when work finishes', group: 'Model & Input' },
-  { id: 'copy', label: '/copy', hint: 'Copy an assistant reply to the system clipboard', group: 'Session' },
   { id: 'export', label: '/export', hint: 'Export this session as markdown, json, or html', group: 'Session' },
-  { id: 'prompts', label: '/prompts', hint: 'Insert a saved prompt template', group: 'Tools' },
   { id: 'diff', label: '/diff', hint: 'Show the workspace git diff, read only', group: 'Tools' },
+  { id: 'copy', label: '/copy', hint: 'Copy the current selection to the clipboard', group: 'Tools' },
   { id: 'fork', label: '/fork', hint: 'Continue this conversation in a new session', group: 'Session' },
 ];
 
@@ -64,13 +55,17 @@ export const COMMAND_NAMES = new Set<string>([
 ]);
 
 /**
- * 斜杠命令弹窗的主列（label 列）宽度：最宽 label + 2 列间隙，下限 8。
+ * 斜杠命令弹窗的主列（label 列）宽度：最宽 label + 间隙，下限 8。
  *
  * SelectList 默认 32 列是给「命令表 + 长提示」这类排版用的；对 label 很短的菜单
  * （ask / yolo / effort 档位）会让 description 拖出一大段空白。统一自适应后各弹窗
  * 的列都贴内容，视觉一致。
+ *
+ * 间隙取 SelectList 的 PRIMARY_COLUMN_GAP（不是随手写个常数）：它同时是 `truncatePrimary`
+ * 的截断余量（预算 = 列宽 − 间隙），这里多给一列只是白留白，少给一列就会把最宽那个 label
+ * 截成 `permissions…`。
  */
 export function primaryColumnWidthFor(items: readonly SelectItem[]): number {
   const widest = items.reduce((max, item) => Math.max(max, visibleWidth(item.label)), 0);
-  return Math.max(widest, 8) + 2;
+  return Math.max(widest, 8) + PRIMARY_COLUMN_GAP;
 }

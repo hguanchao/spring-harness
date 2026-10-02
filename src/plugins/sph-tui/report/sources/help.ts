@@ -37,12 +37,6 @@ export function commandsTab(input: Pick<HelpTabsInput, 'commands' | 'aliases'>):
 	const { commands, aliases } = input;
 	const blocks: ReportBlock[] = [];
 
-	// 说明压成 caption：它交代的是用法前提（敲 / 补全、别名跟在正名旁边），不是每次都要重读的正文。
-	blocks.push({
-		kind: 'caption',
-		text: 'Type / to autocomplete. A command that also answers to an older name shows that name beside it.',
-	});
-
 	for (const [group, bucket] of groupCommands(commands)) {
 		const items: ReportItem[] = bucket.map((command): ReportItem => {
 			const alias = Object.entries(aliases).find(([, canonical]) => canonical === command.id)?.[0];
@@ -85,7 +79,7 @@ export function keysTab(input: Pick<HelpTabsInput, 'keybindings'>): ReportTab {
 	blocks.push({
 		kind: 'prose',
 		text: [
-			'### Queue (mouse)',
+			'**Queue (mouse)**',
 			'',
 			'- Hover a queued row for its [↑] [↓] [Send now] [edit] [cancel] buttons',
 			'- Click a row to select it; [edit] takes it back to the input (queued order preserved)',
@@ -94,7 +88,7 @@ export function keysTab(input: Pick<HelpTabsInput, 'keybindings'>): ReportTab {
 	blocks.push({
 		kind: 'prose',
 		text: [
-			'### Editor',
+			'**Editor**',
 			'',
 			'- `/` — slash-command autocomplete in the editor',
 			'- Enter while a turn runs — queue the message (delivered after the turn ends)',

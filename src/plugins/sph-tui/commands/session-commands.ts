@@ -14,7 +14,7 @@ import { primaryColumnWidthFor } from '@/plugins/sph-tui/commands/index.js';
 import type { CustomEditor } from '@/plugins/sph-tui/input/custom-editor.js';
 import type { TuiDeps } from '@/plugins/sph-tui/deps.js';
 import { commandPanelOptions, showConfirmDialog, showMessageDialog, showSelectDialog } from '@/plugins/sph-tui/dialogs.js';
-import type { TUI, SelectItem, ClipboardCopy } from '@/tui/index.js';
+import type { TUI, SelectItem } from '@/tui/index.js';
 
 /** 替换插件优先；没装载时用内置 JSONL，避免界面在测试装配里变成空列表。 */
 function sessionsOf(deps: TuiDeps): SessionService | undefined {
@@ -36,8 +36,6 @@ export interface SessionCommandHost {
   startSession(next: SessionPort): void;
   /** /resume 的落地：claim 会话锁、换会话文件、回放恢复。 */
   switchToSession(id: string): void;
-  /** `/copy` 的落地：写系统剪贴板，返回文本实际落在哪条通路上。 */
-  copyToClipboard(text: string): Promise<ClipboardCopy>;
 }
 
 /**
@@ -66,7 +64,7 @@ export async function commandHistory(host: SessionCommandHost): Promise<void> {
     title: 'Prompt history',
     items,
     maxVisible: 14,
-    hint: '↑↓ select · Enter reuse · Esc close',
+    hint: '↑↓ move · Enter reuse · Esc close',
     // 历史条目是一段被截过的句子，叫不出名字；号是它唯一可引用的方式。
     numbered: true,
     ...commandPanelOptions(ui),
@@ -127,10 +125,8 @@ export async function commandResume(host: SessionCommandHost, id: string): Promi
       );
       return;
     }
-    if (match.id === session.id) {
-      host.addNotice('Already on that session.', 'dim');
-      return;
-    }
+    // 已经在这个会话上：不出声，也不重复 switch。
+    if (match.id === session.id) return;
     host.switchToSession(match.id);
     return;
   }
@@ -142,8 +138,9 @@ export async function commandResume(host: SessionCommandHost, id: string): Promi
   }
   const items: SelectItem[] = sessions.map((info) => ({
     value: info.id,
-    label: `${info.id}${info.id === session.id ? '  (current)' : ''}`,
+    label: info.id,
     description: `${new Date(info.mtimeMs).toISOString().replace('T', ' ').slice(0, 16)} · ${info.messages} msgs${subagentCountLabel(info.subagents)} · ${info.preview}`,
+    current: info.id === session.id || undefined,
   }));
   const selected = await host.editor.showInlineMenu({
     title: 'Sessions',
@@ -183,39 +180,3 @@ export async function commandExport(host: SessionCommandHost, argument: string):
   });
 }
 
-/**
- * `/copy [n]`：把某条助手回复整段拿走。长报告用拖选一次选全很难，这条入口就是为它开的。
- *
- * 取的是会话记录里的**原文**（markdown 源），不是屏幕上渲染过的那份——粘出去要能直接读，
- * 也不带行末对齐空格。只数有正文的回复：纯工具调用那条 content 是空的，不该占一个序号，
- * 否则 `/copy 2` 在工具密集的轮次里指向的不是「倒数第二条回答」。
- */
-export async function commandCopy(host: SessionCommandHost, argument = ''): Promise<void> {
-  const written = argument.trim();
-  const back = written === '' ? 1 : Number(written);
-  if (!Number.isInteger(back) || back < 1) {
-    host.addNotice('Usage: /copy [n] — n counts back through assistant replies.', 'warn');
-    return;
-  }
-  const replies = host.session
-    .readMessages()
-    .filter((message) => message.role === 'assistant')
-    .map((message) => (typeof message.content === 'string' ? message.content.trim() : ''))
-    .filter((text) => text !== '');
-  const text = replies[replies.length - back];
-  if (text === undefined) {
-    host.addNotice(
-      replies.length === 0
-        ? 'No assistant reply to copy yet.'
-        : `Only ${replies.length} assistant repl${replies.length === 1 ? 'y' : 'ies'} to copy.`,
-      'dim',
-    );
-    return;
-  }
-  const lines = text.split('\n').length;
-  const size = ` (${lines} line${lines === 1 ? '' : 's'})`;
-  const result = await host.copyToClipboard(text);
-  if (result === 'native') host.addNotice(`Copied the ${back === 1 ? 'last' : `${back}th-last`} assistant reply${size}.`, 'success');
-  else if (result === 'osc52') host.addNotice(`Handed the reply${size} to the terminal (OSC 52) — paste to confirm it landed.`, 'warn');
-  else host.addNotice('Copy failed — nothing was written to the clipboard.', 'warn');
-}

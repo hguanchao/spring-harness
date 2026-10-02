@@ -50,8 +50,13 @@ export function isConcurrencySafe(name: string): boolean {
   return defaultTools.isConcurrencySafe(name);
 }
 
-/** 插件入口。核心工具表是空的，读、写、搜索、shell 都从这里挂上。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。核心工具表是空的，读、写、搜索、shell 都从这里挂上。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   for (const tool of tools) api.registerTool(tool);
 }
 
@@ -59,3 +64,8 @@ export const EXPLORE_TOOLS = defaultTools.exploreNames();
 
 export { ToolRegistry } from '../../tools/registry.js';
 export type { OpenAiTool } from '../../tools/registry.js';
+
+export default {
+  description: 'The core tool table: read, write, search, shell, web, skills.',
+  setup,
+};

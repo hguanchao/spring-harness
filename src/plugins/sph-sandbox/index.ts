@@ -11,8 +11,13 @@ import type { SandboxMode } from '../../sandbox/types.js';
 import { SANDBOX_SERVICE, SESSION_SERVICE, type SessionService } from '../services.js';
 import type { PluginApi } from '../types.js';
 
-/** 插件入口。宿主按 `src/plugins/sph-sandbox/` 装载，插件名取目录名。 */
-export default function setup(api: PluginApi): void {
+/**
+ * 插件入口。宿主按 `src/plugins/sph-sandbox/` 装载，插件名取目录名。
+ *
+ * 导出成对象形态是为了挂 `description`：函数形态的默认导出没有地方写自述，
+ * 而那句自述正是 `/plugins` 明细里的第一行。
+ */
+function setup(api: PluginApi): void {
   // 后端按需加载：默认 sandbox=off 时核心自己处理，不该为 Landlock / Seatbelt / koffi 付钱。
   api.provide(SANDBOX_SERVICE, async (mode: SandboxMode, workspaceRoot: string, tempDir: string) => {
     const { createSandboxBackend } = await import('./backend.js');
@@ -25,3 +30,8 @@ export default function setup(api: PluginApi): void {
     );
   });
 }
+
+export default {
+  description: 'OS-level confinement backends (Landlock, Seatbelt, koffi).',
+  setup,
+};

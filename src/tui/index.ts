@@ -17,7 +17,6 @@ export { Marked, type Token, type Tokens } from "marked";
 
 // screen —— 屏幕、布局与备用屏幕
 export {
-	type ClipboardCopy,
 	type Component,
 	Container,
 	SELECTION_BLOCK,
@@ -45,6 +44,7 @@ export {
 	type TuiMouseEventResult,
 	type TuiMouseEventType,
 	type TuiStopOptions,
+	type ClipboardCopy,
 	type ViewportTUI,
 } from "@/tui/screen/tui.js";
 export {
@@ -101,12 +101,15 @@ export {
 	TUI_KEYBINDINGS,
 } from "@/tui/input/keybindings.js";
 
+export { DoubleClickTracker } from "@/tui/screen/double-click.js";
+
 // widgets —— 可复用控件
 export {
 	BLOCK_GAP,
 	Box,
 	Loader,
 	MouseRegion,
+	SPINNER_FRAMES,
 	Spacer,
 	Text,
 	type LoaderIndicatorOptions,
@@ -125,6 +128,7 @@ export {
 	type ScrollViewScrollToOptions,
 } from "@/tui/widgets/scroll-view.js";
 export {
+	PRIMARY_COLUMN_GAP,
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
