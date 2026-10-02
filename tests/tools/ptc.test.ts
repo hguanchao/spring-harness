@@ -8,6 +8,8 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { defaultTools, runCodeEnabled } from '@/plugins/sph-tools/index.js';
+import { buildSystemPrompt } from '@/plugins/sph-loop/prompt.js';
 import {
 	callableManifest,
 	clipProgramOutput,
@@ -256,5 +258,59 @@ describe('run_code result shaping', () => {
 
 	it('leaves short output alone', () => {
 		assert.equal(clipProgramOutput('short', 100), 'short');
+	});
+});
+
+describe('run_code registration', () => {
+	it('is in the default tool table', () => {
+		// 接线断言：README 与工具说明都写着它在那儿，改 tools 数组时最容易悄悄弄丢。
+		assert.ok(defaultTools.find('run_code'), '默认工具表里必须有 run_code');
+	});
+
+	it('is dropped by the kill switch', () => {
+		// 关不掉的开关比没有开关更坏——排查「是不是它引起的」时要真能关掉。
+		assert.equal(runCodeEnabled({}), true, '默认开');
+		assert.equal(runCodeEnabled({ SPH_RUN_CODE: 'off' }), false);
+		assert.equal(runCodeEnabled({ SPH_RUN_CODE: 'OFF' }), false, '大小写不敏感');
+		assert.equal(runCodeEnabled({ SPH_RUN_CODE: 'on' }), true, '不是 off 就是开');
+	});
+
+	it('is exclusive, explorable, and blocked in plan mode', () => {
+		// 独占：它自己会派发一批内层调用，与别的工具交错更难解释。
+		// 计划模式不放行：一次 run_code 里可能有写操作，外层整块拦掉才是安全的默认。
+		assert.equal(defaultTools.isConcurrencySafe('run_code'), false);
+		assert.equal(defaultTools.isExploreTool('run_code'), true);
+		assert.equal(defaultTools.isPlanSafe('run_code'), false);
+	});
+
+	it('tells the model how to call it, and only when it can', () => {
+		// 工具的可用性有两条独立的通道：schema（接口声明）与系统提示里那一段说明。
+		// 说明丢了模型只知道有个叫 run_code 的工具、不知道要在代码里 await tools.x()；
+		// 说明没跟着工具集收窄，受限会话就会读到指向不可用工具的指令。
+		const tool = defaultTools.find('run_code')!;
+		const prompt = buildSystemPrompt({
+			workspaceRoot: '/tmp/ws',
+			sandbox: 'off',
+			skills: [],
+			toolPrompts: [{ tool: 'run_code', text: tool.prompt ?? tool.description }],
+		});
+		assert.ok(prompt.includes('tools.<name>'), '要讲清调用约定');
+		assert.ok(prompt.includes('text('), '要讲清输出怎么写');
+
+		const restricted = buildSystemPrompt({
+			workspaceRoot: '/tmp/ws',
+			sandbox: 'off',
+			skills: [],
+			allowedTools: new Set(['read']),
+			toolPrompts: [{ tool: 'run_code', text: tool.prompt ?? tool.description }],
+		});
+		assert.ok(!restricted.includes('tools.<name>'), '工具不可用时，那段说明必须整段消失');
+	});
+
+	it('declares code as required in its schema', () => {
+		// schema 是接口那一侧的契约：没有 required，模型可以发一次空调用，白跑一个来回。
+		const schema = defaultTools.find('run_code')!.schema as { required?: string[]; properties?: Record<string, unknown> };
+		assert.deepEqual(schema.required, ['code']);
+		assert.ok(schema.properties?.code, 'code 要有说明，模型靠它知道这里写的是什么');
 	});
 });

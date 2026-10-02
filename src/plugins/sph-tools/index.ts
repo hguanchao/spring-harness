@@ -39,7 +39,7 @@ export const tools: ToolSpec[] = [
   tagged(webSearchTool, { concurrencySafe: true, explore: true, planSafe: true }),
   tagged(webFetchTool, { concurrencySafe: true, explore: true, planSafe: true }),
   // 代码里批量调工具：中间结果不进上下文。标志见 run-code.ts（独占、可探索、计划模式不放行）。
-  ...(runCodeEnabled() ? [createRunCodeTool()] : []),
+  ...(runCodeEnabled(process.env) ? [createRunCodeTool()] : []),
 ];
 
 /**
@@ -48,9 +48,12 @@ export const tools: ToolSpec[] = [
  * 默认开：它是「工具一多上下文就爆」这个问题的解，而不是可选品味。但它是唯一一个
  * **会起子进程**的读工具，也是唯一一个模型写代码的地方——把它整个关掉（`SPH_RUN_CODE=off`）
  * 是排查「是不是它引起的」时的第一手段，比逐个排查调用点快得多。
+ *
+ * 参数收环境而不是直接读 `process.env`：注册表在模块加载时就定型，一个不能单独调用的
+ * 判断等于一条没人验过的开关——而关不掉的开关比没有开关更坏。
  */
-function runCodeEnabled(): boolean {
-  return (process.env.SPH_RUN_CODE ?? '').toLowerCase() !== 'off';
+export function runCodeEnabled(env: Record<string, string | undefined>): boolean {
+  return (env.SPH_RUN_CODE ?? '').toLowerCase() !== 'off';
 }
 
 function createDefaultToolRegistry(): ToolRegistry {
